@@ -1,0 +1,50 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Pull code and install dependencies on VM
+        env:
+          GCP_INSTANCE_NAME: ${{ secrets.GCP_INSTANCE_NAME }}
+          GCP_ZONE: ${{ secrets.GCP_ZONE }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          gcloud compute ssh "$GCP_INSTANCE_NAME" \
+            --zone="$GCP_ZONE" \
+            --project="$GCP_PROJECT_ID" \
+            --command="cd /opt/fansboda-finance && git pull origin main && PIPENV_VENV_IN_PROJECT=1 pipenv install --deploy"
+
+      - name: Write .env on VM
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GCP_INSTANCE_NAME: ${{ secrets.GCP_INSTANCE_NAME }}
+          GCP_ZONE: ${{ secrets.GCP_ZONE }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          set +x
+          printf 'DATABASE_URL=%s\n' "$DATABASE_URL" > .env.tmp
+          gcloud compute scp .env.tmp "$GCP_INSTANCE_NAME:/opt/fansboda-finance/.env" \
+            --zone="$GCP_ZONE" \
+            --project="$GCP_PROJECT_ID"
+          rm -f .env.tmp
+          gcloud compute ssh "$GCP_INSTANCE_NAME" \
+            --zone="$GCP_ZONE" \
+            --project="$GCP_PROJECT_ID" \
+            --command="chmod 600 /opt/fansboda-finance/.env"

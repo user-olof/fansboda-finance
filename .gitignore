@@ -1,7 +1,6 @@
-# Environment and secrets
+# Environment and secrets (local only — never commit)
 .env
 .env.*
-!.env.example
 
 # Python
 __pycache__/
@@ -46,3 +45,5 @@ Thumbs.db
 *~
 
 .vscode/
+README.md
+tickers.txt
