@@ -65,7 +65,7 @@ Production deploy is **not** part of this RFC's implementation, but operations d
 
 1. Neon: run `schema.sql`; verify with `scripts/verify_schema.sql`.
 2. Existing databases: apply relevant `migrate_*.sql` ([MIGRATIONS.md](../MIGRATIONS.md)).
-3. GCP: create **one** `e2-micro`; attach instance service account (no JSON key on disk).
+3. GCP: attach instance service account (no JSON key on disk) existing VM.
 4. VM: `sudo bash scripts/bootstrap-vm.sh`.
 5. GitHub: secrets + WIF + `production` environment (RFC-009).
 6. Push to `main` — deploy writes `.env`.
