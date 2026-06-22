@@ -15,6 +15,7 @@ permissions:
 env:
   INSTANCE_NAME: data-fetcher-dev
   APP_DIR: /opt/fansboda-finance
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   spin-up-vm:
