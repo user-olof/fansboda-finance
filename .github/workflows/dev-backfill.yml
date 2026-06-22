@@ -20,7 +20,7 @@ env:
 jobs:
   spin-up-vm:
     runs-on: ubuntu-latest
-    environment: development
+    environment: DEV
 
     steps:
       - uses: actions/checkout@v4
