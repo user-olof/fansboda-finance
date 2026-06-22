@@ -1,0 +1,201 @@
+name: Dev Backfill
+
+on:
+  push:
+    branches: [dev]
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  INSTANCE_NAME: data-fetcher-dev
+  APP_DIR: /opt/fansboda-finance
+
+jobs:
+  spin-up-vm:
+    runs-on: ubuntu-latest
+    environment: development
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Remove stale dev VM if present
+        env:
+          GCP_ZONE: ${{ secrets.GCP_ZONE }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          gcloud compute instances delete "$INSTANCE_NAME" \
+            --zone="$GCP_ZONE" \
+            --project="$GCP_PROJECT_ID" \
+            --quiet 2>/dev/null || true
+
+      - name: Create ephemeral dev VM
+        env:
+          GCP_ZONE: ${{ secrets.GCP_ZONE }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          gcloud compute instances create "$INSTANCE_NAME" \
+            --zone="$GCP_ZONE" \
+            --project="$GCP_PROJECT_ID" \
+            --machine-type=e2-micro \
+            --image-family=debian-12 \
+            --image-project=debian-cloud \
+            --metadata=repo-url="https://github.com/${{ github.repository }}.git",branch=dev \
+            --metadata-from-file=startup-script=scripts/bootstrap-dev-vm.sh \
+            --tags=dev-backfill
+
+      - name: Wait for bootstrap to finish
+        env:
+          GCP_ZONE: ${{ secrets.GCP_ZONE }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          for attempt in $(seq 1 36); do
+            if gcloud compute ssh "$INSTANCE_NAME" \
+              --zone="$GCP_ZONE" \
+              --project="$GCP_PROJECT_ID" \
+              --command="test -d $APP_DIR/.git" 2>/dev/null; then
+              echo "Bootstrap ready after attempt $attempt"
+              exit 0
+            fi
+            echo "Waiting for bootstrap (attempt $attempt/36)..."
+            sleep 10
+          done
+          echo "Timed out waiting for dev VM bootstrap" >&2
+          exit 1
+
+  deploy:
+    needs: spin-up-vm
+    runs-on: ubuntu-latest
+    environment: development
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Pull latest dev branch and install dependencies
+        env:
+          GCP_ZONE: ${{ secrets.GCP_ZONE }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          gcloud compute ssh "$INSTANCE_NAME" \
+            --zone="$GCP_ZONE" \
+            --project="$GCP_PROJECT_ID" \
+            --command="sudo -u fansboda bash -c 'cd $APP_DIR && git fetch origin dev && git checkout dev && git pull origin dev && PIPENV_VENV_IN_PROJECT=1 pipenv install --deploy'"
+
+      - name: Write .env on dev VM
+        env:
+          DATABASE_URL_DEV: ${{ secrets.DATABASE_URL_DEV }}
+          GCP_ZONE: ${{ secrets.GCP_ZONE }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          set +x
+          printf 'DATABASE_URL=%s\nAPP_ENV=dev\n' "$DATABASE_URL_DEV" > .env.tmp
+          gcloud compute scp .env.tmp "$INSTANCE_NAME:$APP_DIR/.env" \
+            --zone="$GCP_ZONE" \
+            --project="$GCP_PROJECT_ID"
+          rm -f .env.tmp
+          gcloud compute ssh "$INSTANCE_NAME" \
+            --zone="$GCP_ZONE" \
+            --project="$GCP_PROJECT_ID" \
+            --command="sudo chown fansboda:fansboda $APP_DIR/.env && sudo chmod 600 $APP_DIR/.env"
+
+  collect-data:
+    needs: deploy
+    runs-on: ubuntu-latest
+    environment: development
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Seed tickers and run backfill
+        env:
+          GCP_ZONE: ${{ secrets.GCP_ZONE }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          gcloud compute ssh "$INSTANCE_NAME" \
+            --zone="$GCP_ZONE" \
+            --project="$GCP_PROJECT_ID" \
+            --command="sudo -u fansboda bash -c 'cd $APP_DIR && set -a && . ./.env && set +a && PIPENV_VENV_IN_PROJECT=1 pipenv run python seed_tickers.py && PIPENV_VENV_IN_PROJECT=1 pipenv run python backfill_sma.py'" \
+            2>&1 | tee collect-data.log
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: collect-data-log
+          path: collect-data.log
+
+  verify:
+    needs: collect-data
+    runs-on: ubuntu-latest
+    environment: development
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: collect-data-log
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install psycopg2-binary
+
+      - name: Verify backfill log and dev database
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_DEV }}
+        run: python scripts/verify_dev_backfill.py collect-data.log
+
+  delete-vm:
+    needs: [spin-up-vm, deploy, collect-data, verify]
+    if: always() && needs.spin-up-vm.result != 'skipped'
+    runs-on: ubuntu-latest
+    environment: development
+
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Delete ephemeral dev VM
+        env:
+          GCP_ZONE: ${{ secrets.GCP_ZONE }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          gcloud compute instances delete "$INSTANCE_NAME" \
+            --zone="$GCP_ZONE" \
+            --project="$GCP_PROJECT_ID" \
+            --quiet || true

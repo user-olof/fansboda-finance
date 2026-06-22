@@ -6,18 +6,17 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
+from db.metrics import filter_stale_tickers, insert_metrics
+from db.tickers import load_tickers_from_db
 from fetch_sma import (
-    MetricRow,
-    TickerEntry,
     chunked,
     compute_smas,
-    filter_stale_tickers,
     load_tickers,
-    load_tickers_from_db,
     metric_row_from_history,
     metric_rows_from_batch,
     trading_date_from_index,
 )
+from models import MetricRow, TickerEntry
 
 
 def test_load_tickers_skips_comments_and_blanks(tmp_path: Path) -> None:
@@ -49,7 +48,7 @@ def test_load_tickers_from_db() -> None:
     mock_conn.__enter__.return_value = mock_conn
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
-    with patch("fetch_sma.psycopg2.connect", return_value=mock_conn):
+    with patch("db.tickers.psycopg2.connect", return_value=mock_conn):
         entries = load_tickers_from_db("postgresql://example")
 
     assert entries == [
@@ -66,7 +65,7 @@ def test_load_tickers_from_db_raises_when_empty() -> None:
     mock_conn.__enter__.return_value = mock_conn
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
-    with patch("fetch_sma.psycopg2.connect", return_value=mock_conn):
+    with patch("db.tickers.psycopg2.connect", return_value=mock_conn):
         with pytest.raises(ValueError, match="No tickers found in tickers table"):
             load_tickers_from_db("postgresql://example")
 
@@ -167,7 +166,7 @@ def test_filter_stale_tickers_skips_fresh() -> None:
     mock_conn.__enter__.return_value = mock_conn
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
-    with patch("fetch_sma.psycopg2.connect", return_value=mock_conn):
+    with patch("db.metrics.psycopg2.connect", return_value=mock_conn):
         stale, skipped, max_date = filter_stale_tickers(
             "postgresql://example",
             ["AAA.ST", "BBB.ST", "CCC.ST"],
@@ -187,7 +186,7 @@ def test_filter_stale_tickers_returns_all_when_db_empty() -> None:
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
     tickers = ["AAA.ST", "BBB.ST"]
-    with patch("fetch_sma.psycopg2.connect", return_value=mock_conn):
+    with patch("db.metrics.psycopg2.connect", return_value=mock_conn):
         stale, skipped, max_date = filter_stale_tickers(
             "postgresql://example",
             tickers,
@@ -196,3 +195,32 @@ def test_filter_stale_tickers_returns_all_when_db_empty() -> None:
     assert stale == tickers
     assert skipped == 0
     assert max_date is None
+
+
+def test_insert_metrics_executes_values() -> None:
+    mock_cursor = MagicMock()
+    mock_cursor.rowcount = 1
+    mock_conn = MagicMock()
+    mock_conn.__enter__.return_value = mock_conn
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    rows = [
+        MetricRow(
+            ticker="AAA.ST",
+            name="Alpha",
+            trading_date=date(2026, 6, 6),
+            sma_50=Decimal("1"),
+            sma_200=Decimal("2"),
+            current_price=Decimal("3"),
+        )
+    ]
+
+    with patch("db.metrics.psycopg2.connect", return_value=mock_conn):
+        with patch("db.metrics.execute_values") as mock_execute:
+            inserted = insert_metrics("postgresql://example", rows)
+
+    mock_execute.assert_called_once()
+    mock_conn.commit.assert_called_once()
+    assert inserted == 1
+    sql = mock_execute.call_args[0][1]
+    assert "ON CONFLICT (ticker, trading_date) DO NOTHING" in sql

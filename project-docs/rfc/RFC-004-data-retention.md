@@ -1,0 +1,67 @@
+# RFC-004: Rolling Data Retention
+
+| Field | Value |
+|-------|-------|
+| **Priority** | P1 |
+| **Status** | Implemented |
+| **Depends on** | RFC-003 |
+| **PRD** | FR-7 |
+| **Feature** | [Data retention](../FEATURES.md#data-retention) |
+
+## Summary
+
+After each weekly `fetch_sma.py` run, delete `metrics` rows where `trading_date` is older than the configured retention window (default 365 days).
+
+## Requirements
+
+| ID | Requirement |
+|----|-------------|
+| FR-7 | Purge rows with `trading_date` older than one year after inserts |
+| — | Purge runs even when all tickers are already fresh (nothing to fetch) |
+| — | Purge count included in job summary logs |
+| — | Parameterized SQL in `db/metrics.py` |
+| — | Cutoff uses UTC date |
+
+## Implementation
+
+### Files
+
+| File | Role |
+|------|------|
+| `db/metrics.py` | `retention_cutoff`, `purge_stale_metrics`, `DELETE_STALE_SQL` |
+| `fetch_sma.py` | Calls purge at end of every successful `main()` path |
+| `config.py` | `metrics_retention_days` (default 365) |
+| `tests/test_retention.py` | Cutoff math, SQL, purge DB call, `main()` integration |
+
+### Key functions
+
+```python
+def retention_cutoff(retention_days: int, *, today: date | None = None) -> date
+def purge_stale_metrics(database_url: str, retention_days: int) -> int
+```
+
+SQL:
+
+```sql
+DELETE FROM metrics WHERE trading_date < %s
+```
+
+Index `idx_metrics_trading_date` (RFC-001) supports efficient deletes.
+
+### Configuration
+
+| Setting | Default | Env override |
+|---------|---------|--------------|
+| `metrics_retention_days` | 365 | `METRICS_RETENTION_DAYS` |
+
+## Acceptance criteria
+
+- [x] `purge_stale_metrics` deletes rows with `trading_date` &lt; today − retention_days (UTC)
+- [x] Called at end of every `fetch_sma.py` run (including all-fresh path)
+- [x] Purge count logged in summary
+- [x] Parameterized SQL in `db/metrics.py`
+- [x] Unit tests in `tests/test_retention.py`
+
+## Open questions
+
+- None.

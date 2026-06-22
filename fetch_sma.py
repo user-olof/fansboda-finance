@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
-"""Fetch daily SMA metrics from yfinance and upsert into Neon Postgres."""
+"""Fetch weekly SMA metrics from yfinance and append to Neon Postgres."""
 
 from __future__ import annotations
 
 import logging
-import os
 import sys
 import time
-from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
-import psycopg2
 import yfinance as yf
-from dotenv import load_dotenv
-from psycopg2.extras import execute_values
+
+from config import (
+    DEFAULT_YF_MAX_RETRIES,
+    DEFAULT_YF_RETRY_BASE_SECONDS,
+    get_config,
+)
+from db.metrics import filter_stale_tickers, insert_metrics, purge_stale_metrics
+from db.tickers import load_tickers_from_db
+from models import MetricRow, TickerEntry
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,67 +28,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DEFAULT_TICKERS_FILE = Path(__file__).parent / "tickers.txt"
 HISTORY_DAYS = 300
 SMA_50_WINDOW = 50
 SMA_200_WINDOW = 200
-DEFAULT_YF_BATCH_SIZE = 40
-DEFAULT_YF_BATCH_DELAY_SECONDS = 2.0
-DEFAULT_YF_MAX_RETRIES = 3
-DEFAULT_YF_RETRY_BASE_SECONDS = 5.0
-
-UPSERT_SQL = """
-INSERT INTO metrics (ticker, name, trading_date, updated_at, sma_50, sma_200, current_price)
-VALUES %s
-ON CONFLICT (ticker) DO UPDATE SET
-    name = EXCLUDED.name,
-    trading_date = EXCLUDED.trading_date,
-    sma_50 = EXCLUDED.sma_50,
-    sma_200 = EXCLUDED.sma_200,
-    current_price = EXCLUDED.current_price,
-    updated_at = NOW();
-"""
-
-FRESH_TICKERS_SQL = """
-SELECT ticker
-FROM metrics
-WHERE ticker = ANY(%s)
-  AND trading_date = (SELECT MAX(trading_date) FROM metrics)
-"""
-
-LOAD_TICKERS_SQL = """
-SELECT symbol, name FROM tickers ORDER BY symbol
-"""
-
-
-@dataclass(frozen=True)
-class TickerEntry:
-    symbol: str
-    name: str | None
-
-
-@dataclass(frozen=True)
-class MetricRow:
-    ticker: str
-    name: str | None
-    trading_date: date
-    sma_50: Decimal | None
-    sma_200: Decimal | None
-    current_price: Decimal | None
-
-
-def _config_int(name: str, default: int) -> int:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return int(raw)
-
-
-def _config_float(name: str, default: float) -> float:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return float(raw)
 
 
 def load_tickers(path: Path) -> list[str]:
@@ -103,19 +49,6 @@ def load_tickers(path: Path) -> list[str]:
         raise ValueError(f"No tickers found in {path}")
 
     return tickers
-
-
-def load_tickers_from_db(database_url: str) -> list[TickerEntry]:
-    """Load the watchlist from the tickers table."""
-    with psycopg2.connect(database_url) as conn:
-        with conn.cursor() as cur:
-            cur.execute(LOAD_TICKERS_SQL)
-            rows = cur.fetchall()
-
-    if not rows:
-        raise ValueError("No tickers found in tickers table")
-
-    return [TickerEntry(symbol=row[0], name=row[1]) for row in rows]
 
 
 def chunked(items: list[str], size: int) -> list[list[str]]:
@@ -272,67 +205,29 @@ def metric_rows_from_batch(
     return rows
 
 
-def filter_stale_tickers(
-    database_url: str, tickers: list[str]
-) -> tuple[list[str], int, date | None]:
-    """Return tickers that need fetching; skip those already at max trading_date."""
-    with psycopg2.connect(database_url) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT MAX(trading_date) FROM metrics")
-            max_row = cur.fetchone()
-
-            if not max_row or max_row[0] is None:
-                return tickers, 0, None
-
-            max_date = max_row[0]
-            cur.execute(FRESH_TICKERS_SQL, (tickers,))
-            fresh = {row[0] for row in cur.fetchall()}
-
-    stale = [ticker for ticker in tickers if ticker not in fresh]
-    skipped = len(tickers) - len(stale)
-    return stale, skipped, max_date
-
-
-def upsert_metrics(database_url: str, rows: list[MetricRow]) -> None:
-    """Upsert metric rows into the metrics table."""
-    if not rows:
-        logger.warning("No rows to upsert")
-        return
-
-    now = datetime.now(timezone.utc)
-    values = [
-        (
-            row.ticker,
-            row.name,
-            row.trading_date,
-            now,
-            row.sma_50,
-            row.sma_200,
-            row.current_price,
-        )
-        for row in rows
-    ]
-
-    with psycopg2.connect(database_url) as conn:
-        with conn.cursor() as cur:
-            execute_values(cur, UPSERT_SQL, values)
-        conn.commit()
-
-    logger.info("Upserted %d row(s)", len(rows))
+def _run_retention_purge(database_url: str, retention_days: int) -> int:
+    purged = purge_stale_metrics(database_url, retention_days)
+    logger.info(
+        "Retention purge: deleted %d row(s) older than %d days",
+        purged,
+        retention_days,
+    )
+    return purged
 
 
 def main() -> int:
-    load_dotenv()
-
-    database_url = os.environ.get("DATABASE_URL")
-    if not database_url:
-        logger.error("DATABASE_URL is not set")
+    try:
+        config = get_config()
+    except ValueError as exc:
+        logger.error("%s", exc)
         return 1
 
-    batch_size = _config_int("YF_BATCH_SIZE", DEFAULT_YF_BATCH_SIZE)
-    batch_delay = _config_float("YF_BATCH_DELAY_SECONDS", DEFAULT_YF_BATCH_DELAY_SECONDS)
-    max_retries = _config_int("YF_MAX_RETRIES", DEFAULT_YF_MAX_RETRIES)
-    retry_base = _config_float("YF_RETRY_BASE_SECONDS", DEFAULT_YF_RETRY_BASE_SECONDS)
+    database_url = config.database_url
+    batch_size = config.yf_batch_size
+    batch_delay = config.yf_batch_delay_seconds
+    max_retries = config.yf_max_retries
+    retry_base = config.yf_retry_base_seconds
+    retention_days = config.metrics_retention_days
 
     try:
         watchlist = load_tickers_from_db(database_url)
@@ -366,11 +261,23 @@ def main() -> int:
             "All %d tickers already up to date, nothing to fetch",
             len(all_tickers),
         )
+        try:
+            purged = _run_retention_purge(database_url, retention_days)
+        except Exception:
+            logger.exception("Retention purge failed")
+            return 1
+        logger.info(
+            "Summary: total=%d skipped=%d fetched=0 inserted=0 purged=%d failed_batches=0",
+            len(all_tickers),
+            skipped_count,
+            purged,
+        )
         return 0
 
     start = datetime.now(timezone.utc).date() - timedelta(days=HISTORY_DAYS)
     batches = chunked(stale_tickers, batch_size)
-    rows: list[MetricRow] = []
+    fetched_count = 0
+    inserted_count = 0
     failed_batches = 0
 
     for i, batch in enumerate(batches):
@@ -388,7 +295,7 @@ def main() -> int:
                 retry_base_seconds=retry_base,
             )
             batch_rows = metric_rows_from_batch(data, batch, names)
-            rows.extend(batch_rows)
+            fetched_count += len(batch_rows)
             for row in batch_rows:
                 logger.info(
                     "Fetched %s (%s): trading_date=%s current_price=%s "
@@ -400,10 +307,19 @@ def main() -> int:
                     row.sma_50,
                     row.sma_200,
                 )
+            batch_inserted = insert_metrics(database_url, batch_rows)
+            inserted_count += batch_inserted
+            logger.info(
+                "Batch %d/%d: fetched=%d inserted=%d",
+                i + 1,
+                len(batches),
+                len(batch_rows),
+                batch_inserted,
+            )
         except Exception:
             failed_batches += 1
             logger.exception(
-                "Failed to fetch batch %d/%d (%d tickers)",
+                "Failed batch %d/%d (%d tickers)",
                 i + 1,
                 len(batches),
                 len(batch),
@@ -412,23 +328,26 @@ def main() -> int:
         if i < len(batches) - 1:
             time.sleep(batch_delay)
 
+    try:
+        purged = _run_retention_purge(database_url, retention_days)
+    except Exception:
+        logger.exception("Retention purge failed")
+        return 1
+
     logger.info(
-        "Summary: total=%d skipped=%d fetched=%d failed_batches=%d http_batches=%d",
+        "Summary: total=%d skipped=%d fetched=%d inserted=%d purged=%d "
+        "failed_batches=%d http_batches=%d",
         len(all_tickers),
         skipped_count,
-        len(rows),
+        fetched_count,
+        inserted_count,
+        purged,
         failed_batches,
         len(batches),
     )
 
-    if not rows:
+    if fetched_count == 0:
         logger.error("No metrics collected")
-        return 1
-
-    try:
-        upsert_metrics(database_url, rows)
-    except Exception:
-        logger.exception("Database upsert failed")
         return 1
 
     if failed_batches:

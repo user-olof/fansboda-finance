@@ -1,0 +1,108 @@
+---
+description: fansboda-finance project conventions from the PRD
+alwaysApply: true
+---
+
+# fansboda-finance
+
+Lightweight weekly pipeline: yfinance → SMA-50/200 + close → Neon Postgres. Runs on a GCP `e2-micro` VM via cron (Thursdays 11:00 UTC). ~$0/month target.
+
+**Source of truth:** `project-docs/PRD.md` — read it when changing behavior, schema, or infra. Also see `project-docs/FEATURES.md` (feature map), `project-docs/MIGRATIONS.md` (DDL upgrades), and `project-docs/rfc/` for design detail.
+
+## Scope (do not add without explicit request)
+
+- No UI, API, auth layer, portfolio tracking, or extra indicators (EMA, RSI, MACD).
+- No intraday/real-time data; weekly Thursday job only.
+- `backfill_sma.py` is a **one-off manual** bootstrap — never cron-schedule it on production.
+- Planned but not built: metadata refresh (`RFC-010`), dashboard, gap detection — see PRD §11.
+
+## Repo layout
+
+| Path | Role |
+|------|------|
+| `fetch_sma.py`, `seed_tickers.py`, `backfill_sma.py` | Job entrypoints |
+| `config.py` | `BaseConfig`, `DevConfig`, `ProdConfig`, `get_config()` |
+| `models.py` | `TickerEntry`, `MetricRow` |
+| `db/metrics.py`, `db/tickers.py` | Parameterized SQL — no SQL in job scripts |
+| `schema.sql`, `migrate_*.sql` | DDL (commit both; see MIGRATIONS.md for upgrade order) |
+| `scripts/` | VM bootstrap, schema verify, branch protection, dev-backfill verify |
+| `tests/` | Unit tests; `pytest.ini` sets `pythonpath = .` |
+| `.github/workflows/` | `test.yml`, `deploy.yml`, `dev-backfill.yml` |
+
+Dependencies: **Pipenv only** (`Pipfile` / `Pipfile.lock`). No `requirements.txt`.
+
+## Scripts
+
+| Script | Role |
+|--------|------|
+| `fetch_sma.py` | Weekly job: load watchlist from DB, skip fresh tickers, batch-download ~300d OHLCV, compute SMAs, append metrics, purge rows older than retention |
+| `seed_tickers.py` | Load symbols from file, resolve names via yfinance, upsert `tickers` |
+| `backfill_sma.py` | One-off: ~730d history, rolling 52-week SMA windows, append to `metrics` |
+
+| Utility | Role |
+|---------|------|
+| `scripts/bootstrap-vm.sh` | Production VM: pipenv, clone to `/opt/fansboda-finance`, cron as `fansboda` |
+| `scripts/bootstrap-dev-vm.sh` | Ephemeral dev VM for CI backfill |
+| `scripts/verify_schema.sql` | Post-DDL sanity checks |
+| `scripts/verify_dev_backfill.py` | Parse backfill log + DB checks (dev CI) |
+| `scripts/configure-branch-protection.sh` | Require `test` check on `main` |
+
+Reuse shared logic (`download_batch`, `compute_smas`, `metric_row_from_history`, `MetricRow`, `chunked`, batching) from `fetch_sma.py` instead of duplicating.
+
+## Data model
+
+- **`tickers`:** `symbol` (PK), `name`, `updated_at` (default `NOW()` on insert; set on upsert)
+- **`metrics`:** `id` (PK), `ticker` (FK → `tickers.symbol` ON DELETE CASCADE), `name`, `trading_date`, `updated_at`, `sma_50`, `sma_200`, `current_price` — `NUMERIC(18, 6)` for prices
+- One row per `(ticker, trading_date)`; unique constraint `metrics_ticker_trading_date_key`
+- Append-only inserts: `ON CONFLICT (ticker, trading_date) DO NOTHING`
+- Retention: `DELETE FROM metrics WHERE trading_date < cutoff` (default 365 days) after each weekly run
+- Index: `idx_metrics_trading_date` on `metrics (trading_date)`
+- Schema changes go in `schema.sql` or `migrate_*.sql` — not ad-hoc in Python
+
+**Fresh DB:** `schema.sql` → `seed_tickers.py` → optional `backfill_sma.py`. **Legacy DB:** apply `migrate_*.sql` per `MIGRATIONS.md`.
+
+## Configuration
+
+Centralize in `config.py` with **`DevConfig`** (local; loads git-ignored `.env` via `python-dotenv`) and **`ProdConfig`** (VM; env vars only). `get_config()` selects via `APP_ENV` (`dev` default; `prod` / `production` → `ProdConfig`).
+
+Scripts read from the config object — not scattered `os.getenv` calls. Key tunables: `DATABASE_URL`, `TICKERS_FILE`, yfinance batch/retry settings, `METRICS_RETENTION_DAYS`, backfill window/batch settings (see `config.py` defaults).
+
+## Code style
+
+- Separate pure logic (parsing, SMA math, filtering) from I/O (DB, yfinance).
+- Put SQL in `db/` — always parameterized; never interpolate user/runtime data into SQL strings.
+- yfinance: batch downloads, `threads=False`, delay between batches, exponential backoff on 429/rate/timeout/connection errors. Failed batches are logged; the run continues.
+- Idempotent by design: safe to re-run weekly job and backfill.
+- Python 3.11+; `pipenv install --dev` locally, `pipenv install --deploy` on VMs/CI prod paths.
+- Add unit tests for pure logic; mock DB and yfinance in I/O tests.
+
+## Security
+
+- No credentials in the repo. `.env` is git-ignored.
+- Production `DATABASE_URL` in GitHub **`production`** environment secrets; dev backfill uses **`development`** + `DATABASE_URL_DEV`.
+- Deploy auth: GitHub OIDC JWT + Workload Identity Federation only — **no `GCP_SA_KEY` or JSON keys**.
+- VM attached service account (metadata server); cron runs as Linux user **`fansboda`**, not root.
+
+## CI/CD & operations
+
+| Workflow | Trigger | Action |
+|----------|---------|--------|
+| `test.yml` | Push / PR to `main` | `pipenv install --dev`, `pipenv run pytest` |
+| `deploy.yml` | Push to `main` | SSH to production VM: `git pull`, `pipenv install --deploy`, write `.env` (`APP_ENV=production`) |
+| `dev-backfill.yml` | Push to `dev` | Ephemeral `data-fetcher-dev` VM: bootstrap, `seed_tickers.py` + `backfill_sma.py`, verify, tear down |
+
+- Production VM path: `/opt/fansboda-finance`; logs: `/var/log/fansboda-finance/fetch_sma.log`.
+- Cron (Thu 11:00 UTC): `pipenv run python fetch_sma.py` — bootstrap sources `.env` and sets `PIPENV_VENV_IN_PROJECT=1`.
+- After deploy, `.env` must remain readable by `fansboda` (`chown fansboda:fansboda`, mode `600`).
+
+## Local / git-ignored files
+
+Do not commit: `.env`, `.venv/`, `tickers.txt`, `all-tickers.txt`, `small-tickers.txt`, `README.md` (local notes). Use a local ticker file path via `TICKERS_FILE` or pass a path to `seed_tickers.py`.
+
+## When implementing changes
+
+1. Match existing naming, types, and patterns in surrounding code.
+2. Keep diffs minimal — no unrelated refactors.
+3. Do not commit `.env` or secrets.
+4. Commit `schema.sql`, `migrate_*.sql`, `Pipfile`, and `Pipfile.lock` together when deps or DDL change.
+5. Out-of-scope items belong in PRD §11 — ask before building.

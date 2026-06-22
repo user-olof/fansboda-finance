@@ -2,9 +2,9 @@ name: Test
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main]
   pull_request:
-    branches: [main, dev]
+    branches: [main]
 
 jobs:
   test:
@@ -25,6 +25,3 @@ jobs:
 
       - name: Run tests
         run: pipenv run pytest
-
-      - name: Syntax check
-        run: pipenv run python -m compileall fetch_sma.py
