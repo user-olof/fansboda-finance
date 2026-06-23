@@ -48,6 +48,7 @@ jobs:
         env:
           GCP_ZONE: ${{ secrets.GCP_ZONE }}
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_DEPLOY_SERVICE_ACCOUNT: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
         run: |
           gcloud compute instances create "$INSTANCE_NAME" \
             --zone="$GCP_ZONE" \
@@ -57,6 +58,8 @@ jobs:
             --image-project=debian-cloud \
             --metadata=repo-url="https://github.com/${{ github.repository }}.git",branch=dev \
             --metadata-from-file=startup-script=scripts/bootstrap-dev-vm.sh \
+            --service-account="$GCP_DEPLOY_SERVICE_ACCOUNT" \
+            --scopes=https://www.googleapis.com/auth/cloud-platform
             --tags=dev-backfill
 
       - name: Wait for bootstrap to finish
