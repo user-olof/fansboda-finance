@@ -65,10 +65,11 @@ jobs:
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
         run: |
           for attempt in $(seq 1 36); do
-            if gcloud compute ssh --tunnel-through-iap "$INSTANCE_NAME" \
+            if gcloud compute ssh "$INSTANCE_NAME" \
               --zone="$GCP_ZONE" \
               --project="$GCP_PROJECT_ID" \
-              --command="test -d $APP_DIR/.git" 2>/dev/null; then
+              --command="test -d $APP_DIR/.git"  \
+              --tunnel-through-iap; then
               echo "Bootstrap ready after attempt $attempt"
               exit 0
             fi
