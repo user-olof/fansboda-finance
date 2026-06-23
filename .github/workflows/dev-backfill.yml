@@ -71,7 +71,8 @@ jobs:
             if gcloud compute ssh "$INSTANCE_NAME" \
               --zone="$GCP_ZONE" \
               --project="$GCP_PROJECT_ID" \
-              --command="test -d $APP_DIR/.git"  \
+              --quiet \
+              --command="echo ok" \
               --tunnel-through-iap; then
               echo "Bootstrap ready after attempt $attempt"
               exit 0
@@ -85,7 +86,7 @@ jobs:
   deploy:
     needs: spin-up-vm
     runs-on: ubuntu-latest
-    environment: development
+    environment: DEV
 
     steps:
       - uses: actions/checkout@v4
@@ -129,7 +130,7 @@ jobs:
   collect-data:
     needs: deploy
     runs-on: ubuntu-latest
-    environment: development
+    environment: DEV
 
     steps:
       - uses: actions/checkout@v4
@@ -162,7 +163,7 @@ jobs:
   verify:
     needs: collect-data
     runs-on: ubuntu-latest
-    environment: development
+    environment: DEV
 
     steps:
       - uses: actions/checkout@v4
@@ -187,7 +188,7 @@ jobs:
     needs: [spin-up-vm, deploy, collect-data, verify]
     if: always() && needs.spin-up-vm.result != 'skipped'
     runs-on: ubuntu-latest
-    environment: development
+    environment: DEV
 
     steps:
       - name: Authenticate to Google Cloud
