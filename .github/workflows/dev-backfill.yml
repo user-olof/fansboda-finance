@@ -109,6 +109,7 @@ jobs:
             --zone="$GCP_ZONE" \
             --project="$GCP_PROJECT_ID" \
             --command="sudo -u fansboda bash -c 'cd $APP_DIR && git fetch origin dev && git checkout dev && git pull origin dev && PIPENV_VENV_IN_PROJECT=1 pipenv install --deploy'"
+            --tunnel-through-iap
 
       - name: Write .env on dev VM
         env:
@@ -126,6 +127,7 @@ jobs:
             --zone="$GCP_ZONE" \
             --project="$GCP_PROJECT_ID" \
             --command="sudo chown fansboda:fansboda $APP_DIR/.env && sudo chmod 600 $APP_DIR/.env"
+            --tunnel-through-iap
 
   collect-data:
     needs: deploy
