@@ -59,7 +59,7 @@ jobs:
             --metadata=repo-url="https://github.com/${{ github.repository }}.git",branch=dev \
             --metadata-from-file=startup-script=scripts/bootstrap-dev-vm.sh \
             --service-account="$GCP_DEPLOY_SERVICE_ACCOUNT" \
-            --scopes=https://www.googleapis.com/auth/cloud-platform
+            --scopes=https://www.googleapis.com/auth/cloud-platform \
             --tags=dev-backfill
 
       - name: Wait for bootstrap to finish
