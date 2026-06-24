@@ -5,12 +5,12 @@
 | **Priority** | P2 |
 | **Status** | Implemented |
 | **Depends on** | RFC-003 (tests) |
-| **PRD** | §8 |
-| **Feature** | [CI/CD](../FEATURES.md#cicd) |
+| **PRD** | §8.2 |
+| **Feature** | [CI/CD — production](../FEATURES.md#cicd--production-prd-82-implemented) |
 
 ## Summary
 
-GitHub Actions: run `pytest` on push/PR to `main`; deploy to Production VM on push to `main`. Branch protection requires tests to pass.
+GitHub Actions: run `pytest` on push/PR to `main`; deploy to Production VM on push to `main`. Branch protection requires tests to pass. Dev backfill (PRD §8.1) is [RFC-011](./RFC-011-dev-backfill-ci.md), not this RFC.
 
 ## Requirements
 

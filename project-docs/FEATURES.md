@@ -13,7 +13,7 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 | Centralized configuration | `DevConfig` / `ProdConfig` in `config.py`; selected via `APP_ENV` |
 | Zero-cost ops | **One** GCP `e2-micro` (Always Free) + Neon Postgres free tier |
 | CI/CD — production | `pytest` on PR to `main`; deploy to long-lived Production VM on push to `main` |
-| CI/CD — dev backfill | Ephemeral `data-fetcher-dev` VM on push to `dev` (PRD §8.1, [RFC-011](./rfc/RFC-011-dev-backfill-ci.md)) |
+| CI/CD — dev backfill | Ephemeral `data-fetcher-dev` on push to `dev`; IAP SSH firewall + seed/backfill/verify pipeline (PRD §8.1, [RFC-011](./rfc/RFC-011-dev-backfill-ci.md)) |
 
 ---
 
@@ -87,7 +87,7 @@ Manual / ad-hoc script for initial and ongoing watchlist setup (FR-9 – FR-11).
 
 ### Historical backfill (`backfill_sma.py`)
 
-Bootstrap script for SMA history — **not** part of the weekly cron (FR-13 – FR-17). Used manually or via planned dev CI (§8.1).
+Bootstrap script for SMA history — **not** part of the weekly cron (FR-13 – FR-17). Used manually or via dev CI on push to `dev` (§8.1).
 
 | Capability | Detail |
 |------------|--------|
@@ -175,17 +175,17 @@ Bootstrap installs an enhanced line that also sources `.env` and sets `PIPENV_VE
 
 ### CI/CD — dev backfill (PRD §8.1)
 
-On push to **`dev`**, `.github/workflows/dev-backfill.yml` runs:
+On push to **`dev`**, `.github/workflows/dev-backfill.yml` runs a sequential pipeline:
 
-| Step | Action |
-|------|--------|
-| Spin up VM | Create ephemeral `data-fetcher-dev` in GCP |
-| Deploy | Install deps on dev VM; write `.env` with Neon **dev branch** URL |
-| Data collection | Run `seed_tickers.py` and `backfill_sma.py`; store results in dev database |
-| Verification | Parse job log and run DB sanity checks (`scripts/verify_dev_backfill.py`) |
-| Delete VM | Tear down `data-fetcher-dev` (always, including on failure) |
+| Step | Runs when | Action |
+|------|-----------|--------|
+| Spin up VM | Push to `dev` | Create ephemeral `data-fetcher-dev` in GCP (tag `dev-backfill`). Firewall must allow GitHub Actions SSH access — IAP ingress `tcp:22` from `35.235.240.0/20` scoped to that tag. Wait until SSH via `--tunnel-through-iap` succeeds. |
+| Deploy | Spin up VM succeeds | SSH to dev VM; `git pull` dev branch, `pipenv install --deploy`; write `.env` with Neon **dev branch** URL |
+| Data collection | Deploy succeeds | Run `seed_tickers.py` and `backfill_sma.py`; store results in the dev database |
+| Verification | Data collection completes without error | Analyze log for missing data, failed downloads, etc.; run DB sanity checks (`scripts/verify_dev_backfill.py`) and print results |
+| Delete VM | Always after pipeline jobs finish | Tear down `data-fetcher-dev` (including on failure) |
 
-Uses GitHub **`development`** environment and `DATABASE_URL_DEV` secret. Ephemeral VM avoids paying for two 24/7 e2-micro instances. See [RFC-011](./rfc/RFC-011-dev-backfill-ci.md).
+Uses GitHub **`DEV`** environment and `DATABASE_URL_DEV` secret. Deploy SA needs `roles/iap.tunnelResourceAccessor` (and `compute.osLogin` when OS Login is enabled) for IAP SSH. Ephemeral VM avoids paying for two 24/7 e2-micro instances. See [RFC-011](./rfc/RFC-011-dev-backfill-ci.md).
 
 ### Production first-time setup
 
@@ -218,7 +218,7 @@ Uses GitHub **`development`** environment and `DATABASE_URL_DEV` secret. Ephemer
 - **SQL:** Parameterized queries in `db/` modules; job scripts contain no SQL strings.
 - Single-owner system — infra-level access only (PRD §2).
 
-Deploy SA IAM roles: `compute.instanceAdmin.v1`, `iam.serviceAccountUser`, `compute.osLogin` (see PRD §8 for details).
+Deploy SA IAM roles: `compute.instanceAdmin.v1`, `iam.serviceAccountUser`, `compute.osLogin`; `iap.tunnelResourceAccessor` when using IAP SSH (dev backfill). See PRD §8 for details.
 
 ---
 

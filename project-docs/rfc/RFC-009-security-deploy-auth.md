@@ -47,9 +47,9 @@ No credentials in repo. Production secrets in GitHub. Deploy authenticates via G
 | `roles/compute.instanceAdmin.v1` | SSH/SCP metadata |
 | `roles/iam.serviceAccountUser` | On VM's attached SA |
 | `roles/compute.osLogin` | OS Login (`osAdminLogin` if sudo needed) |
-| `roles/iap.tunnelResourceAccessor` | Only if using IAP tunnel |
+| `roles/iap.tunnelResourceAccessor` | **Required** for dev backfill CI (RFC-011, `--tunnel-through-iap`); optional for production deploy if using public IP SSH |
 
-4. Bind WIF pool to deploy SA (`roles/iam.workloadIdentityUser`), restricted to this repo / `main` / `production` environment
+4. Bind WIF pool to deploy SA (`roles/iam.workloadIdentityUser`), restricted to this repo; bind `main`/`production` for prod deploy and `dev`/`DEV` for dev backfill (RFC-011)
 
 ### `deploy.yml` auth
 

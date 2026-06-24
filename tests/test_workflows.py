@@ -6,6 +6,31 @@ WORKFLOWS = Path(__file__).resolve().parents[1] / ".github" / "workflows"
 TEST_YML = WORKFLOWS / "test.yml"
 DEPLOY_YML = WORKFLOWS / "deploy.yml"
 DEV_BACKFILL_YML = WORKFLOWS / "dev-backfill.yml"
+WIF_AUTH_ACTION = "google-github-actions/auth@v2"
+
+
+def _workflow_files() -> list[Path]:
+    return sorted(WORKFLOWS.glob("*.yml"))
+
+
+def test_all_gcp_workflows_use_workload_identity_federation() -> None:
+    """RFC-009: GCP workflows authenticate via WIF — never JSON keys."""
+    for path in _workflow_files():
+        content = path.read_text(encoding="utf-8")
+        if WIF_AUTH_ACTION not in content:
+            continue
+        assert "workload_identity_provider:" in content, path.name
+        assert "GCP_WORKLOAD_IDENTITY_PROVIDER" in content, path.name
+        assert "GCP_DEPLOY_SERVICE_ACCOUNT" in content, path.name
+        assert "credentials_json" not in content, path.name
+        assert "GCP_SA_KEY" not in content, path.name
+
+
+def test_gcp_workflows_request_oidc_token() -> None:
+    """RFC-009: WIF requires id-token: write at workflow level."""
+    for path in (DEPLOY_YML, DEV_BACKFILL_YML):
+        content = path.read_text(encoding="utf-8")
+        assert "id-token: write" in content, path.name
 
 
 def test_test_workflow_runs_on_main_only() -> None:
@@ -28,6 +53,7 @@ def test_deploy_workflow_runs_on_main_push_only() -> None:
 
 def test_deploy_workflow_uses_workload_identity_federation() -> None:
     content = DEPLOY_YML.read_text(encoding="utf-8")
+    assert WIF_AUTH_ACTION in content
     assert "workload_identity_provider:" in content
     assert "GCP_WORKLOAD_IDENTITY_PROVIDER" in content
     assert "GCP_DEPLOY_SERVICE_ACCOUNT" in content
@@ -63,7 +89,7 @@ def test_deploy_workflow_targets_production_vm_paths() -> None:
 def test_dev_backfill_workflow_runs_on_dev_push_only() -> None:
     content = DEV_BACKFILL_YML.read_text(encoding="utf-8")
     assert "branches: [dev]" in content
-    assert "environment: development" in content
+    assert "environment: DEV" in content
     assert "branches: [main]" not in content
 
 
@@ -76,12 +102,23 @@ def test_dev_backfill_workflow_creates_ephemeral_vm() -> None:
 
 def test_dev_backfill_workflow_uses_workload_identity_federation() -> None:
     content = DEV_BACKFILL_YML.read_text(encoding="utf-8")
+    assert WIF_AUTH_ACTION in content
     assert "workload_identity_provider:" in content
     assert "GCP_WORKLOAD_IDENTITY_PROVIDER" in content
     assert "GCP_DEPLOY_SERVICE_ACCOUNT" in content
     assert "credentials_json" not in content
     assert "GCP_SA_KEY" not in content
     assert "id-token: write" in content
+
+
+def test_dev_backfill_workflow_uses_iap_tunnel_for_ssh_and_scp() -> None:
+    """RFC-009: dev backfill SSH/SCP must use IAP, not public IP."""
+    content = DEV_BACKFILL_YML.read_text(encoding="utf-8")
+    remote_commands = content.count("gcloud compute ssh") + content.count(
+        "gcloud compute scp"
+    )
+    assert remote_commands == content.count("--tunnel-through-iap")
+    assert remote_commands >= 5
 
 
 def test_dev_backfill_workflow_writes_dev_env_and_runs_pipeline() -> None:

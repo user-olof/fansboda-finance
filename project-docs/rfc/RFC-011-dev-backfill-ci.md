@@ -6,7 +6,7 @@
 | **Status** | Implemented |
 | **Depends on** | RFC-002, RFC-005, RFC-006, RFC-007, RFC-009 |
 | **PRD** | §8.1 |
-| **Feature** | [CI/CD — dev backfill](../FEATURES.md#cicd--dev-backfill-prd-81-planned) |
+| **Feature** | [CI/CD — dev backfill](../FEATURES.md#cicd--dev-backfill-prd-81) |
 
 ## Summary
 
@@ -18,10 +18,10 @@ Production CI/CD (RFC-007) and production VM ops (RFC-008) are unchanged.
 
 | Step | Requirement |
 |------|-------------|
-| Spin up VM | On push to `dev`, create `data-fetcher-dev` in GCP |
-| Deploy | After VM is ready, install deps and write `.env` on the dev VM |
+| Spin up VM | On push to `dev`, create `data-fetcher-dev` in GCP (tag `dev-backfill`). Firewall must allow GitHub Actions SSH via IAP (`tcp:22` from `35.235.240.0/20`, scoped to that tag). Wait until `gcloud compute ssh --tunnel-through-iap` succeeds. |
+| Deploy | After spin-up succeeds, install deps and write `.env` on the dev VM |
 | Data collection | After deploy succeeds, run pipeline scripts; store results in Neon **dev branch** |
-| Verification | After data collection completes without fatal error, report missing data, failed downloads, skipped batches |
+| Verification | After data collection completes without interrupting error, analyze missing data, failed downloads, etc.; print results |
 | Delete VM | Tear down `data-fetcher-dev` — **always**, including on failure |
 
 ### Non-goals
@@ -36,9 +36,9 @@ Production CI/CD (RFC-007) and production VM ops (RFC-008) are unchanged.
 push to dev
     │
     ▼
-┌─────────────────┐     WIF (RFC-009)     ┌──────────────────────┐
+┌─────────────────┐  WIF + IAP (RFC-009)  ┌──────────────────────┐
 │ GitHub Actions  │ ────────────────────▶ │ data-fetcher-dev     │
-│ workflow chain  │   gcloud create/ssh   │ (ephemeral e2-micro) │
+│ workflow chain  │ gcloud create/ssh/iap │ (ephemeral e2-micro) │
 └────────┬────────┘                       └──────────┬───────────┘
          │                                           │
          │                              seed_tickers.py
@@ -74,13 +74,13 @@ push to dev
 
 Use a single workflow with dependent jobs (or reusable workflows) so each step gates the next:
 
-| Job | Action |
-|-----|--------|
-| `spin-up-vm` | `gcloud compute instances create data-fetcher-dev` — Debian 12, `e2-micro`, Always Free US region; wait until SSH-ready |
-| `deploy` | Clone/pull repo at `/opt/fansboda-finance`, `pipenv install --deploy`, SCP `.env` with dev `DATABASE_URL` and `APP_ENV=dev` |
-| `collect-data` | SSH: `seed_tickers.py`, then `backfill_sma.py` (RFC-002, RFC-005) |
-| `verify` | Parse job logs; optional SQL checks against dev DB for row counts / ticker coverage |
-| `delete-vm` | `gcloud compute instances delete data-fetcher-dev --quiet` in a `if: always()` job |
+| Job | Runs when | Action |
+|-----|-----------|--------|
+| `spin-up-vm` | Push to `dev` | `gcloud compute instances create data-fetcher-dev` — Debian 12, `e2-micro`, tag `dev-backfill`; wait until `gcloud compute ssh --tunnel-through-iap --quiet` succeeds |
+| `deploy` | Spin-up succeeds | Clone/pull repo at `/opt/fansboda-finance`, `pipenv install --deploy`, SCP `.env` with dev `DATABASE_URL` and `APP_ENV=dev` (all SSH/SCP via `--tunnel-through-iap`) |
+| `collect-data` | Deploy succeeds | SSH: `seed_tickers.py`, then `backfill_sma.py` (RFC-002, RFC-005) |
+| `verify` | Data collection succeeds | Parse job logs; SQL checks against dev DB (`scripts/verify_dev_backfill.py`); print summary |
+| `delete-vm` | Always after pipeline jobs | `gcloud compute instances delete data-fetcher-dev --quiet` in an `if: always()` job |
 
 Reuse patterns from RFC-007 (WIF auth, SCP `.env`, `chown fansboda:fansboda`) and RFC-008 (`scripts/bootstrap-vm.sh` steps or a slim `scripts/bootstrap-dev-vm.sh` invoked on first boot).
 
@@ -112,19 +112,34 @@ On a fresh Neon dev branch:
 | `GCP_WORKLOAD_IDENTITY_PROVIDER` | WIF provider (RFC-009) |
 | `GCP_DEPLOY_SERVICE_ACCOUNT` | Deploy SA — may need **additional** IAM for instance create/delete |
 
-Use a GitHub **`development`** environment (distinct from `production`) with secrets scoped to `dev` branch pushes.
+Use a GitHub **`DEV`** environment (distinct from `production`) with secrets scoped to `dev` branch pushes.
 
 #### Deploy authentication (RFC-009)
 
-Same WIF/OIDC path as `deploy.yml` — no `GCP_SA_KEY`. Extend WIF binding to allow the `dev` branch (or `development` environment) in addition to `main` / `production`.
+Same WIF/OIDC path as `deploy.yml` — no `GCP_SA_KEY`. Extend WIF binding to allow the `dev` branch (or `DEV` environment) in addition to `main` / `production`.
+
+#### Firewall (one-time GCP setup)
+
+Dev backfill SSH uses IAP, not a public-IP SSH rule. Create (or verify) an ingress firewall rule on the VM network:
+
+| Setting | Value |
+|---------|-------|
+| Direction | INGRESS |
+| Source | `35.235.240.0/20` (Google IAP TCP forwarding range) |
+| Allow | `tcp:22` |
+| Target tags | `dev-backfill` |
+
+The workflow creates the VM with `--tags=dev-backfill`. See [Google IAP firewall docs](https://cloud.google.com/iap/docs/using-tcp-forwarding#create-firewall-rule).
 
 #### Additional IAM (deploy service account)
 
-RFC-009 roles cover SSH to an **existing** instance. RFC-011 likely requires:
+RFC-009 roles cover SSH to an **existing** instance. RFC-011 additionally requires:
 
 | Role | Purpose |
 |------|---------|
-| `roles/compute.instanceAdmin.v1` | Create and delete `data-fetcher-dev` (may already be granted at project scope) |
+| `roles/compute.instanceAdmin.v1` | Create and delete `data-fetcher-dev`; SSH/SCP metadata |
+| `roles/iap.tunnelResourceAccessor` | IAP SSH (`--tunnel-through-iap`) from GitHub Actions |
+| `roles/compute.osLogin` (or `osAdminLogin`) | SSH login when OS Login is enabled |
 
 Confirm least-privilege: create/delete only in the target zone, or use a dedicated dev deploy SA.
 
@@ -171,6 +186,8 @@ Fatal script errors fail the workflow before verification; verification catches 
 - [x] Deletes VM in a final job even when earlier jobs fail
 - [x] Uses WIF/OIDC — no `GCP_SA_KEY` (RFC-009)
 - [x] Does not touch Production VM or prod `DATABASE_URL`
+- [x] SSH/SCP use `--tunnel-through-iap` (not public IP)
+- [x] Firewall allows IAP (`35.235.240.0/20`) to reach tagged dev VM on port 22
 - [x] Workflow structure validated in `tests/test_workflows.py`
 
 ## Related RFCs
@@ -185,8 +202,6 @@ Fatal script errors fail the workflow before verification; verification catches 
 ## Open questions
 
 - **Neon dev branch schema:** apply `schema.sql` manually once, or add a workflow step / migration job?
-- **VM bootstrap:** reuse `bootstrap-vm.sh` over SSH vs. `startup-script` on instance create?
-- **Instance name collision:** fail fast if `data-fetcher-dev` already exists from a stuck run?
 - **Verification thresholds:** what counts as failure — any failed batch, or &lt; N tickers with metrics?
 - **Separate deploy SA for dev** vs. extend production deploy SA IAM?
 - **Push to `dev` vs. PR to `dev`:** PRD says push; should PRs run a dry-run without VM create?

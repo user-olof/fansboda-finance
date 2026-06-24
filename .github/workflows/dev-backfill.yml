@@ -72,8 +72,8 @@ jobs:
               --zone="$GCP_ZONE" \
               --project="$GCP_PROJECT_ID" \
               --quiet \
-              --command="echo ok" \
-              --tunnel-through-iap; then
+              --tunnel-through-iap \
+              --command="echo ok"; then
               echo "Bootstrap ready after attempt $attempt"
               exit 0
             fi
@@ -82,12 +82,6 @@ jobs:
           done
           echo "Timed out waiting for dev VM bootstrap" >&2
           exit 1
-
-      - name: Check firewall 
-        run: |
-          gcloud compute instances get-effective-firewalls data-fetcher-dev \
-            --project="$GCP_PROJECT_ID" \
-            --zone="$GCP_ZONE"
 
   deploy:
     needs: spin-up-vm
@@ -114,8 +108,9 @@ jobs:
           gcloud compute ssh "$INSTANCE_NAME" \
             --zone="$GCP_ZONE" \
             --project="$GCP_PROJECT_ID" \
-            --command="sudo -u fansboda bash -c 'cd $APP_DIR && git fetch origin dev && git checkout dev && git pull origin dev && PIPENV_VENV_IN_PROJECT=1 pipenv install --deploy'" \
-            --tunnel-through-iap
+            --quiet \
+            --tunnel-through-iap \
+            --command="sudo -u fansboda bash -c 'cd $APP_DIR && git fetch origin dev && git checkout dev && git pull origin dev && PIPENV_VENV_IN_PROJECT=1 pipenv install --deploy'"
 
       - name: Write .env on dev VM
         env:
@@ -127,13 +122,16 @@ jobs:
           printf 'DATABASE_URL=%s\nAPP_ENV=dev\n' "$DATABASE_URL_DEV" > .env.tmp
           gcloud compute scp .env.tmp "$INSTANCE_NAME:$APP_DIR/.env" \
             --zone="$GCP_ZONE" \
-            --project="$GCP_PROJECT_ID"
+            --project="$GCP_PROJECT_ID" \
+            --quiet \
+            --tunnel-through-iap
           rm -f .env.tmp
           gcloud compute ssh "$INSTANCE_NAME" \
             --zone="$GCP_ZONE" \
             --project="$GCP_PROJECT_ID" \
-            --command="sudo chown fansboda:fansboda $APP_DIR/.env && sudo chmod 600 $APP_DIR/.env" \
-            --tunnel-through-iap
+            --quiet \
+            --tunnel-through-iap \
+            --command="sudo chown fansboda:fansboda $APP_DIR/.env && sudo chmod 600 $APP_DIR/.env"
 
   collect-data:
     needs: deploy
@@ -160,9 +158,10 @@ jobs:
           gcloud compute ssh "$INSTANCE_NAME" \
             --zone="$GCP_ZONE" \
             --project="$GCP_PROJECT_ID" \
+            --quiet \
+            --tunnel-through-iap \
             --command="sudo -u fansboda bash -c 'cd $APP_DIR && set -a && . ./.env && set +a && PIPENV_VENV_IN_PROJECT=1 pipenv run python seed_tickers.py && PIPENV_VENV_IN_PROJECT=1 pipenv run python backfill_sma.py'" \
-            2>&1 | tee collect-data.log \
-            --tunnel-through-iap
+            2>&1 | tee collect-data.log
 
       - uses: actions/upload-artifact@v4
         with:
