@@ -219,7 +219,7 @@ Deleting a row from `tickers` cascades to all of its `metrics` rows.
 
 ### 8.1 Backfill
 
-- **Spin up a VM:** On push to `dev`, spins up a new VM (`data-fetcher-dev`) in GCP
+- **Spin up a VM:** On push to `dev`, spins up a new VM (`data-fetcher-dev`) in GCP and create a firewall rule allowing GitHub Actions to access the VM via SSH 
 - **Deploy:** On `Spin up a VM` being successfully completed, deploys to the new Dev VM
 - **Data collection:** On `Deploy` being successfully completed; requests, retrieves and stores the data in the Neon database (dev branch)
 - **Verification:** On `Data collection` being completed without an interrupting error; analyze if there were any missing data, failed downloads etc and print the result 
