@@ -83,6 +83,12 @@ jobs:
           echo "Timed out waiting for dev VM bootstrap" >&2
           exit 1
 
+      - name: Check firewall 
+        run: |
+          gcloud compute instances get-effective-firewalls data-fetcher-dev \
+            --project="$GCP_PROJECT_ID" \
+            --zone="$GCP_ZONE"
+
   deploy:
     needs: spin-up-vm
     runs-on: ubuntu-latest
@@ -155,7 +161,8 @@ jobs:
             --zone="$GCP_ZONE" \
             --project="$GCP_PROJECT_ID" \
             --command="sudo -u fansboda bash -c 'cd $APP_DIR && set -a && . ./.env && set +a && PIPENV_VENV_IN_PROJECT=1 pipenv run python seed_tickers.py && PIPENV_VENV_IN_PROJECT=1 pipenv run python backfill_sma.py'" \
-            2>&1 | tee collect-data.log
+            2>&1 | tee collect-data.log \
+            --tunnel-through-iap
 
       - uses: actions/upload-artifact@v4
         with:
