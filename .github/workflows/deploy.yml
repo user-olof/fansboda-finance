@@ -48,13 +48,13 @@ jobs:
 
       - name: Write .env on VM
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_PROD: ${{ secrets.DATABASE_URL }}
           GCP_INSTANCE_NAME: ${{ secrets.GCP_INSTANCE_NAME }}
           GCP_ZONE: ${{ secrets.GCP_ZONE }}
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
         run: |
           set +x
-          printf 'DATABASE_URL=%s\nAPP_ENV=production\n' "$DATABASE_URL" > .env.tmp
+          printf 'DATABASE_URL=%s\nAPP_ENV=production\n' "$DATABASE_URL_PROD" > .env.tmp
           gcloud compute scp .env.tmp "$GCP_INSTANCE_NAME:/opt/fansboda-finance/.env" \
             --zone="$GCP_ZONE" \
             --project="$GCP_PROJECT_ID"

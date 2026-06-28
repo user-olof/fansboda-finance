@@ -125,7 +125,7 @@ jobs:
 
       - name: Write .env on dev VM
         env:
-          DATABASE_URL_DEV: ${{ secrets.DATABASE_URL_DEV }}
+          DATABASE_URL_DEV: ${{ secrets.DATABASE_URL }}
           GCP_ZONE: ${{ secrets.GCP_ZONE }}
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
         run: |
@@ -200,7 +200,7 @@ jobs:
 
       - name: Verify backfill log and dev database
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL_DEV }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python scripts/verify_dev_backfill.py collect-data.log
 
   delete-vm:
