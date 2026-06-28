@@ -131,7 +131,7 @@ jobs:
         run: |
           set +x
           printf 'DATABASE_URL=%s\nAPP_ENV=dev\n' "$DATABASE_URL_DEV" > .env.tmp
-          gcloud compute scp .env.tmp "$INSTANCE_NAME:$APP_DIR/.env" \
+          gcloud compute scp .env.tmp "$INSTANCE_NAME:/tmp/.env.tmp" \
             --zone="$GCP_ZONE" \
             --project="$GCP_PROJECT_ID" \
             --quiet \
@@ -142,7 +142,7 @@ jobs:
             --project="$GCP_PROJECT_ID" \
             --quiet \
             --tunnel-through-iap \
-            --command="sudo chown fansboda:fansboda $APP_DIR/.env && sudo chmod 600 $APP_DIR/.env"
+            --command="sudo install -o fansboda -g fansboda -m 600 /tmp/.env.tmp $APP_DIR/.env && rm -f /tmp/.env.tmp"
 
   collect-data:
     needs: deploy

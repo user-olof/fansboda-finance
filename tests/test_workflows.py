@@ -73,8 +73,7 @@ def test_deploy_workflow_requests_oidc_token() -> None:
 def test_deploy_workflow_writes_production_env() -> None:
     content = DEPLOY_YML.read_text(encoding="utf-8")
     assert "APP_ENV=production" in content
-    assert "chown fansboda:fansboda" in content
-    assert "chmod 600" in content
+    assert "install -o fansboda -g fansboda -m 600" in content
 
 
 def test_deploy_workflow_targets_production_vm_paths() -> None:

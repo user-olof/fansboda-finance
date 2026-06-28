@@ -55,11 +55,11 @@ jobs:
         run: |
           set +x
           printf 'DATABASE_URL=%s\nAPP_ENV=production\n' "$DATABASE_URL_PROD" > .env.tmp
-          gcloud compute scp .env.tmp "$GCP_INSTANCE_NAME:/opt/fansboda-finance/.env" \
+          gcloud compute scp .env.tmp "$GCP_INSTANCE_NAME:/tmp/.env.tmp" \
             --zone="$GCP_ZONE" \
             --project="$GCP_PROJECT_ID"
           rm -f .env.tmp
           gcloud compute ssh "$GCP_INSTANCE_NAME" \
             --zone="$GCP_ZONE" \
             --project="$GCP_PROJECT_ID" \
-            --command="sudo chown fansboda:fansboda /opt/fansboda-finance/.env && sudo chmod 600 /opt/fansboda-finance/.env"
+            --command="sudo install -o fansboda -g fansboda -m 600 /tmp/.env.tmp /opt/fansboda-finance/.env && rm -f /tmp/.env.tmp"
