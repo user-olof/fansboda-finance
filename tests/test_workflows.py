@@ -82,8 +82,17 @@ def test_deploy_workflow_targets_production_vm_paths() -> None:
     content = DEPLOY_YML.read_text(encoding="utf-8")
     assert "/opt/fansboda-finance" in content
     assert "sudo -u fansboda" in content
-    assert "git pull origin main" in content
     assert "DATABASE_URL=" in content
+
+
+def test_deploy_workflow_copies_code_from_runner() -> None:
+    """Code is shipped from the runner checkout, not pulled on the VM."""
+    content = DEPLOY_YML.read_text(encoding="utf-8")
+    assert "fansboda-finance.tgz" in content
+    assert "tar czf" in content
+    assert "gcloud compute scp" in content
+    assert "git pull" not in content
+    assert "pipenv install --deploy" in content
 
 
 def test_dev_backfill_workflow_runs_on_dev_push_only() -> None:
@@ -119,6 +128,17 @@ def test_dev_backfill_workflow_uses_iap_tunnel_for_ssh_and_scp() -> None:
     )
     assert remote_commands == content.count("--tunnel-through-iap")
     assert remote_commands >= 5
+
+
+def test_dev_backfill_workflow_deploys_from_runner_checkout() -> None:
+    """Code is copied from the CI checkout to the VM — no clone/pull on the VM."""
+    content = DEV_BACKFILL_YML.read_text(encoding="utf-8")
+    assert "fansboda-finance.tgz" in content
+    assert "tar czf" in content
+    assert "git pull" not in content
+    assert "git fetch" not in content
+    assert "repo-url=" not in content
+    assert "pipenv install --deploy" in content
 
 
 def test_dev_backfill_workflow_writes_dev_env_and_runs_pipeline() -> None:

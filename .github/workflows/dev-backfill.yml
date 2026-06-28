@@ -56,7 +56,6 @@ jobs:
             --machine-type=e2-micro \
             --image-family=debian-12 \
             --image-project=debian-cloud \
-            --metadata=repo-url="https://github.com/${{ github.repository }}.git",branch=dev \
             --metadata-from-file=startup-script=scripts/bootstrap-dev-vm.sh \
             --service-account="$GCP_DEPLOY_SERVICE_ACCOUNT" \
             --scopes=https://www.googleapis.com/auth/cloud-platform \
@@ -73,7 +72,7 @@ jobs:
               --project="$GCP_PROJECT_ID" \
               --quiet \
               --tunnel-through-iap \
-              --command="echo ok"; then
+              --command="test -f /var/run/fansboda-dev-bootstrap.done"; then
               echo "Bootstrap ready after attempt $attempt"
               exit 0
             fi
@@ -100,17 +99,29 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Pull latest dev branch and install dependencies
+      - name: Deploy latest code to dev VM and install dependencies
         env:
           GCP_ZONE: ${{ secrets.GCP_ZONE }}
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
         run: |
+          tar czf /tmp/fansboda-finance.tgz \
+            --exclude='./.git' \
+            --exclude='./.venv' \
+            --exclude='./.pytest_cache' \
+            -C "$GITHUB_WORKSPACE" .
+          gcloud compute scp /tmp/fansboda-finance.tgz \
+            "$INSTANCE_NAME:/tmp/fansboda-finance.tgz" \
+            --zone="$GCP_ZONE" \
+            --project="$GCP_PROJECT_ID" \
+            --quiet \
+            --tunnel-through-iap
           gcloud compute ssh "$INSTANCE_NAME" \
             --zone="$GCP_ZONE" \
             --project="$GCP_PROJECT_ID" \
             --quiet \
             --tunnel-through-iap \
-            --command="sudo -u fansboda bash -c 'cd $APP_DIR && git fetch origin dev && git checkout dev && git pull origin dev && PIPENV_VENV_IN_PROJECT=1 pipenv install --deploy'"
+            --command="sudo mkdir -p $APP_DIR && sudo tar xzf /tmp/fansboda-finance.tgz -C $APP_DIR && sudo rm -f /tmp/fansboda-finance.tgz && sudo chown -R fansboda:fansboda $APP_DIR && sudo -u fansboda bash -c 'cd $APP_DIR && PIPENV_VENV_IN_PROJECT=1 pipenv install --deploy'"
+          rm -f /tmp/fansboda-finance.tgz
 
       - name: Write .env on dev VM
         env:
