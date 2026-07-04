@@ -11,9 +11,11 @@ from db.tickers import load_tickers_from_db
 from fetch_sma import (
     chunked,
     compute_smas,
+    load_currency_for_tickers,
     load_tickers,
     metric_row_from_history,
     metric_rows_from_batch,
+    resolve_currency,
     trading_date_from_index,
 )
 from models import MetricRow, TickerEntry
@@ -40,8 +42,8 @@ def test_load_tickers_raises_when_empty(tmp_path: Path) -> None:
 def test_load_tickers_from_db() -> None:
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = [
-        ("AAA.ST", "Company A"),
-        ("BBB.ST", None),
+        ("AAA.ST", "Company A", "Industrials", "Machinery"),
+        ("BBB.ST", None, None, None),
     ]
 
     mock_conn = MagicMock()
@@ -52,7 +54,7 @@ def test_load_tickers_from_db() -> None:
         entries = load_tickers_from_db("postgresql://example")
 
     assert entries == [
-        TickerEntry(symbol="AAA.ST", name="Company A"),
+        TickerEntry(symbol="AAA.ST", name="Company A", sector="Industrials", industry="Machinery"),
         TickerEntry(symbol="BBB.ST", name=None),
     ]
 
@@ -126,15 +128,45 @@ def test_metric_row_from_history() -> None:
         index=index,
     )
 
-    row = metric_row_from_history("VOLV-A.ST", history, name="AB Volvo")
+    row = metric_row_from_history(
+        "VOLV-A.ST",
+        history,
+        name="AB Volvo",
+        currency="SEK",
+    )
 
     assert row is not None
     assert row.ticker == "VOLV-A.ST"
     assert row.name == "AB Volvo"
+    assert row.currency == "SEK"
     assert row.trading_date == index[-1].date()
     assert row.sma_50 == Decimal("195.5")
     assert row.sma_200 == Decimal("120.5")
     assert row.current_price == Decimal("220")
+
+
+def test_resolve_currency_uses_yfinance_info() -> None:
+    mock_ticker = MagicMock()
+    mock_ticker.info = {"currency": "USD"}
+
+    with patch("fetch_sma.yf.Ticker", return_value=mock_ticker):
+        assert resolve_currency("AAPL") == "USD"
+
+
+def test_load_currency_for_tickers_applies_delay() -> None:
+    with patch("fetch_sma.resolve_currency", return_value="SEK") as mock_resolve:
+        with patch("fetch_sma.time.sleep") as mock_sleep:
+            currencies = load_currency_for_tickers(
+                ["AAA.ST", "BBB.ST"],
+                name_delay=0.25,
+            )
+
+    assert mock_resolve.call_count == 2
+    mock_sleep.assert_called_once_with(0.25)
+    assert currencies == {
+        "AAA.ST": "SEK",
+        "BBB.ST": "SEK",
+    }
 
 
 def test_metric_rows_from_batch_parses_multiindex() -> None:
@@ -150,11 +182,15 @@ def test_metric_rows_from_batch_parses_multiindex() -> None:
     data[("BBB.ST", "Close")] = range(2, 222)
 
     names = {"AAA.ST": "Alpha AB", "BBB.ST": "Beta AB"}
-    rows = metric_rows_from_batch(data, ["AAA.ST", "BBB.ST"], names)
+    currencies = {"AAA.ST": "SEK", "BBB.ST": "USD"}
+    rows = metric_rows_from_batch(data, ["AAA.ST", "BBB.ST"], names, currencies)
 
     assert len(rows) == 2
     assert {row.ticker for row in rows} == {"AAA.ST", "BBB.ST"}
     assert {row.name for row in rows} == {"Alpha AB", "Beta AB"}
+    by_ticker = {row.ticker: row for row in rows}
+    assert by_ticker["AAA.ST"].currency == "SEK"
+    assert by_ticker["BBB.ST"].currency == "USD"
 
 
 def test_filter_stale_tickers_skips_fresh() -> None:
@@ -223,4 +259,9 @@ def test_insert_metrics_executes_values() -> None:
     mock_conn.commit.assert_called_once()
     assert inserted == 1
     sql = mock_execute.call_args[0][1]
+    assert "currency" in sql
+    assert "sector" not in sql
+    assert "industry" not in sql
     assert "ON CONFLICT (ticker, trading_date) DO NOTHING" in sql
+    values = mock_execute.call_args[0][2]
+    assert values[0][4] is None  # currency

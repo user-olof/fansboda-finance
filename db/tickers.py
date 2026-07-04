@@ -8,14 +8,16 @@ from psycopg2.extras import execute_values
 from models import TickerEntry
 
 LOAD_TICKERS_SQL = """
-SELECT symbol, name FROM tickers ORDER BY symbol
+SELECT symbol, name, sector, industry FROM tickers ORDER BY symbol
 """
 
 UPSERT_TICKER_SQL = """
-INSERT INTO tickers (symbol, name)
+INSERT INTO tickers (symbol, name, sector, industry)
 VALUES %s
 ON CONFLICT (symbol) DO UPDATE SET
     name = EXCLUDED.name,
+    sector = EXCLUDED.sector,
+    industry = EXCLUDED.industry,
     updated_at = NOW();
 """
 
@@ -30,11 +32,17 @@ def load_tickers_from_db(database_url: str) -> list[TickerEntry]:
     if not rows:
         raise ValueError("No tickers found in tickers table")
 
-    return [TickerEntry(symbol=row[0], name=row[1]) for row in rows]
+    return [
+        TickerEntry(symbol=row[0], name=row[1], sector=row[2], industry=row[3])
+        for row in rows
+    ]
 
 
-def upsert_tickers(database_url: str, rows: list[tuple[str, str | None]]) -> int:
-    """Upsert ticker symbols and names. Returns rows affected."""
+def upsert_tickers(
+    database_url: str,
+    rows: list[tuple[str, str | None, str | None, str | None]],
+) -> int:
+    """Upsert ticker symbols and watchlist metadata. Returns rows affected."""
     if not rows:
         return 0
 

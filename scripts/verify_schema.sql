@@ -19,6 +19,21 @@ FROM information_schema.columns
 WHERE table_schema = 'public' AND table_name = 'metrics'
 ORDER BY ordinal_position;
 
+SELECT column_name
+FROM information_schema.columns
+WHERE table_schema = 'public'
+  AND table_name = 'tickers'
+  AND column_name IN ('sector', 'industry')
+ORDER BY column_name;
+-- expect 2 rows after migrate_move_metadata_to_tickers.sql or fresh schema.sql
+
+SELECT column_name
+FROM information_schema.columns
+WHERE table_schema = 'public'
+  AND table_name = 'metrics'
+  AND column_name = 'currency';
+-- expect 1 row after migrate_move_metadata_to_tickers.sql or fresh schema.sql
+
 -- unique (ticker, trading_date)
 SELECT conname
 FROM pg_constraint

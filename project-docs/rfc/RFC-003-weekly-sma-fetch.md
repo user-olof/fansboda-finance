@@ -10,7 +10,7 @@
 
 ## Summary
 
-Core weekly job (`fetch_sma.py`): load watchlist, skip tickers already at the global max `trading_date`, batch-download ~300 days OHLCV from yfinance, compute SMA-50/200, append metrics rows, purge stale history. Runs **Thursdays 11:00 UTC** via cron (RFC-008).
+Core weekly job (`fetch_sma.py`): load watchlist, skip tickers already at the global max `trading_date`, batch-download ~300 days OHLCV from yfinance, compute SMA-50/200, copy `name` from `tickers`, capture `currency` from yfinance, append metrics rows, purge stale history. Runs **Thursdays 11:00 UTC** via cron (RFC-008).
 
 ## Requirements
 
@@ -20,7 +20,7 @@ Core weekly job (`fetch_sma.py`): load watchlist, skip tickers already at the gl
 | FR-2 | Skip tickers already fresh at global max `trading_date` |
 | FR-3 | Batch download ~300d OHLCV (default 40 symbols/batch, delay between batches) |
 | FR-4 | Retry 429, rate, timeout, connection, empty frames with exponential backoff |
-| FR-5 | Compute SMA-50/200; skip if &lt;200 closes; set `current_price` and `trading_date` |
+| FR-5 | Compute SMA-50/200; skip if &lt;200 closes; set `current_price`, `trading_date`, `currency`; copy `name` from `tickers` |
 | FR-6 | Append with `ON CONFLICT (ticker, trading_date) DO NOTHING` |
 | FR-7 | Retention purge after run (RFC-004) |
 | FR-8 | Log batch progress, per-ticker results, summary; non-zero exit on fatal errors |
@@ -44,7 +44,8 @@ Core weekly job (`fetch_sma.py`): load watchlist, skip tickers already at the gl
 |----------|---------|
 | `load_tickers(path)` | Parse symbol file (shared with seed script) |
 | `compute_smas(close)` | SMA-50 and SMA-200 from close series |
-| `metric_row_from_history(...)` | Single-ticker metric from OHLCV frame |
+| `metric_row_from_history(...)` | Single-ticker metric from OHLCV frame; copies `name` from watchlist |
+| `resolve_currency(symbol)` | yfinance `.info` lookup for `currency` |
 | `download_batch(...)` | yfinance batch with retry/backoff, `threads=False` |
 | `metric_rows_from_batch(...)` | Parse MultiIndex download into `MetricRow` list |
 | `main()` | Full weekly pipeline |
@@ -55,7 +56,7 @@ Core weekly job (`fetch_sma.py`): load watchlist, skip tickers already at the gl
 2. `watchlist = load_tickers_from_db(config.database_url)`
 3. `stale, skipped, max_date = filter_stale_tickers(...)`
 4. If all fresh: retention purge only, exit 0
-5. For each batch: `download_batch` → `metric_rows_from_batch` → `insert_metrics`
+5. For each batch: resolve `currency` per ticker → `download_batch` → `metric_rows_from_batch` → `insert_metrics`
 6. `purge_stale_metrics(config.database_url, config.metrics_retention_days)`
 7. Log summary; exit 1 if no metrics collected or fatal DB error
 
@@ -69,6 +70,8 @@ Installed by `scripts/bootstrap-vm.sh` — see RFC-008.
 - [x] Skips fresh tickers at global max `trading_date`
 - [x] Batched yfinance download with retry/backoff
 - [x] Computes SMA-50, SMA-200, current price
+- [x] Copies `name` from `tickers` into each metrics row (PRD §6)
+- [x] Populates `currency` on each metrics row (PRD §6)
 - [x] Appends with `ON CONFLICT (ticker, trading_date) DO NOTHING`
 - [x] SQL in `db/` modules, not in job script
 - [x] Retention purge on every run (RFC-004)

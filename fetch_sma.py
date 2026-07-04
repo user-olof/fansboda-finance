@@ -84,11 +84,39 @@ def trading_date_from_index(index: pd.DatetimeIndex) -> date:
     return pd.Timestamp(ts).date()
 
 
+def resolve_currency(symbol: str) -> str | None:
+    """Fetch listing currency from yfinance metadata."""
+    info = yf.Ticker(symbol).info
+    currency = info.get("currency")
+    return str(currency) if currency else None
+
+
+def load_currency_for_tickers(
+    tickers: list[str],
+    *,
+    name_delay: float,
+) -> dict[str, str | None]:
+    """Resolve yfinance currency for each ticker with rate-limit delay."""
+    currencies: dict[str, str | None] = {}
+
+    for i, symbol in enumerate(tickers):
+        if i > 0:
+            time.sleep(name_delay)
+        try:
+            currencies[symbol] = resolve_currency(symbol)
+        except Exception:
+            logger.exception("Failed to resolve currency for %s", symbol)
+            currencies[symbol] = None
+
+    return currencies
+
+
 def metric_row_from_history(
     ticker: str,
     history: pd.DataFrame,
     *,
     name: str | None = None,
+    currency: str | None = None,
 ) -> MetricRow | None:
     """Compute SMA metrics from a single ticker's OHLCV history."""
     if history.empty:
@@ -116,6 +144,7 @@ def metric_row_from_history(
         sma_50=sma_50,
         sma_200=sma_200,
         current_price=current_price,
+        currency=currency,
     )
 
 
@@ -176,11 +205,13 @@ def metric_rows_from_batch(
     data: pd.DataFrame,
     tickers: list[str],
     names: dict[str, str | None],
+    currencies: dict[str, str | None] | None = None,
 ) -> list[MetricRow]:
     """Parse a yfinance batch download into MetricRow objects."""
     if data.empty:
         return []
 
+    currencies = currencies or {}
     rows: list[MetricRow] = []
 
     if isinstance(data.columns, pd.MultiIndex):
@@ -191,13 +222,20 @@ def metric_rows_from_batch(
                 continue
             ticker_data = data[ticker].dropna(how="all")
             row = metric_row_from_history(
-                ticker, ticker_data, name=names.get(ticker)
+                ticker,
+                ticker_data,
+                name=names.get(ticker),
+                currency=currencies.get(ticker),
             )
             if row is not None:
                 rows.append(row)
     elif len(tickers) == 1:
+        ticker = tickers[0]
         row = metric_row_from_history(
-            tickers[0], data, name=names.get(tickers[0])
+            ticker,
+            data,
+            name=names.get(ticker),
+            currency=currencies.get(ticker),
         )
         if row is not None:
             rows.append(row)
@@ -225,6 +263,7 @@ def main() -> int:
     database_url = config.database_url
     batch_size = config.yf_batch_size
     batch_delay = config.yf_batch_delay_seconds
+    name_delay = config.yf_name_delay_seconds
     max_retries = config.yf_max_retries
     retry_base = config.yf_retry_base_seconds
     retention_days = config.metrics_retention_days
@@ -288,13 +327,19 @@ def main() -> int:
             len(batch),
         )
         try:
+            batch_currencies = load_currency_for_tickers(
+                batch,
+                name_delay=name_delay,
+            )
             data = download_batch(
                 batch,
                 start,
                 max_retries=max_retries,
                 retry_base_seconds=retry_base,
             )
-            batch_rows = metric_rows_from_batch(data, batch, names)
+            batch_rows = metric_rows_from_batch(
+                data, batch, names, currencies=batch_currencies
+            )
             fetched_count += len(batch_rows)
             for row in batch_rows:
                 logger.info(

@@ -10,7 +10,10 @@ from psycopg2.extras import execute_values
 from models import MetricRow
 
 INSERT_METRICS_SQL = """
-INSERT INTO metrics (ticker, name, trading_date, updated_at, sma_50, sma_200, current_price)
+INSERT INTO metrics (
+    ticker, name, trading_date, updated_at,
+    currency, sma_50, sma_200, current_price
+)
 VALUES %s
 ON CONFLICT (ticker, trading_date) DO NOTHING
 """
@@ -47,6 +50,7 @@ def _metric_values(rows: list[MetricRow], *, updated_at: datetime) -> list[tuple
             row.name,
             row.trading_date,
             updated_at,
+            row.currency,
             row.sma_50,
             row.sma_200,
             row.current_price,

@@ -19,6 +19,7 @@ from fetch_sma import (
     chunked,
     compute_smas,
     download_batch,
+    load_currency_for_tickers,
     trading_date_from_index,
 )
 from models import MetricRow
@@ -48,6 +49,7 @@ def metric_rows_from_weekly_samples(
     history: pd.DataFrame,
     *,
     name: str | None,
+    currency: str | None = None,
     window_weeks: int = DEFAULT_BACKFILL_WINDOW_WEEKS,
 ) -> list[MetricRow]:
     """Build SMA snapshots from rolling week windows anchored at the oldest bar."""
@@ -86,6 +88,7 @@ def metric_rows_from_weekly_samples(
                 sma_50=sma_50,
                 sma_200=sma_200,
                 current_price=_to_decimal(window_close.iloc[-1]),
+                currency=currency,
             )
         )
 
@@ -96,6 +99,7 @@ def metric_rows_from_backfill_batch(
     data: pd.DataFrame,
     tickers: list[str],
     names: dict[str, str | None],
+    currencies: dict[str, str | None] | None = None,
     *,
     window_weeks: int = DEFAULT_BACKFILL_WINDOW_WEEKS,
 ) -> list[MetricRow]:
@@ -103,6 +107,7 @@ def metric_rows_from_backfill_batch(
     if data.empty:
         return []
 
+    currencies = currencies or {}
     rows: list[MetricRow] = []
 
     if isinstance(data.columns, pd.MultiIndex):
@@ -117,15 +122,18 @@ def metric_rows_from_backfill_batch(
                     ticker,
                     ticker_data,
                     name=names.get(ticker),
+                    currency=currencies.get(ticker),
                     window_weeks=window_weeks,
                 )
             )
     elif len(tickers) == 1:
+        ticker = tickers[0]
         rows.extend(
             metric_rows_from_weekly_samples(
-                tickers[0],
+                ticker,
                 data,
-                name=names.get(tickers[0]),
+                name=names.get(ticker),
+                currency=currencies.get(ticker),
                 window_weeks=window_weeks,
             )
         )
@@ -156,6 +164,7 @@ def main() -> int:
     batch_delay = config.backfill_batch_delay_seconds
     max_retries = config.yf_max_retries
     retry_base = config.yf_retry_base_seconds
+    name_delay = config.yf_name_delay_seconds
     history_days = config.backfill_history_days
     window_weeks = config.backfill_window_weeks
 
@@ -195,6 +204,10 @@ def main() -> int:
         )
         try:
             existing = load_existing_metric_keys(database_url, batch)
+            batch_currencies = load_currency_for_tickers(
+                batch,
+                name_delay=name_delay,
+            )
             data = download_batch(
                 batch,
                 start,
@@ -205,6 +218,7 @@ def main() -> int:
                 data,
                 batch,
                 names,
+                batch_currencies,
                 window_weeks=window_weeks,
             )
             new_rows = filter_new_rows(batch_rows, existing)

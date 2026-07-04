@@ -10,7 +10,7 @@
 
 ## Summary
 
-Ad-hoc script to load symbols from a text file, resolve company names via yfinance, and upsert into the `tickers` table.
+Ad-hoc script to load symbols from a text file, resolve company names and watchlist metadata (`sector`, `industry`) via yfinance, and upsert into the `tickers` table.
 
 ## Requirements
 
@@ -18,17 +18,18 @@ Ad-hoc script to load symbols from a text file, resolve company names via yfinan
 |----|-------------|
 | FR-9 | Read symbols from file (one per line; `#` comments and blanks ignored); uppercase |
 | FR-10 | Resolve name from yfinance (`longName`, fallback `shortName`); rate-limit delay between lookups |
-| FR-11 | Upsert `(symbol, name)` on conflict by `symbol` |
+| FR-11 | Upsert `(symbol, name, sector, industry)` on conflict by `symbol`; `sector` / `industry` from `sectorKey` / `industryKey` |
 
 ## Implementation
 
 ### Architecture
 
 ```
-tickers.txt  →  load_tickers()  →  resolve_name()  →  upsert_tickers()
-                      ↑                                    ↑
-                 fetch_sma.py                         db/tickers.py
-                 (file parsing)                       (parameterized SQL)
+tickers.txt  →  load_tickers()  →  resolve_name()  ─┐
+                      ↑              resolve_metadata() ─┤→  upsert_tickers()
+                 fetch_sma.py                            ↑
+                 (file parsing)                    db/tickers.py
+                                                  (parameterized SQL)
 ```
 
 ### Files
@@ -47,7 +48,8 @@ tickers.txt  →  load_tickers()  →  resolve_name()  →  upsert_tickers()
 | Function | Module | Purpose |
 |----------|--------|---------|
 | `load_tickers(path)` | `fetch_sma` | Parse symbol file |
-| `resolve_name(symbol)` | `seed_tickers` | yfinance metadata lookup |
+| `resolve_name(symbol)` | `seed_tickers` | yfinance name lookup |
+| `resolve_metadata(symbol)` | `seed_tickers` | yfinance `sectorKey`, `industryKey` lookup (reuse in RFC-010) |
 | `upsert_tickers(url, rows)` | `db.tickers` | Parameterized upsert |
 | `seed_tickers_from_file(...)` | `seed_tickers` | Orchestration |
 | `main()` | `seed_tickers` | CLI entry point |
@@ -65,6 +67,7 @@ Optional CLI arg overrides default file; config provides `tickers_file` and `yf_
 
 - [x] Symbols loaded from file, uppercased, comments skipped
 - [x] Company names resolved via yfinance with configurable delay
+- [x] `sector` and `industry` resolved via yfinance and upserted into `tickers` (PRD §6)
 - [x] Upsert into `tickers` on conflict by `symbol`
 - [x] SQL in `db/tickers.py` with parameterized queries
 - [x] Uses `get_config()` for database URL and tunables (RFC-006)

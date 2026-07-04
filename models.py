@@ -11,6 +11,8 @@ from decimal import Decimal
 class TickerEntry:
     symbol: str
     name: str | None
+    sector: str | None = None
+    industry: str | None = None
 
 
 @dataclass(frozen=True)
@@ -21,3 +23,4 @@ class MetricRow:
     sma_50: Decimal | None
     sma_200: Decimal | None
     current_price: Decimal | None
+    currency: str | None = None

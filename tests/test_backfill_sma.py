@@ -5,6 +5,7 @@ import pandas as pd
 
 from backfill_sma import (
     filter_new_rows,
+    metric_rows_from_backfill_batch,
     metric_rows_from_weekly_samples,
     sample_start_weeks,
     week_index_series,
@@ -38,15 +39,39 @@ def test_metric_rows_from_weekly_samples_creates_rolling_windows() -> None:
         index=index,
     )
 
-    rows = metric_rows_from_weekly_samples("AAA.ST", history, name="Alpha AB")
+    rows = metric_rows_from_weekly_samples(
+        "AAA.ST", history, name="Alpha AB", currency="SEK"
+    )
 
     assert len(rows) == len(sample_start_weeks(int(week_index_series(index, pd.Timestamp(index[0])).max()), 52))
     assert rows[0].ticker == "AAA.ST"
     assert rows[0].name == "Alpha AB"
+    assert rows[0].currency == "SEK"
     assert rows[0].sma_50 is not None
     assert rows[0].sma_200 is not None
     assert rows[0].current_price is not None
     assert rows[-1].trading_date >= rows[0].trading_date
+
+
+def test_metric_rows_from_backfill_batch_sets_currency() -> None:
+    index = pd.date_range("2024-01-01", periods=280, freq="B")
+    columns = pd.MultiIndex.from_product(
+        [["AAA.ST"], ["Open", "High", "Low", "Close", "Volume"]]
+    )
+    data = pd.DataFrame(index=index, columns=columns, dtype=float)
+    for field in ("Open", "High", "Low", "Close", "Volume"):
+        data[("AAA.ST", field)] = 1.0
+    data[("AAA.ST", "Close")] = range(1, 281)
+
+    rows = metric_rows_from_backfill_batch(
+        data,
+        ["AAA.ST"],
+        {"AAA.ST": "Alpha AB"},
+        {"AAA.ST": "SEK"},
+    )
+
+    assert rows
+    assert all(row.currency == "SEK" for row in rows)
 
 
 def test_filter_new_rows_skips_existing_pairs() -> None:

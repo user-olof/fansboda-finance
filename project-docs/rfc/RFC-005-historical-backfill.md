@@ -10,7 +10,7 @@
 
 ## Summary
 
-One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **Not** cron-scheduled.
+One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **Not** cron-scheduled. SMA price fields are backfilled from OHLCV. `sector` and `industry` live on `tickers` (RFC-002); `metrics.currency` may remain `NULL` on backfilled rows until populated by the weekly fetch (see RFC-001 open question).
 
 ## Requirements
 
@@ -76,7 +76,9 @@ pipenv run python backfill_sma.py
 - [x] Observability logs per batch and summary
 - [x] Unit tests for week indexing and window logic
 - [x] Not scheduled in cron
+- [ ] Documented behavior for `metrics.currency` on backfilled rows (`NULL` until weekly fetch)
 
 ## Open questions
 
 - `--dry-run` flag deferred — out of PRD scope.
+- Populate `currency` during backfill, or leave `NULL` until `fetch_sma.py` runs? (aligned with RFC-001)

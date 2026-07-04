@@ -23,12 +23,25 @@ logger = logging.getLogger(__name__)
 
 def resolve_name(symbol: str) -> str | None:
     """Fetch company name from yfinance metadata (longName, fallback shortName)."""
+    name, _, _ = resolve_ticker_metadata(symbol)
+    return name
+
+
+def resolve_ticker_metadata(
+    symbol: str,
+) -> tuple[str | None, str | None, str | None]:
+    """Fetch name, sector, and industry from yfinance metadata."""
     info = yf.Ticker(symbol).info
     name = info.get("longName") or info.get("shortName")
+    sector = info.get("sectorKey") or info.get("sector")
+    industry = info.get("industryKey") or info.get("industry")
     if not name:
         logger.warning("No company name found for %s", symbol)
-        return None
-    return str(name)
+    return (
+        str(name) if name else None,
+        str(sector) if sector else None,
+        str(industry) if industry else None,
+    )
 
 
 def seed_tickers_from_file(
@@ -37,20 +50,26 @@ def seed_tickers_from_file(
     *,
     name_delay: float = DEFAULT_YF_NAME_DELAY_SECONDS,
 ) -> int:
-    """Load symbols from file, resolve names, upsert into tickers. Returns row count."""
+    """Load symbols from file, resolve metadata, upsert into tickers. Returns row count."""
     symbols = load_tickers(tickers_path)
-    rows: list[tuple[str, str | None]] = []
+    rows: list[tuple[str, str | None, str | None, str | None]] = []
 
     for i, symbol in enumerate(symbols):
         if i > 0:
             time.sleep(name_delay)
         try:
-            name = resolve_name(symbol)
-            rows.append((symbol, name))
-            logger.info("Resolved %s: %s", symbol, name)
+            name, sector, industry = resolve_ticker_metadata(symbol)
+            rows.append((symbol, name, sector, industry))
+            logger.info(
+                "Resolved %s: name=%s sector=%s industry=%s",
+                symbol,
+                name,
+                sector,
+                industry,
+            )
         except Exception:
-            logger.exception("Failed to resolve name for %s", symbol)
-            rows.append((symbol, None))
+            logger.exception("Failed to resolve metadata for %s", symbol)
+            rows.append((symbol, None, None, None))
 
     return upsert_tickers(database_url, rows)
 

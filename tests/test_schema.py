@@ -12,6 +12,7 @@ MIGRATIONS = [
     REPO_ROOT / "migrate_metrics_history.sql",
     REPO_ROOT / "migrate_add_trading_date_index.sql",
     REPO_ROOT / "migrate_add_tickers_updated_at.sql",
+    REPO_ROOT / "migrate_move_metadata_to_tickers.sql",
 ]
 
 
@@ -52,6 +53,30 @@ def test_schema_retention_index() -> None:
 def test_schema_tickers_updated_at() -> None:
     sql = SCHEMA_SQL.read_text(encoding="utf-8")
     assert re.search(r"\bupdated_at\s+TIMESTAMPTZ\s+NOT NULL", sql.split("metrics")[0])
+
+
+def test_schema_tickers_sector_industry_columns() -> None:
+    sql = SCHEMA_SQL.read_text(encoding="utf-8")
+    tickers_section = sql.split("CREATE TABLE IF NOT EXISTS metrics", 1)[0]
+    for column in ("sector", "industry"):
+        assert re.search(rf"\b{column}\s+TEXT", tickers_section)
+
+
+def test_schema_metrics_currency_column() -> None:
+    sql = SCHEMA_SQL.read_text(encoding="utf-8")
+    metrics_section = sql.split("CREATE TABLE IF NOT EXISTS metrics", 1)[1]
+    assert re.search(r"\bcurrency\s+TEXT", metrics_section)
+    assert "sector" not in metrics_section.split("CREATE INDEX")[0]
+    assert "industry" not in metrics_section.split("CREATE INDEX")[0]
+
+
+def test_migrate_move_metadata_to_tickers() -> None:
+    sql = (REPO_ROOT / "migrate_move_metadata_to_tickers.sql").read_text(encoding="utf-8")
+    assert "ADD COLUMN IF NOT EXISTS sector TEXT" in sql
+    assert "ADD COLUMN IF NOT EXISTS industry TEXT" in sql
+    assert "ADD COLUMN IF NOT EXISTS currency TEXT" in sql
+    assert "DROP COLUMN IF EXISTS sector" in sql
+    assert "DROP COLUMN IF EXISTS industry" in sql
 
 
 def test_migrate_metrics_history_restores_composite_unique() -> None:

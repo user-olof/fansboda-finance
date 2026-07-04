@@ -177,6 +177,8 @@ environments differ (e.g. more conservative batch delays in production).
 |--------|------|-------|
 | `symbol` | TEXT | Primary key |
 | `name` | TEXT | Company name |
+| `sector` | TEXT | Sector from yfinance (using sectorKey) |
+| `industry` | TEXT | Industry from yfinance (using industryKey) |
 | `updated_at` | TIMESTAMPTZ | When the row was written |
 
 ### Table `metrics` (SMA history, one row per ticker per `trading_date`)
@@ -188,6 +190,7 @@ environments differ (e.g. more conservative batch delays in production).
 | `name` | TEXT | Copied from `tickers` at fetch time |
 | `trading_date` | DATE | Market session used for this snapshot |
 | `updated_at` | TIMESTAMPTZ | When the row was written |
+| `currency` | TEXT | Currency code |
 | `sma_50` | NUMERIC(18,6) | 50-day SMA of closes |
 | `sma_200` | NUMERIC(18,6) | 200-day SMA of closes |
 | `current_price` | NUMERIC(18,6) | Adjusted close on `trading_date` |

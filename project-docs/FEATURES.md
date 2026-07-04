@@ -30,12 +30,15 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 ### SMA metrics history
 
 - Stores **SMA-50**, **SMA-200**, and **current price** (adjusted close) per ticker.
+- Stores **currency** from yfinance at fetch time. **Name** is copied from `tickers` into each snapshot.
+- **Sector** and **industry** are watchlist-level fields on `tickers`, not duplicated per metric row.
 - One row per `(ticker, trading_date)` — each weekly run appends a new snapshot.
 - Idempotent inserts: `ON CONFLICT (ticker, trading_date) DO NOTHING`.
 
 ### Watchlist
 
-- **`tickers` table:** `symbol` (primary key), `name`, `updated_at`.
+- **`tickers` table:** `symbol` (primary key), `name`, `sector`, `industry`, `updated_at`.
+- `sector` and `industry` come from yfinance (`sectorKey`, `industryKey`).
 - Symbols include Swedish `.ST` listings and other markets.
 - Deleting a ticker cascades to all its `metrics` rows.
 
@@ -48,10 +51,10 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 
 | Table | Key columns |
 |-------|-------------|
-| `tickers` | `symbol` (PK), `name`, `updated_at` |
-| `metrics` | `id` (PK), `ticker` (FK → `tickers.symbol`), `name`, `trading_date`, `updated_at`, `sma_50`, `sma_200`, `current_price` |
+| `tickers` | `symbol` (PK), `name`, `sector`, `industry`, `updated_at` |
+| `metrics` | `id` (PK), `ticker` (FK → `tickers.symbol`), `name`, `trading_date`, `updated_at`, `currency`, `sma_50`, `sma_200`, `current_price` |
 
-Price columns use `NUMERIC(18, 6)`. Unique on `(ticker, trading_date)`.
+`name` on `metrics` is copied from `tickers` at fetch time. `currency` is the listing currency code captured per snapshot. Price columns use `NUMERIC(18, 6)`. Unique on `(ticker, trading_date)`.
 
 DDL: `schema.sql` for new databases; `migrate_*.sql` for upgrades ([MIGRATIONS.md](./MIGRATIONS.md)).
 
@@ -70,6 +73,7 @@ Scheduled **Thursdays at 11:00 UTC** on the Production VM (FR-1 – FR-8).
 | Batch download | ~300 days OHLCV via yfinance (default 40 symbols/batch) |
 | Retry / backoff | Retries 429, rate limits, timeouts, connection errors, empty frames |
 | Compute SMAs | Requires ≥200 valid daily closes; captures latest close and `trading_date` |
+| yfinance metadata | Captures `currency` per snapshot; copies `name` from `tickers` |
 | Append metrics | Inserts new rows without overwriting history |
 | Retention purge | Deletes metrics older than configured retention (default 365 days) |
 | Observability | Per-batch progress, per-ticker results, insert/purge counts, final summary |
@@ -82,7 +86,8 @@ Manual / ad-hoc script for initial and ongoing watchlist setup (FR-9 – FR-11).
 |------------|--------|
 | Load symbols | Reads symbol file (one per line; `#` comments ignored); uppercases |
 | Resolve names | Fetches company name from yfinance (`longName`, fallback `shortName`) |
-| Upsert | Insert or update `(symbol, name)` on conflict by `symbol`; sets `updated_at` |
+| Resolve sector / industry | Fetches `sectorKey` / `industryKey` from yfinance (same rate-limit pattern as names) |
+| Upsert | Insert or update `(symbol, name, sector, industry)` on conflict by `symbol`; sets `updated_at` |
 | Rate limiting | Configurable delay between name lookups (default 0.25s) |
 
 ### Historical backfill (`backfill_sma.py`)
@@ -239,7 +244,7 @@ Deploy SA IAM roles: `compute.instanceAdmin.v1`, `iam.serviceAccountUser`, `comp
 
 | Feature | PRD | Description |
 |---------|-----|-------------|
-| Metadata refresh | FR-12 / §11 | Refresh names (and future metadata) for existing and new `tickers`; optional subset CLI (RFC-010) |
+| Metadata refresh | FR-12 / §11 | Refresh `tickers` metadata (names, `sector`, `industry`) for existing and new symbols; optional subset CLI (RFC-010) |
 
 ---
 
