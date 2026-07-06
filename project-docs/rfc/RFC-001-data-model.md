@@ -19,7 +19,7 @@ Postgres schema for the watchlist (`tickers`) and SMA history (`metrics`). One r
 | Column | Type | Notes |
 |--------|------|-------|
 | `symbol` | TEXT | Primary key |
-| `name` | TEXT | Company name |
+| `company` | TEXT | Company name |
 | `sector` | TEXT | Sector from yfinance (`sectorKey`) |
 | `industry` | TEXT | Industry from yfinance (`industryKey`) |
 | `updated_at` | TIMESTAMPTZ | When the row was written |
@@ -30,7 +30,7 @@ Postgres schema for the watchlist (`tickers`) and SMA history (`metrics`). One r
 |--------|------|-------|
 | `id` | BIGSERIAL | Primary key |
 | `ticker` | TEXT | FK → `tickers.symbol` `ON DELETE CASCADE` |
-| `name` | TEXT | Copied from `tickers` at fetch time |
+| `company` | TEXT | Copied from `tickers` at fetch time |
 | `trading_date` | DATE | Market session for this snapshot |
 | `updated_at` | TIMESTAMPTZ | When the row was written |
 | `currency` | TEXT | Listing currency code from yfinance |
@@ -68,8 +68,9 @@ Postgres schema for the watchlist (`tickers`) and SMA history (`metrics`). One r
 | `migrate_add_trading_date_index.sql` | Add retention index |
 | `migrate_add_tickers_updated_at.sql` | Add `tickers.updated_at` for existing DBs |
 | `migrate_move_metadata_to_tickers.sql` | Add `tickers.sector`, `tickers.industry`, `metrics.currency`; drop misplaced `metrics.sector` / `metrics.industry` |
+| `migrate_rename_name_to_company.sql` | Rename `name` → `company` on `tickers` and `metrics` (PRD §6) |
 | `migrate_add_metrics_metadata.sql` | **Superseded** — see `migrate_move_metadata_to_tickers.sql` |
-| `models.py` | `TickerEntry` (`sector`, `industry`), `MetricRow` (`currency`) |
+| `models.py` | `TickerEntry` (`company`, `sector`, `industry`), `MetricRow` (`company`, `currency`) |
 
 ### New database setup
 
@@ -87,9 +88,9 @@ Legacy upgrades: see [MIGRATIONS.md](../MIGRATIONS.md).
 SELECT conname FROM pg_constraint
 WHERE conrelid = 'metrics'::regclass AND contype = 'u';
 
-SELECT symbol, name, sector, industry FROM tickers LIMIT 5;
+SELECT symbol, company, sector, industry FROM tickers LIMIT 5;
 
-SELECT ticker, trading_date, name, currency, sma_50, sma_200, current_price
+SELECT ticker, trading_date, company, currency, sma_50, sma_200, current_price
 FROM metrics ORDER BY trading_date DESC LIMIT 5;
 ```
 
@@ -108,7 +109,8 @@ FROM metrics ORDER BY trading_date DESC LIMIT 5;
 - [x] `schema.sql` and migrations aligned to PRD §6 column layout
 - [x] `TickerEntry` / `upsert_tickers` include `sector`, `industry` (RFC-002)
 - [x] `MetricRow` / `insert_metrics` include `currency` only on metrics (RFC-003)
+- [x] `tickers.company`, `metrics.company` columns (PRD §6)
 
 ## Open questions
 
-- Should `backfill_sma.py` populate `metrics.currency`, or leave it `NULL` until the weekly fetch runs?
+- None.

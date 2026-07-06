@@ -23,16 +23,17 @@ SELECT column_name
 FROM information_schema.columns
 WHERE table_schema = 'public'
   AND table_name = 'tickers'
-  AND column_name IN ('sector', 'industry')
+  AND column_name IN ('sector', 'industry', 'company')
 ORDER BY column_name;
--- expect 2 rows after migrate_move_metadata_to_tickers.sql or fresh schema.sql
+-- expect 3 rows after migrate_rename_name_to_company.sql or fresh schema.sql
 
 SELECT column_name
 FROM information_schema.columns
 WHERE table_schema = 'public'
   AND table_name = 'metrics'
-  AND column_name = 'currency';
--- expect 1 row after migrate_move_metadata_to_tickers.sql or fresh schema.sql
+  AND column_name IN ('currency', 'company')
+ORDER BY column_name;
+-- expect 2 rows after migrate_rename_name_to_company.sql or fresh schema.sql
 
 -- unique (ticker, trading_date)
 SELECT conname

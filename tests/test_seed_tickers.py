@@ -1,7 +1,12 @@
 from unittest.mock import MagicMock, patch
 
 from db.tickers import upsert_tickers
-from seed_tickers import resolve_name, resolve_ticker_metadata, seed_tickers_from_file
+from seed_tickers import (
+    resolve_metadata,
+    resolve_name,
+    resolve_watchlist_fields,
+    seed_tickers_from_file,
+)
 
 
 def test_resolve_name_prefers_long_name() -> None:
@@ -28,7 +33,35 @@ def test_resolve_name_returns_none_when_missing() -> None:
         assert resolve_name("UNKNOWN.ST") is None
 
 
-def test_resolve_ticker_metadata_uses_yfinance_keys() -> None:
+def test_resolve_metadata_uses_yfinance_keys() -> None:
+    mock_ticker = MagicMock()
+    mock_ticker.info = {
+        "sectorKey": "technology",
+        "industryKey": "consumer-electronics",
+    }
+
+    with patch("seed_tickers.yf.Ticker", return_value=mock_ticker):
+        assert resolve_metadata("AAPL") == (
+            "technology",
+            "consumer-electronics",
+        )
+
+
+def test_resolve_metadata_falls_back_to_sector_and_industry() -> None:
+    mock_ticker = MagicMock()
+    mock_ticker.info = {
+        "sector": "Industrials",
+        "industry": "Farm & Heavy Construction Machinery",
+    }
+
+    with patch("seed_tickers.yf.Ticker", return_value=mock_ticker):
+        assert resolve_metadata("VOLV-A.ST") == (
+            "Industrials",
+            "Farm & Heavy Construction Machinery",
+        )
+
+
+def test_resolve_watchlist_fields_uses_single_yfinance_lookup() -> None:
     mock_ticker = MagicMock()
     mock_ticker.info = {
         "longName": "Apple Inc.",
@@ -36,12 +69,14 @@ def test_resolve_ticker_metadata_uses_yfinance_keys() -> None:
         "industryKey": "consumer-electronics",
     }
 
-    with patch("seed_tickers.yf.Ticker", return_value=mock_ticker):
-        assert resolve_ticker_metadata("AAPL") == (
+    with patch("seed_tickers.yf.Ticker", return_value=mock_ticker) as mock_ctor:
+        assert resolve_watchlist_fields("AAPL") == (
             "Apple Inc.",
             "technology",
             "consumer-electronics",
         )
+
+    mock_ctor.assert_called_once_with("AAPL")
 
 
 def test_upsert_tickers_executes_values() -> None:
@@ -59,8 +94,10 @@ def test_upsert_tickers_executes_values() -> None:
 
     mock_execute.assert_called_once()
     sql = mock_execute.call_args[0][1]
+    assert "company" in sql
     assert "sector" in sql
     assert "industry" in sql
+    assert "ON CONFLICT (symbol)" in sql
     assert "updated_at = NOW()" in sql
     mock_conn.commit.assert_called_once()
     assert affected == 2
@@ -77,7 +114,7 @@ def test_seed_tickers_from_file_resolves_and_upserts(tmp_path) -> None:
     tickers_file.write_text("aaa.st\n# comment\n\nbbb.st\n", encoding="utf-8")
 
     with patch(
-        "seed_tickers.resolve_ticker_metadata",
+        "seed_tickers.resolve_watchlist_fields",
         side_effect=[
             ("Alpha AB", "Industrials", "Machinery"),
             ("Beta AB", "Technology", "Software"),
@@ -99,4 +136,19 @@ def test_seed_tickers_from_file_resolves_and_upserts(tmp_path) -> None:
             ("AAA.ST", "Alpha AB", "Industrials", "Machinery"),
             ("BBB.ST", "Beta AB", "Technology", "Software"),
         ],
+    )
+
+
+def test_seed_tickers_from_file_records_none_on_resolve_failure(tmp_path) -> None:
+    tickers_file = tmp_path / "tickers.txt"
+    tickers_file.write_text("aaa.st\n", encoding="utf-8")
+
+    with patch("seed_tickers.resolve_watchlist_fields", side_effect=RuntimeError("boom")):
+        with patch("seed_tickers.upsert_tickers", return_value=1) as mock_upsert:
+            count = seed_tickers_from_file("postgresql://example", tickers_file)
+
+    assert count == 1
+    mock_upsert.assert_called_once_with(
+        "postgresql://example",
+        [("AAA.ST", None, None, None)],
     )

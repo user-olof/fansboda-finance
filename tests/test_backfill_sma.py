@@ -1,16 +1,34 @@
 from datetime import date
 from decimal import Decimal
+from unittest.mock import patch
 
 import pandas as pd
 
 from backfill_sma import (
     filter_new_rows,
+    main,
     metric_rows_from_backfill_batch,
     metric_rows_from_weekly_samples,
     sample_start_weeks,
     week_index_series,
 )
-from models import MetricRow
+from config import BaseConfig
+from models import MetricRow, TickerEntry
+
+
+def _mock_config(**overrides: object) -> BaseConfig:
+    values: dict[str, object] = {
+        "database_url": "postgresql://example",
+        "backfill_batch_size": 25,
+        "backfill_batch_delay_seconds": 5.0,
+        "backfill_history_days": 730,
+        "backfill_window_weeks": 52,
+        "yf_max_retries": 3,
+        "yf_retry_base_seconds": 5.0,
+        "yf_name_delay_seconds": 0.25,
+    }
+    values.update(overrides)
+    return BaseConfig(**values)  # type: ignore[arg-type]
 
 
 def test_sample_start_weeks() -> None:
@@ -40,12 +58,12 @@ def test_metric_rows_from_weekly_samples_creates_rolling_windows() -> None:
     )
 
     rows = metric_rows_from_weekly_samples(
-        "AAA.ST", history, name="Alpha AB", currency="SEK"
+        "AAA.ST", history, company="Alpha AB", currency="SEK"
     )
 
     assert len(rows) == len(sample_start_weeks(int(week_index_series(index, pd.Timestamp(index[0])).max()), 52))
     assert rows[0].ticker == "AAA.ST"
-    assert rows[0].name == "Alpha AB"
+    assert rows[0].company == "Alpha AB"
     assert rows[0].currency == "SEK"
     assert rows[0].sma_50 is not None
     assert rows[0].sma_200 is not None
@@ -72,13 +90,14 @@ def test_metric_rows_from_backfill_batch_sets_currency() -> None:
 
     assert rows
     assert all(row.currency == "SEK" for row in rows)
+    assert all(row.company == "Alpha AB" for row in rows)
 
 
 def test_filter_new_rows_skips_existing_pairs() -> None:
     rows = [
         MetricRow(
             ticker="AAA.ST",
-            name="Alpha",
+            company="Alpha",
             trading_date=date(2025, 1, 3),
             sma_50=Decimal("1"),
             sma_200=Decimal("2"),
@@ -86,7 +105,7 @@ def test_filter_new_rows_skips_existing_pairs() -> None:
         ),
         MetricRow(
             ticker="AAA.ST",
-            name="Alpha",
+            company="Alpha",
             trading_date=date(2025, 1, 10),
             sma_50=Decimal("4"),
             sma_200=Decimal("5"),
@@ -98,3 +117,112 @@ def test_filter_new_rows_skips_existing_pairs() -> None:
 
     assert len(filtered) == 1
     assert filtered[0].trading_date == date(2025, 1, 10)
+
+
+def test_main_backfill_inserts_new_rows() -> None:
+    metric_row = MetricRow(
+        ticker="AAA.ST",
+        company="Alpha AB",
+        trading_date=date(2025, 6, 6),
+        sma_50=Decimal("1"),
+        sma_200=Decimal("2"),
+        current_price=Decimal("3"),
+        currency="SEK",
+    )
+
+    with patch("backfill_sma.get_config", return_value=_mock_config()):
+        with patch(
+            "backfill_sma.load_tickers_from_db",
+            return_value=[TickerEntry(symbol="AAA.ST", company="Alpha AB")],
+        ):
+            with patch("backfill_sma.load_existing_metric_keys", return_value=set()):
+                with patch(
+                    "backfill_sma.load_currency_for_tickers",
+                    return_value={"AAA.ST": "SEK"},
+                ) as mock_currency:
+                    with patch("backfill_sma.download_batch") as mock_download:
+                        with patch(
+                            "backfill_sma.metric_rows_from_backfill_batch",
+                            return_value=[metric_row],
+                        ):
+                            with patch(
+                                "backfill_sma.insert_metrics", return_value=1
+                            ) as mock_insert:
+                                assert main() == 0
+
+    mock_currency.assert_called_once()
+    mock_download.assert_called_once()
+    mock_insert.assert_called_once_with("postgresql://example", [metric_row])
+    inserted = mock_insert.call_args[0][1][0]
+    assert inserted.company == "Alpha AB"
+    assert inserted.currency == "SEK"
+
+
+def test_main_succeeds_when_all_rows_already_exist() -> None:
+    metric_row = MetricRow(
+        ticker="AAA.ST",
+        company="Alpha AB",
+        trading_date=date(2025, 6, 6),
+        sma_50=Decimal("1"),
+        sma_200=Decimal("2"),
+        current_price=Decimal("3"),
+        currency="SEK",
+    )
+
+    with patch("backfill_sma.get_config", return_value=_mock_config()):
+        with patch(
+            "backfill_sma.load_tickers_from_db",
+            return_value=[TickerEntry(symbol="AAA.ST", company="Alpha AB")],
+        ):
+            with patch(
+                "backfill_sma.load_existing_metric_keys",
+                return_value={("AAA.ST", date(2025, 6, 6))},
+            ):
+                with patch(
+                    "backfill_sma.load_currency_for_tickers",
+                    return_value={"AAA.ST": "SEK"},
+                ):
+                    with patch("backfill_sma.download_batch"):
+                        with patch(
+                            "backfill_sma.metric_rows_from_backfill_batch",
+                            return_value=[metric_row],
+                        ):
+                            with patch("backfill_sma.insert_metrics", return_value=0):
+                                assert main() == 0
+
+
+def test_main_returns_failure_on_failed_batch() -> None:
+    with patch("backfill_sma.get_config", return_value=_mock_config()):
+        with patch(
+            "backfill_sma.load_tickers_from_db",
+            return_value=[TickerEntry(symbol="AAA.ST", company="Alpha AB")],
+        ):
+            with patch("backfill_sma.load_existing_metric_keys", return_value=set()):
+                with patch(
+                    "backfill_sma.load_currency_for_tickers",
+                    return_value={"AAA.ST": "SEK"},
+                ):
+                    with patch(
+                        "backfill_sma.download_batch",
+                        side_effect=RuntimeError("rate limited"),
+                    ):
+                        assert main() == 1
+
+
+def test_main_returns_failure_when_nothing_generated() -> None:
+    with patch("backfill_sma.get_config", return_value=_mock_config()):
+        with patch(
+            "backfill_sma.load_tickers_from_db",
+            return_value=[TickerEntry(symbol="AAA.ST", company="Alpha AB")],
+        ):
+            with patch("backfill_sma.load_existing_metric_keys", return_value=set()):
+                with patch(
+                    "backfill_sma.load_currency_for_tickers",
+                    return_value={"AAA.ST": "SEK"},
+                ):
+                    with patch("backfill_sma.download_batch"):
+                        with patch(
+                            "backfill_sma.metric_rows_from_backfill_batch",
+                            return_value=[],
+                        ):
+                            assert main() == 1

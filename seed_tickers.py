@@ -21,27 +21,73 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def resolve_name(symbol: str) -> str | None:
-    """Fetch company name from yfinance metadata (longName, fallback shortName)."""
-    name, _, _ = resolve_ticker_metadata(symbol)
-    return name
+def _fetch_info(symbol: str) -> dict:
+    return yf.Ticker(symbol).info
 
 
-def resolve_ticker_metadata(
+def _watchlist_fields_from_info(
+    info: dict,
+    *,
     symbol: str,
 ) -> tuple[str | None, str | None, str | None]:
-    """Fetch name, sector, and industry from yfinance metadata."""
-    info = yf.Ticker(symbol).info
-    name = info.get("longName") or info.get("shortName")
+    company = info.get("longName") or info.get("shortName")
     sector = info.get("sectorKey") or info.get("sector")
     industry = info.get("industryKey") or info.get("industry")
-    if not name:
+    if not company:
         logger.warning("No company name found for %s", symbol)
     return (
-        str(name) if name else None,
+        str(company) if company else None,
         str(sector) if sector else None,
         str(industry) if industry else None,
     )
+
+
+def resolve_name(symbol: str) -> str | None:
+    """Fetch company name from yfinance metadata (longName, fallback shortName)."""
+    company, _, _ = _watchlist_fields_from_info(_fetch_info(symbol), symbol=symbol)
+    return company
+
+
+def resolve_metadata(symbol: str) -> tuple[str | None, str | None]:
+    """Fetch sector and industry from yfinance metadata."""
+    _, sector, industry = _watchlist_fields_from_info(_fetch_info(symbol), symbol=symbol)
+    return sector, industry
+
+
+def resolve_watchlist_fields(
+    symbol: str,
+) -> tuple[str | None, str | None, str | None]:
+    """Resolve company, sector, and industry in one yfinance lookup."""
+    return _watchlist_fields_from_info(_fetch_info(symbol), symbol=symbol)
+
+
+def resolve_and_upsert_symbols(
+    database_url: str,
+    symbols: list[str],
+    *,
+    name_delay: float = DEFAULT_YF_NAME_DELAY_SECONDS,
+) -> int:
+    """Resolve yfinance metadata for each symbol and upsert into tickers."""
+    rows: list[tuple[str, str | None, str | None, str | None]] = []
+
+    for i, symbol in enumerate(symbols):
+        if i > 0:
+            time.sleep(name_delay)
+        try:
+            company, sector, industry = resolve_watchlist_fields(symbol)
+            rows.append((symbol, company, sector, industry))
+            logger.info(
+                "Resolved %s: company=%s sector=%s industry=%s",
+                symbol,
+                company,
+                sector,
+                industry,
+            )
+        except Exception:
+            logger.exception("Failed to resolve metadata for %s", symbol)
+            rows.append((symbol, None, None, None))
+
+    return upsert_tickers(database_url, rows)
 
 
 def seed_tickers_from_file(
@@ -52,26 +98,9 @@ def seed_tickers_from_file(
 ) -> int:
     """Load symbols from file, resolve metadata, upsert into tickers. Returns row count."""
     symbols = load_tickers(tickers_path)
-    rows: list[tuple[str, str | None, str | None, str | None]] = []
-
-    for i, symbol in enumerate(symbols):
-        if i > 0:
-            time.sleep(name_delay)
-        try:
-            name, sector, industry = resolve_ticker_metadata(symbol)
-            rows.append((symbol, name, sector, industry))
-            logger.info(
-                "Resolved %s: name=%s sector=%s industry=%s",
-                symbol,
-                name,
-                sector,
-                industry,
-            )
-        except Exception:
-            logger.exception("Failed to resolve metadata for %s", symbol)
-            rows.append((symbol, None, None, None))
-
-    return upsert_tickers(database_url, rows)
+    return resolve_and_upsert_symbols(
+        database_url, symbols, name_delay=name_delay
+    )
 
 
 def main() -> int:

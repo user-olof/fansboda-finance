@@ -101,17 +101,16 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
   (`longName`, falling back to `shortName`), with a small rate-limit delay.
 - **FR-11 Upsert tickers:** Insert/update `(symbol, name)` rows into the
   `tickers` table on conflict by `symbol`.
-- **FR-12 Ad-hoc metadata refresh (planned):** Provide a script to easily
-  update watchlist metadata on an ad-hoc basis — re-resolve company names (and
-  any future metadata fields) from yfinance and upsert them into `tickers`. It
-  must operate on both:
+- **FR-12 Ad-hoc metadata refresh:** `refresh_tickers.py` updates watchlist
+  metadata on an ad-hoc basis — re-resolve `company`, `sector`, and `industry`
+  from yfinance and upsert them into `tickers`. It operates on both:
   - **Existing symbols** already present in the `tickers` table (refresh their
     metadata in place), and
   - **New symbols** found in the symbol file that are not yet in `tickers`
     (resolve their metadata and add them as new rows).
 
-  It should apply the same rate-limiting and upsert-on-conflict behavior as
-  seeding, and optionally accept a subset of symbols to refresh.
+  It applies the same rate-limiting and upsert-on-conflict behavior as
+  seeding. CLI: default file ∪ DB merge; `--from-db`; optional `--symbols` subset.
 
 ### 5.4 Historical backfill (`backfill_sma.py`)
 
@@ -176,7 +175,7 @@ environments differ (e.g. more conservative batch delays in production).
 | Column | Type | Notes |
 |--------|------|-------|
 | `symbol` | TEXT | Primary key |
-| `name` | TEXT | Company name |
+| `company` | TEXT | Company name |
 | `sector` | TEXT | Sector from yfinance (using sectorKey) |
 | `industry` | TEXT | Industry from yfinance (using industryKey) |
 | `updated_at` | TIMESTAMPTZ | When the row was written |
@@ -187,7 +186,7 @@ environments differ (e.g. more conservative batch delays in production).
 |--------|------|-------|
 | `id` | BIGSERIAL | Primary key |
 | `ticker` | TEXT | FK → `tickers.symbol` `ON DELETE CASCADE` |
-| `name` | TEXT | Copied from `tickers` at fetch time |
+| `company` | TEXT | Copied from `tickers` at fetch time |
 | `trading_date` | DATE | Market session used for this snapshot |
 | `updated_at` | TIMESTAMPTZ | When the row was written |
 | `currency` | TEXT | Currency code |
@@ -330,8 +329,6 @@ Python 3.11+. Key libraries: `yfinance`, `pandas`, `psycopg2-binary`,
 
 ## 11. Future Considerations (Out of Current Scope)
 
-- Ad-hoc metadata refresh script for the watchlist (see FR-12): update company
-  names / metadata for existing `tickers` rows without a full re-seed.
 - Additional indicators (EMA, RSI, MACD) or signal/alerting layer.
 - A read API or dashboard for the `metrics` data.
 - Gap detection for missed weekly runs.

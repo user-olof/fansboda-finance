@@ -3,7 +3,7 @@
 
 CREATE TABLE IF NOT EXISTS tickers (
     symbol      TEXT PRIMARY KEY,
-    name        TEXT,
+    company     TEXT,
     sector      TEXT,
     industry    TEXT,
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS metrics (
     id             BIGSERIAL       PRIMARY KEY,
     ticker         TEXT            NOT NULL
                        REFERENCES tickers (symbol) ON DELETE CASCADE,
-    name           TEXT,
+    company        TEXT,
     trading_date   DATE            NOT NULL,
     updated_at     TIMESTAMPTZ     NOT NULL,
     currency       TEXT,

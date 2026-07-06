@@ -13,6 +13,7 @@ MIGRATIONS = [
     REPO_ROOT / "migrate_add_trading_date_index.sql",
     REPO_ROOT / "migrate_add_tickers_updated_at.sql",
     REPO_ROOT / "migrate_move_metadata_to_tickers.sql",
+    REPO_ROOT / "migrate_rename_name_to_company.sql",
 ]
 
 
@@ -66,8 +67,16 @@ def test_schema_metrics_currency_column() -> None:
     sql = SCHEMA_SQL.read_text(encoding="utf-8")
     metrics_section = sql.split("CREATE TABLE IF NOT EXISTS metrics", 1)[1]
     assert re.search(r"\bcurrency\s+TEXT", metrics_section)
+    assert re.search(r"\bcompany\s+TEXT", metrics_section)
     assert "sector" not in metrics_section.split("CREATE INDEX")[0]
     assert "industry" not in metrics_section.split("CREATE INDEX")[0]
+
+
+def test_schema_tickers_company_column() -> None:
+    sql = SCHEMA_SQL.read_text(encoding="utf-8")
+    tickers_section = sql.split("CREATE TABLE IF NOT EXISTS metrics", 1)[0]
+    assert re.search(r"\bcompany\s+TEXT", tickers_section)
+    assert not re.search(r"\bname\s+TEXT", tickers_section)
 
 
 def test_migrate_move_metadata_to_tickers() -> None:
@@ -77,6 +86,13 @@ def test_migrate_move_metadata_to_tickers() -> None:
     assert "ADD COLUMN IF NOT EXISTS currency TEXT" in sql
     assert "DROP COLUMN IF EXISTS sector" in sql
     assert "DROP COLUMN IF EXISTS industry" in sql
+
+
+def test_migrate_rename_name_to_company() -> None:
+    sql = (REPO_ROOT / "migrate_rename_name_to_company.sql").read_text(encoding="utf-8")
+    assert "RENAME COLUMN name TO company" in sql
+    assert "tickers" in sql
+    assert "metrics" in sql
 
 
 def test_migrate_metrics_history_restores_composite_unique() -> None:

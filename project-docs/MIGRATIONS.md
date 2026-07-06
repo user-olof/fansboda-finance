@@ -24,7 +24,8 @@ Apply only the migrations you have not yet run, **in order**. Each file is idemp
 | 4 | `migrate_metrics_history.sql` | Restore one row per `(ticker, trading_date)`; drops `metrics_ticker_key` if present |
 | 5 | `migrate_add_trading_date_index.sql` | Add `idx_metrics_trading_date` if missing (also included in step 4) |
 | 6 | `migrate_add_tickers_updated_at.sql` | Add `tickers.updated_at` if missing |
-| 7 | `migrate_move_metadata_to_tickers.sql` | Add `tickers.sector`, `tickers.industry`, `metrics.currency`; drop misplaced `metrics.sector` / `metrics.industry` if present. Supersedes `migrate_add_metrics_metadata.sql`. |
+| 7 | `migrate_move_metadata_to_tickers.sql` | Add `tickers.sector`, `tickers.industry`, `metrics.currency`; drop misplaced `metrics.sector` / `metrics.industry` if present |
+| 8 | `migrate_rename_name_to_company.sql` | Rename `name` → `company` on `tickers` and `metrics` (PRD §6) |
 
 ### Path by starting state
 

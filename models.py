@@ -10,7 +10,7 @@ from decimal import Decimal
 @dataclass(frozen=True)
 class TickerEntry:
     symbol: str
-    name: str | None
+    company: str | None
     sector: str | None = None
     industry: str | None = None
 
@@ -18,7 +18,7 @@ class TickerEntry:
 @dataclass(frozen=True)
 class MetricRow:
     ticker: str
-    name: str | None
+    company: str | None
     trading_date: date
     sma_50: Decimal | None
     sma_200: Decimal | None

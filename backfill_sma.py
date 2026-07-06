@@ -48,7 +48,7 @@ def metric_rows_from_weekly_samples(
     ticker: str,
     history: pd.DataFrame,
     *,
-    name: str | None,
+    company: str | None,
     currency: str | None = None,
     window_weeks: int = DEFAULT_BACKFILL_WINDOW_WEEKS,
 ) -> list[MetricRow]:
@@ -83,7 +83,7 @@ def metric_rows_from_weekly_samples(
         rows.append(
             MetricRow(
                 ticker=ticker,
-                name=name,
+                company=company,
                 trading_date=trading_date,
                 sma_50=sma_50,
                 sma_200=sma_200,
@@ -98,7 +98,7 @@ def metric_rows_from_weekly_samples(
 def metric_rows_from_backfill_batch(
     data: pd.DataFrame,
     tickers: list[str],
-    names: dict[str, str | None],
+    companies: dict[str, str | None],
     currencies: dict[str, str | None] | None = None,
     *,
     window_weeks: int = DEFAULT_BACKFILL_WINDOW_WEEKS,
@@ -121,7 +121,7 @@ def metric_rows_from_backfill_batch(
                 metric_rows_from_weekly_samples(
                     ticker,
                     ticker_data,
-                    name=names.get(ticker),
+                    company=companies.get(ticker),
                     currency=currencies.get(ticker),
                     window_weeks=window_weeks,
                 )
@@ -132,7 +132,7 @@ def metric_rows_from_backfill_batch(
             metric_rows_from_weekly_samples(
                 ticker,
                 data,
-                name=names.get(ticker),
+                company=companies.get(ticker),
                 currency=currencies.get(ticker),
                 window_weeks=window_weeks,
             )
@@ -178,7 +178,7 @@ def main() -> int:
         return 1
 
     all_tickers = [entry.symbol for entry in watchlist]
-    names = {entry.symbol: entry.name for entry in watchlist}
+    companies = {entry.symbol: entry.company for entry in watchlist}
     start = datetime.now(timezone.utc).date() - timedelta(days=history_days)
     batches = chunked(all_tickers, batch_size)
 
@@ -217,7 +217,7 @@ def main() -> int:
             batch_rows = metric_rows_from_backfill_batch(
                 data,
                 batch,
-                names,
+                companies,
                 batch_currencies,
                 window_weeks=window_weeks,
             )

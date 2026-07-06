@@ -11,7 +11,7 @@ from models import MetricRow
 
 INSERT_METRICS_SQL = """
 INSERT INTO metrics (
-    ticker, name, trading_date, updated_at,
+    ticker, company, trading_date, updated_at,
     currency, sma_50, sma_200, current_price
 )
 VALUES %s
@@ -19,10 +19,14 @@ ON CONFLICT (ticker, trading_date) DO NOTHING
 """
 
 FRESH_TICKERS_SQL = """
-SELECT ticker
-FROM metrics
-WHERE ticker = ANY(%s)
-  AND trading_date = (SELECT MAX(trading_date) FROM metrics)
+SELECT lt.ticker
+FROM (
+    SELECT ticker, MAX(trading_date) AS latest_trading_date
+    FROM metrics
+    WHERE ticker = ANY(%s)
+    GROUP BY ticker
+) lt
+WHERE lt.latest_trading_date = (SELECT MAX(trading_date) FROM metrics)
 """
 
 EXISTING_METRICS_SQL = """
@@ -47,7 +51,7 @@ def _metric_values(rows: list[MetricRow], *, updated_at: datetime) -> list[tuple
     return [
         (
             row.ticker,
-            row.name,
+            row.company,
             row.trading_date,
             updated_at,
             row.currency,
@@ -92,7 +96,12 @@ def load_existing_metric_keys(
 def filter_stale_tickers(
     database_url: str, tickers: list[str]
 ) -> tuple[list[str], int, date | None]:
-    """Return tickers needing fetch; skip those already at global max trading_date."""
+    """Return tickers needing fetch (PRD FR-2).
+
+    A ticker is fresh when its latest ``trading_date`` equals the global max
+    ``trading_date`` in ``metrics`` — i.e. it already has a row for the current
+    market session. All others are stale and need fetching.
+    """
     with psycopg2.connect(database_url) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT MAX(trading_date) FROM metrics")

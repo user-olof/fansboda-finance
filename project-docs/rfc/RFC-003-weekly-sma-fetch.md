@@ -10,17 +10,17 @@
 
 ## Summary
 
-Core weekly job (`fetch_sma.py`): load watchlist, skip tickers already at the global max `trading_date`, batch-download ~300 days OHLCV from yfinance, compute SMA-50/200, copy `name` from `tickers`, capture `currency` from yfinance, append metrics rows, purge stale history. Runs **Thursdays 11:00 UTC** via cron (RFC-008).
+Core weekly job (`fetch_sma.py`): load watchlist, skip tickers that already have a row at their latest `trading_date`, batch-download ~300 days OHLCV from yfinance, compute SMA-50/200, copy `company` from `tickers`, capture `currency` from yfinance, append metrics rows, purge stale history. Runs **Thursdays 11:00 UTC** via cron (RFC-008).
 
 ## Requirements
 
 | ID | Requirement |
 |----|-------------|
 | FR-1 | Load watchlist from `tickers`; fail clearly if empty |
-| FR-2 | Skip tickers already fresh at global max `trading_date` |
+| FR-2 | Skip tickers that already have a `metrics` row at their latest `trading_date` |
 | FR-3 | Batch download ~300d OHLCV (default 40 symbols/batch, delay between batches) |
 | FR-4 | Retry 429, rate, timeout, connection, empty frames with exponential backoff |
-| FR-5 | Compute SMA-50/200; skip if &lt;200 closes; set `current_price`, `trading_date`, `currency`; copy `name` from `tickers` |
+| FR-5 | Compute SMA-50/200; skip if &lt;200 closes; set `current_price`, `trading_date`, `currency`; copy `company` from `tickers` |
 | FR-6 | Append with `ON CONFLICT (ticker, trading_date) DO NOTHING` |
 | FR-7 | Retention purge after run (RFC-004) |
 | FR-8 | Log batch progress, per-ticker results, summary; non-zero exit on fatal errors |
@@ -44,7 +44,7 @@ Core weekly job (`fetch_sma.py`): load watchlist, skip tickers already at the gl
 |----------|---------|
 | `load_tickers(path)` | Parse symbol file (shared with seed script) |
 | `compute_smas(close)` | SMA-50 and SMA-200 from close series |
-| `metric_row_from_history(...)` | Single-ticker metric from OHLCV frame; copies `name` from watchlist |
+| `metric_row_from_history(...)` | Single-ticker metric from OHLCV frame; copies `company` from watchlist |
 | `resolve_currency(symbol)` | yfinance `.info` lookup for `currency` |
 | `download_batch(...)` | yfinance batch with retry/backoff, `threads=False` |
 | `metric_rows_from_batch(...)` | Parse MultiIndex download into `MetricRow` list |
@@ -67,10 +67,10 @@ Installed by `scripts/bootstrap-vm.sh` — see RFC-008.
 ## Acceptance criteria
 
 - [x] Loads watchlist; fails clearly if empty
-- [x] Skips fresh tickers at global max `trading_date`
+- [x] Skips fresh tickers per FR-2 (ticker latest `trading_date` equals global max)
 - [x] Batched yfinance download with retry/backoff
 - [x] Computes SMA-50, SMA-200, current price
-- [x] Copies `name` from `tickers` into each metrics row (PRD §6)
+- [x] Copies `company` from `tickers` into each metrics row (PRD §6)
 - [x] Populates `currency` on each metrics row (PRD §6)
 - [x] Appends with `ON CONFLICT (ticker, trading_date) DO NOTHING`
 - [x] SQL in `db/` modules, not in job script
@@ -81,4 +81,4 @@ Installed by `scripts/bootstrap-vm.sh` — see RFC-008.
 
 ## Open questions
 
-- **Global vs per-ticker stale check:** Implementation uses global max `trading_date`. Intentional for weekly job where all tickers share the same latest session date. PRD FR-2 wording is per-ticker; behavior matches “skip if already at latest week’s date” in practice when all tickers are fetched together.
+- None. FR-2 is implemented by comparing each ticker's latest `trading_date` to the global max session date in `metrics`.

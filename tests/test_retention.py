@@ -1,12 +1,13 @@
 """Tests for RFC-004 rolling data retention."""
 
 from datetime import date
+from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 from config import BaseConfig
 from db.metrics import DELETE_STALE_SQL, purge_stale_metrics
 from fetch_sma import main
-from models import TickerEntry
+from models import MetricRow, TickerEntry
 
 
 def _mock_config(**overrides: object) -> BaseConfig:
@@ -58,7 +59,7 @@ def test_main_purges_when_all_tickers_already_fresh() -> None:
     with patch("fetch_sma.get_config", return_value=_mock_config()):
         with patch(
             "fetch_sma.load_tickers_from_db",
-            return_value=[TickerEntry(symbol="AAA.ST", name="Alpha")],
+            return_value=[TickerEntry(symbol="AAA.ST", company="Alpha")],
         ):
             with patch(
                 "fetch_sma.filter_stale_tickers",
@@ -76,19 +77,69 @@ def test_main_purges_after_fetch_even_when_no_metrics_collected() -> None:
     with patch("fetch_sma.get_config", return_value=_mock_config()):
         with patch(
             "fetch_sma.load_tickers_from_db",
-            return_value=[TickerEntry(symbol="AAA.ST", name="Alpha")],
+            return_value=[TickerEntry(symbol="AAA.ST", company="Alpha")],
         ):
             with patch(
                 "fetch_sma.filter_stale_tickers",
                 return_value=(["AAA.ST"], 0, None),
             ):
                 with patch(
-                    "fetch_sma.download_batch",
-                    side_effect=RuntimeError("rate limited"),
+                    "fetch_sma.load_currency_for_tickers",
+                    return_value={"AAA.ST": "SEK"},
                 ):
                     with patch(
-                        "fetch_sma.purge_stale_metrics", return_value=2
-                    ) as mock_purge:
-                        assert main() == 1
+                        "fetch_sma.download_batch",
+                        side_effect=RuntimeError("rate limited"),
+                    ):
+                        with patch(
+                            "fetch_sma.purge_stale_metrics", return_value=2
+                        ) as mock_purge:
+                            assert main() == 1
 
     mock_purge.assert_called_once_with("postgresql://example", 365)
+
+
+def test_main_fetches_stale_tickers_and_inserts() -> None:
+    metric_row = MetricRow(
+        ticker="AAA.ST",
+        company="Alpha",
+        trading_date=date(2026, 6, 6),
+        sma_50=Decimal("1"),
+        sma_200=Decimal("2"),
+        current_price=Decimal("3"),
+        currency="SEK",
+    )
+
+    with patch("fetch_sma.get_config", return_value=_mock_config()):
+        with patch(
+            "fetch_sma.load_tickers_from_db",
+            return_value=[TickerEntry(symbol="AAA.ST", company="Alpha")],
+        ):
+            with patch(
+                "fetch_sma.filter_stale_tickers",
+                return_value=(["AAA.ST"], 0, None),
+            ):
+                with patch(
+                    "fetch_sma.load_currency_for_tickers",
+                    return_value={"AAA.ST": "SEK"},
+                ) as mock_currency:
+                    with patch("fetch_sma.download_batch") as mock_download:
+                        with patch(
+                            "fetch_sma.metric_rows_from_batch",
+                            return_value=[metric_row],
+                        ) as mock_rows:
+                            with patch(
+                                "fetch_sma.insert_metrics", return_value=1
+                            ) as mock_insert:
+                                with patch(
+                                    "fetch_sma.purge_stale_metrics", return_value=0
+                                ):
+                                    assert main() == 0
+
+    mock_currency.assert_called_once()
+    mock_download.assert_called_once()
+    mock_rows.assert_called_once()
+    mock_insert.assert_called_once()
+    inserted_rows = mock_insert.call_args[0][1]
+    assert inserted_rows[0].company == "Alpha"
+    assert inserted_rows[0].currency == "SEK"

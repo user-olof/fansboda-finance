@@ -10,7 +10,7 @@
 
 ## Summary
 
-One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **Not** cron-scheduled. SMA price fields are backfilled from OHLCV. `sector` and `industry` live on `tickers` (RFC-002); `metrics.currency` may remain `NULL` on backfilled rows until populated by the weekly fetch (see RFC-001 open question).
+One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **Not** cron-scheduled. SMA price fields are backfilled from OHLCV. `sector` and `industry` live on `tickers` (RFC-002). `metrics.currency` is resolved per ticker during backfill (shared `load_currency_for_tickers` from RFC-003).
 
 ## Requirements
 
@@ -29,7 +29,7 @@ One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **N
 | File | Role |
 |------|------|
 | `backfill_sma.py` | Week indexing, rolling windows, orchestration |
-| `fetch_sma.py` | Shared: `download_batch`, `compute_smas`, `chunked`, `_to_decimal` |
+| `fetch_sma.py` | Shared: `download_batch`, `compute_smas`, `chunked`, `_to_decimal`, `load_currency_for_tickers` |
 | `db/metrics.py` | `insert_metrics`, `load_existing_metric_keys` |
 | `db/tickers.py` | `load_tickers_from_db` |
 | `config.py` | Backfill batch size, delays, history days, window weeks |
@@ -74,11 +74,10 @@ pipenv run python backfill_sma.py
 - [x] Shares `db/metrics.py` insert logic with RFC-003
 - [x] Uses `get_config()` (RFC-006)
 - [x] Observability logs per batch and summary
-- [x] Unit tests for week indexing and window logic
+- [x] Unit tests for week indexing, window logic, and `main()` orchestration
 - [x] Not scheduled in cron
-- [ ] Documented behavior for `metrics.currency` on backfilled rows (`NULL` until weekly fetch)
+- [x] Populates `metrics.currency` per ticker during backfill (PRD §6)
 
 ## Open questions
 
 - `--dry-run` flag deferred — out of PRD scope.
-- Populate `currency` during backfill, or leave `NULL` until `fetch_sma.py` runs? (aligned with RFC-001)

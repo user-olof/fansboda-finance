@@ -115,7 +115,7 @@ def metric_row_from_history(
     ticker: str,
     history: pd.DataFrame,
     *,
-    name: str | None = None,
+    company: str | None = None,
     currency: str | None = None,
 ) -> MetricRow | None:
     """Compute SMA metrics from a single ticker's OHLCV history."""
@@ -139,7 +139,7 @@ def metric_row_from_history(
 
     return MetricRow(
         ticker=ticker,
-        name=name,
+        company=company,
         trading_date=trading_date,
         sma_50=sma_50,
         sma_200=sma_200,
@@ -204,7 +204,7 @@ def download_batch(
 def metric_rows_from_batch(
     data: pd.DataFrame,
     tickers: list[str],
-    names: dict[str, str | None],
+    companies: dict[str, str | None],
     currencies: dict[str, str | None] | None = None,
 ) -> list[MetricRow]:
     """Parse a yfinance batch download into MetricRow objects."""
@@ -224,7 +224,7 @@ def metric_rows_from_batch(
             row = metric_row_from_history(
                 ticker,
                 ticker_data,
-                name=names.get(ticker),
+                company=companies.get(ticker),
                 currency=currencies.get(ticker),
             )
             if row is not None:
@@ -234,7 +234,7 @@ def metric_rows_from_batch(
         row = metric_row_from_history(
             ticker,
             data,
-            name=names.get(ticker),
+            company=companies.get(ticker),
             currency=currencies.get(ticker),
         )
         if row is not None:
@@ -278,7 +278,7 @@ def main() -> int:
         return 1
 
     all_tickers = [entry.symbol for entry in watchlist]
-    names = {entry.symbol: entry.name for entry in watchlist}
+    companies = {entry.symbol: entry.company for entry in watchlist}
 
     try:
         stale_tickers, skipped_count, max_date = filter_stale_tickers(
@@ -338,16 +338,17 @@ def main() -> int:
                 retry_base_seconds=retry_base,
             )
             batch_rows = metric_rows_from_batch(
-                data, batch, names, currencies=batch_currencies
+                data, batch, companies, currencies=batch_currencies
             )
             fetched_count += len(batch_rows)
             for row in batch_rows:
                 logger.info(
-                    "Fetched %s (%s): trading_date=%s current_price=%s "
+                    "Fetched %s (%s): trading_date=%s currency=%s current_price=%s "
                     "sma_50=%s sma_200=%s",
                     row.ticker,
-                    row.name,
+                    row.company,
                     row.trading_date,
+                    row.currency,
                     row.current_price,
                     row.sma_50,
                     row.sma_200,
