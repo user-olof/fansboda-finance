@@ -18,11 +18,10 @@ from fetch_sma import (
     _to_decimal,
     chunked,
     compute_smas,
-    download_batch,
-    load_currency_for_tickers,
     trading_date_from_index,
 )
 from models import MetricRow
+from yfinance_client import download_batch, load_currency_for_tickers
 
 logging.basicConfig(
     level=logging.INFO,

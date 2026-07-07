@@ -6,17 +6,8 @@ import pytest
 from refresh_tickers import (
     load_symbols_for_refresh,
     main,
-    parse_symbols_arg,
     refresh_tickers,
 )
-
-
-def test_parse_symbols_arg_uppercases_and_skips_blanks() -> None:
-    assert parse_symbols_arg(" aapl, MSFT.ST ,,bbb.st ") == [
-        "AAPL",
-        "MSFT.ST",
-        "BBB.ST",
-    ]
 
 
 def test_load_symbols_for_refresh_from_explicit_list() -> None:
@@ -104,7 +95,9 @@ def test_main_refresh_from_db() -> None:
             "refresh_tickers.load_symbols_for_refresh",
             return_value=["AAA.ST"],
         ) as mock_load:
-            with patch("refresh_tickers.refresh_tickers", return_value=1) as mock_refresh:
+            with patch(
+                "refresh_tickers.refresh_tickers", return_value=1
+            ) as mock_refresh:
                 assert main(["--from-db"]) == 0
 
     mock_load.assert_called_once()

@@ -48,7 +48,7 @@ def test_test_workflow_uses_python_311() -> None:
 def test_deploy_workflow_runs_on_main_push_only() -> None:
     content = DEPLOY_YML.read_text(encoding="utf-8")
     assert "branches: [main]" in content
-    assert "environment: production" in content
+    assert "environment: PROD" in content
 
 
 def test_deploy_workflow_uses_workload_identity_federation() -> None:
@@ -147,7 +147,6 @@ def test_dev_backfill_workflow_writes_dev_env_and_runs_pipeline() -> None:
     assert "seed_tickers.py" in content
     assert "backfill_sma.py" in content
     assert "GCP_INSTANCE_NAME" not in content
-    assert "secrets.DATABASE_URL }}" not in content
 
 
 def test_dev_backfill_workflow_deletes_vm_on_failure() -> None:

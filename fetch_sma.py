@@ -8,19 +8,14 @@ import sys
 import time
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from pathlib import Path
 
 import pandas as pd
-import yfinance as yf
 
-from config import (
-    DEFAULT_YF_MAX_RETRIES,
-    DEFAULT_YF_RETRY_BASE_SECONDS,
-    get_config,
-)
+from config import get_config
 from db.metrics import filter_stale_tickers, insert_metrics, purge_stale_metrics
 from db.tickers import load_tickers_from_db
-from models import MetricRow, TickerEntry
+from models import MetricRow
+from yfinance_client import download_batch, load_currency_for_tickers
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,24 +26,6 @@ logger = logging.getLogger(__name__)
 HISTORY_DAYS = 300
 SMA_50_WINDOW = 50
 SMA_200_WINDOW = 200
-
-
-def load_tickers(path: Path) -> list[str]:
-    """Read ticker symbols from a text file, one per line."""
-    if not path.exists():
-        raise FileNotFoundError(f"Tickers file not found: {path}")
-
-    tickers: list[str] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        tickers.append(stripped.upper())
-
-    if not tickers:
-        raise ValueError(f"No tickers found in {path}")
-
-    return tickers
 
 
 def chunked(items: list[str], size: int) -> list[list[str]]:
@@ -82,33 +59,6 @@ def trading_date_from_index(index: pd.DatetimeIndex) -> date:
     if hasattr(ts, "date"):
         return ts.date()
     return pd.Timestamp(ts).date()
-
-
-def resolve_currency(symbol: str) -> str | None:
-    """Fetch listing currency from yfinance metadata."""
-    info = yf.Ticker(symbol).info
-    currency = info.get("currency")
-    return str(currency) if currency else None
-
-
-def load_currency_for_tickers(
-    tickers: list[str],
-    *,
-    name_delay: float,
-) -> dict[str, str | None]:
-    """Resolve yfinance currency for each ticker with rate-limit delay."""
-    currencies: dict[str, str | None] = {}
-
-    for i, symbol in enumerate(tickers):
-        if i > 0:
-            time.sleep(name_delay)
-        try:
-            currencies[symbol] = resolve_currency(symbol)
-        except Exception:
-            logger.exception("Failed to resolve currency for %s", symbol)
-            currencies[symbol] = None
-
-    return currencies
 
 
 def metric_row_from_history(
@@ -146,59 +96,6 @@ def metric_row_from_history(
         current_price=current_price,
         currency=currency,
     )
-
-
-def _is_retryable(exc: Exception) -> bool:
-    msg = str(exc).lower()
-    return any(
-        token in msg
-        for token in ("429", "too many requests", "rate", "timeout", "connection")
-    )
-
-
-def download_batch(
-    tickers: list[str],
-    start: date,
-    *,
-    max_retries: int = DEFAULT_YF_MAX_RETRIES,
-    retry_base_seconds: float = DEFAULT_YF_RETRY_BASE_SECONDS,
-) -> pd.DataFrame:
-    """Download OHLCV history for a batch of tickers with retry/backoff."""
-    last_exc: Exception | None = None
-
-    for attempt in range(max_retries + 1):
-        try:
-            data = yf.download(
-                tickers,
-                start=start.isoformat(),
-                auto_adjust=True,
-                group_by="ticker",
-                progress=False,
-                threads=False,
-            )
-            if data.empty:
-                raise ValueError(
-                    f"Empty dataframe returned for batch of {len(tickers)} ticker(s)"
-                )
-            return data
-        except Exception as exc:
-            last_exc = exc
-            if attempt >= max_retries:
-                break
-            if not _is_retryable(exc) and not isinstance(exc, ValueError):
-                break
-            delay = retry_base_seconds * (2**attempt)
-            logger.warning(
-                "Batch download failed (attempt %d/%d), retrying in %.1fs: %s",
-                attempt + 1,
-                max_retries + 1,
-                delay,
-                exc,
-            )
-            time.sleep(delay)
-
-    assert last_exc is not None
-    raise last_exc
 
 
 def metric_rows_from_batch(

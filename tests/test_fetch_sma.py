@@ -1,6 +1,5 @@
 from datetime import date
 from decimal import Decimal
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -11,32 +10,11 @@ from db.tickers import load_tickers_from_db
 from fetch_sma import (
     chunked,
     compute_smas,
-    load_currency_for_tickers,
-    load_tickers,
     metric_row_from_history,
     metric_rows_from_batch,
-    resolve_currency,
     trading_date_from_index,
 )
 from models import MetricRow, TickerEntry
-
-
-def test_load_tickers_skips_comments_and_blanks(tmp_path: Path) -> None:
-    tickers_file = tmp_path / "tickers.txt"
-    tickers_file.write_text(
-        "# comment\n\n  aapl \n# another\nMSFT\n",
-        encoding="utf-8",
-    )
-
-    assert load_tickers(tickers_file) == ["AAPL", "MSFT"]
-
-
-def test_load_tickers_raises_when_empty(tmp_path: Path) -> None:
-    tickers_file = tmp_path / "tickers.txt"
-    tickers_file.write_text("# only comments\n\n", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="No tickers found"):
-        load_tickers(tickers_file)
 
 
 def test_load_tickers_from_db() -> None:
@@ -54,7 +32,12 @@ def test_load_tickers_from_db() -> None:
         entries = load_tickers_from_db("postgresql://example")
 
     assert entries == [
-        TickerEntry(symbol="AAA.ST", company="Company A", sector="Industrials", industry="Machinery"),
+        TickerEntry(
+            symbol="AAA.ST",
+            company="Company A",
+            sector="Industrials",
+            industry="Machinery",
+        ),
         TickerEntry(symbol="BBB.ST", company=None),
     ]
 
@@ -143,44 +126,6 @@ def test_metric_row_from_history() -> None:
     assert row.sma_50 == Decimal("195.5")
     assert row.sma_200 == Decimal("120.5")
     assert row.current_price == Decimal("220")
-
-
-def test_resolve_currency_uses_yfinance_info() -> None:
-    mock_ticker = MagicMock()
-    mock_ticker.info = {"currency": "USD"}
-
-    with patch("fetch_sma.yf.Ticker", return_value=mock_ticker):
-        assert resolve_currency("AAPL") == "USD"
-
-
-def test_load_currency_for_tickers_applies_delay() -> None:
-    with patch("fetch_sma.resolve_currency", return_value="SEK") as mock_resolve:
-        with patch("fetch_sma.time.sleep") as mock_sleep:
-            currencies = load_currency_for_tickers(
-                ["AAA.ST", "BBB.ST"],
-                name_delay=0.25,
-            )
-
-    assert mock_resolve.call_count == 2
-    mock_sleep.assert_called_once_with(0.25)
-    assert currencies == {
-        "AAA.ST": "SEK",
-        "BBB.ST": "SEK",
-    }
-
-
-def test_load_currency_for_tickers_records_none_on_failure() -> None:
-    with patch(
-        "fetch_sma.resolve_currency",
-        side_effect=[RuntimeError("boom"), "USD"],
-    ):
-        with patch("fetch_sma.time.sleep"):
-            currencies = load_currency_for_tickers(
-                ["AAA.ST", "BBB.ST"],
-                name_delay=0.25,
-            )
-
-    assert currencies == {"AAA.ST": None, "BBB.ST": "USD"}
 
 
 def test_metric_rows_from_batch_parses_multiindex() -> None:

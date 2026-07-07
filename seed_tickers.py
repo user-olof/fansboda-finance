@@ -8,57 +8,16 @@ import sys
 import time
 from pathlib import Path
 
-import yfinance as yf
-
 from config import DEFAULT_YF_NAME_DELAY_SECONDS, get_config
 from db.tickers import upsert_tickers
-from fetch_sma import load_tickers
+from symbols import load_tickers
+from yfinance_client import resolve_watchlist_fields
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-
-def _fetch_info(symbol: str) -> dict:
-    return yf.Ticker(symbol).info
-
-
-def _watchlist_fields_from_info(
-    info: dict,
-    *,
-    symbol: str,
-) -> tuple[str | None, str | None, str | None]:
-    company = info.get("longName") or info.get("shortName")
-    sector = info.get("sectorKey") or info.get("sector")
-    industry = info.get("industryKey") or info.get("industry")
-    if not company:
-        logger.warning("No company name found for %s", symbol)
-    return (
-        str(company) if company else None,
-        str(sector) if sector else None,
-        str(industry) if industry else None,
-    )
-
-
-def resolve_name(symbol: str) -> str | None:
-    """Fetch company name from yfinance metadata (longName, fallback shortName)."""
-    company, _, _ = _watchlist_fields_from_info(_fetch_info(symbol), symbol=symbol)
-    return company
-
-
-def resolve_metadata(symbol: str) -> tuple[str | None, str | None]:
-    """Fetch sector and industry from yfinance metadata."""
-    _, sector, industry = _watchlist_fields_from_info(_fetch_info(symbol), symbol=symbol)
-    return sector, industry
-
-
-def resolve_watchlist_fields(
-    symbol: str,
-) -> tuple[str | None, str | None, str | None]:
-    """Resolve company, sector, and industry in one yfinance lookup."""
-    return _watchlist_fields_from_info(_fetch_info(symbol), symbol=symbol)
 
 
 def resolve_and_upsert_symbols(
@@ -98,9 +57,7 @@ def seed_tickers_from_file(
 ) -> int:
     """Load symbols from file, resolve metadata, upsert into tickers. Returns row count."""
     symbols = load_tickers(tickers_path)
-    return resolve_and_upsert_symbols(
-        database_url, symbols, name_delay=name_delay
-    )
+    return resolve_and_upsert_symbols(database_url, symbols, name_delay=name_delay)
 
 
 def main() -> int:

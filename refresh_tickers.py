@@ -10,20 +10,14 @@ from pathlib import Path
 
 from config import get_config
 from db.tickers import load_tickers_from_db
-from fetch_sma import load_tickers
 from seed_tickers import resolve_and_upsert_symbols
+from symbols import load_tickers, parse_symbols_arg
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-
-def parse_symbols_arg(value: str) -> list[str]:
-    """Parse a comma-separated symbol list; uppercases and drops blanks."""
-    symbols = [part.strip().upper() for part in value.split(",")]
-    return [symbol for symbol in symbols if symbol]
 
 
 def _load_file_symbols(tickers_path: Path) -> list[str]:

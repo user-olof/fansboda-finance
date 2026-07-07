@@ -20,7 +20,8 @@ Lightweight weekly pipeline: yfinance → SMA-50/200 + close → Neon Postgres. 
 
 | Path | Role |
 |------|------|
-| `fetch_sma.py`, `seed_tickers.py`, `backfill_sma.py` | Job entrypoints |
+| `fetch_sma.py`, `seed_tickers.py`, `backfill_sma.py`, `refresh_tickers.py` | Job entrypoints |
+| `symbols.py`, `yfinance_client.py` | Shared symbol parsing and yfinance I/O |
 | `config.py` | `BaseConfig`, `DevConfig`, `ProdConfig`, `get_config()` |
 | `models.py` | `TickerEntry`, `MetricRow` |
 | `db/metrics.py`, `db/tickers.py` | Parameterized SQL — no SQL in job scripts |
@@ -47,7 +48,7 @@ Dependencies: **Pipenv only** (`Pipfile` / `Pipfile.lock`). No `requirements.txt
 | `scripts/verify_dev_backfill.py` | Parse backfill log + DB checks (dev CI) |
 | `scripts/configure-branch-protection.sh` | Require `test` check on `main` |
 
-Reuse shared logic (`download_batch`, `compute_smas`, `metric_row_from_history`, `MetricRow`, `chunked`, batching) from `fetch_sma.py` instead of duplicating.
+Reuse shared logic (`download_batch`, `compute_smas`, `metric_row_from_history`, `MetricRow`, `chunked`, batching) from `fetch_sma.py` / `yfinance_client.py` instead of duplicating.
 
 ## Data model
 
