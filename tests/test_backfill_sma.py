@@ -13,6 +13,7 @@ from backfill_sma import (
     week_index_series,
 )
 from config import BaseConfig
+from fetch_sma import compute_raw_ratios
 from models import MetricRow, TickerEntry
 
 
@@ -68,6 +69,13 @@ def test_metric_rows_from_weekly_samples_creates_rolling_windows() -> None:
     assert rows[0].sma_50 is not None
     assert rows[0].sma_200 is not None
     assert rows[0].current_price is not None
+    expected_raw_50, expected_raw_200 = compute_raw_ratios(
+        rows[0].sma_50,
+        rows[0].sma_200,
+        rows[0].current_price,
+    )
+    assert rows[0].raw_50 == expected_raw_50
+    assert rows[0].raw_200 == expected_raw_200
     assert rows[-1].trading_date >= rows[0].trading_date
 
 
@@ -91,6 +99,8 @@ def test_metric_rows_from_backfill_batch_sets_currency() -> None:
     assert rows
     assert all(row.currency == "SEK" for row in rows)
     assert all(row.company == "Alpha AB" for row in rows)
+    assert all(row.raw_50 is not None for row in rows)
+    assert all(row.raw_200 is not None for row in rows)
 
 
 def test_filter_new_rows_skips_existing_pairs() -> None:
@@ -128,6 +138,8 @@ def test_main_backfill_inserts_new_rows() -> None:
         sma_200=Decimal("2"),
         current_price=Decimal("3"),
         currency="SEK",
+        raw_50=Decimal("0.333333"),
+        raw_200=Decimal("0.666667"),
     )
 
     with patch("backfill_sma.get_config", return_value=_mock_config()):
@@ -148,11 +160,18 @@ def test_main_backfill_inserts_new_rows() -> None:
                             with patch(
                                 "backfill_sma.insert_metrics", return_value=1
                             ) as mock_insert:
-                                assert main() == 0
+                                with patch(
+                                    "backfill_sma.upsert_market_for_trading_dates"
+                                ) as mock_market:
+                                    assert main() == 0
 
     mock_currency.assert_called_once()
     mock_download.assert_called_once()
     mock_insert.assert_called_once_with("postgresql://example", [metric_row])
+    mock_market.assert_called_once_with(
+        "postgresql://example",
+        {date(2025, 6, 6)},
+    )
     inserted = mock_insert.call_args[0][1][0]
     assert inserted.company == "Alpha AB"
     assert inserted.currency == "SEK"
@@ -167,6 +186,8 @@ def test_main_succeeds_when_all_rows_already_exist() -> None:
         sma_200=Decimal("2"),
         current_price=Decimal("3"),
         currency="SEK",
+        raw_50=Decimal("0.333333"),
+        raw_200=Decimal("0.666667"),
     )
 
     with patch("backfill_sma.get_config", return_value=_mock_config()):
@@ -188,7 +209,15 @@ def test_main_succeeds_when_all_rows_already_exist() -> None:
                             return_value=[metric_row],
                         ):
                             with patch("backfill_sma.insert_metrics", return_value=0):
-                                assert main() == 0
+                                with patch(
+                                    "backfill_sma.upsert_market_for_trading_dates"
+                                ) as mock_market:
+                                    assert main() == 0
+
+    mock_market.assert_called_once_with(
+        "postgresql://example",
+        {date(2025, 6, 6)},
+    )
 
 
 def test_main_returns_failure_on_failed_batch() -> None:

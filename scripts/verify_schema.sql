@@ -31,9 +31,21 @@ SELECT column_name
 FROM information_schema.columns
 WHERE table_schema = 'public'
   AND table_name = 'metrics'
-  AND column_name IN ('currency', 'company')
+  AND column_name IN ('currency', 'company', 'raw_50', 'raw_200')
 ORDER BY column_name;
--- expect 2 rows after migrate_rename_name_to_company.sql or fresh schema.sql
+-- expect 4 rows after migrate_add_raw_ratios_and_market.sql or fresh schema.sql
+
+-- market table and columns
+SELECT column_name, data_type, numeric_precision, numeric_scale
+FROM information_schema.columns
+WHERE table_schema = 'public' AND table_name = 'market'
+ORDER BY ordinal_position;
+
+SELECT conname
+FROM pg_constraint
+WHERE conrelid = 'public.market'::regclass
+  AND contype = 'p'
+  AND conname = 'market_pkey';
 
 -- unique (ticker, trading_date)
 SELECT conname

@@ -8,13 +8,15 @@ import pytest
 from db.metrics import filter_stale_tickers, insert_metrics
 from db.tickers import load_tickers_from_db
 from fetch_sma import (
+    aggregate_market_stats,
     chunked,
+    compute_raw_ratios,
     compute_smas,
     metric_row_from_history,
     metric_rows_from_batch,
     trading_date_from_index,
 )
-from models import MetricRow, TickerEntry
+from models import MarketRow, MetricRow, TickerEntry
 
 
 def test_load_tickers_from_db() -> None:
@@ -53,6 +55,45 @@ def test_load_tickers_from_db_raises_when_empty() -> None:
     with patch("db.tickers.psycopg2.connect", return_value=mock_conn):
         with pytest.raises(ValueError, match="No tickers found in tickers table"):
             load_tickers_from_db("postgresql://example")
+
+
+def test_compute_raw_ratios_divides_sma_by_price() -> None:
+    raw_50, raw_200 = compute_raw_ratios(
+        Decimal("100"),
+        Decimal("200"),
+        Decimal("50"),
+    )
+
+    assert raw_50 == Decimal("2")
+    assert raw_200 == Decimal("4")
+
+
+def test_compute_raw_ratios_returns_none_when_price_missing_or_zero() -> None:
+    assert compute_raw_ratios(Decimal("1"), Decimal("2"), None) == (None, None)
+    assert compute_raw_ratios(Decimal("1"), Decimal("2"), Decimal("0")) == (
+        None,
+        None,
+    )
+
+
+def test_aggregate_market_stats_uses_population_std() -> None:
+    row = aggregate_market_stats(
+        date(2026, 6, 6),
+        [Decimal("1"), Decimal("3")],
+        [Decimal("0.5"), Decimal("0.7")],
+    )
+
+    assert row == MarketRow(
+        trading_date=date(2026, 6, 6),
+        raw_mean_50=Decimal("2"),
+        raw_mean_200=Decimal("0.6"),
+        raw_std_50=Decimal("1"),
+        raw_std_200=Decimal("0.1"),
+    )
+
+
+def test_aggregate_market_stats_returns_none_when_empty() -> None:
+    assert aggregate_market_stats(date(2026, 6, 6), [], []) is None
 
 
 def test_compute_smas_on_fixed_series() -> None:
@@ -126,6 +167,8 @@ def test_metric_row_from_history() -> None:
     assert row.sma_50 == Decimal("195.5")
     assert row.sma_200 == Decimal("120.5")
     assert row.current_price == Decimal("220")
+    assert row.raw_50 == Decimal("0.888636")
+    assert row.raw_200 == Decimal("0.547727")
 
 
 def test_metric_rows_from_batch_parses_multiindex() -> None:
@@ -244,6 +287,8 @@ def test_insert_metrics_executes_values() -> None:
     sql = mock_execute.call_args[0][1]
     assert "company" in sql
     assert "currency" in sql
+    assert "raw_50" in sql
+    assert "raw_200" in sql
     assert "sector" not in sql
     assert "industry" not in sql
     assert "ON CONFLICT (ticker, trading_date) DO NOTHING" in sql

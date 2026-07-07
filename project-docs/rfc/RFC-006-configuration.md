@@ -35,20 +35,22 @@ Replace scattered `os.getenv` calls with `config.py` exposing `DevConfig`, `Prod
 
 ### Settings (PRD §5.5)
 
-| Attribute | Default | Env var |
-|-----------|---------|---------|
-| `database_url` | required | `DATABASE_URL` |
-| `tickers_file` | `tickers.txt` | `TICKERS_FILE` |
-| `yf_batch_size` | 40 | `YF_BATCH_SIZE` |
-| `yf_batch_delay_seconds` | 2.0 | `YF_BATCH_DELAY_SECONDS` |
-| `yf_max_retries` | 3 | `YF_MAX_RETRIES` |
-| `yf_retry_base_seconds` | 5.0 | `YF_RETRY_BASE_SECONDS` |
-| `yf_name_delay_seconds` | 0.25 | `YF_NAME_DELAY_SECONDS` |
-| `metrics_retention_days` | 365 | `METRICS_RETENTION_DAYS` |
-| `backfill_history_days` | 730 | `BACKFILL_HISTORY_DAYS` |
-| `backfill_window_weeks` | 52 | `BACKFILL_WINDOW_WEEKS` |
-| `backfill_batch_size` | 25 | `BACKFILL_BATCH_SIZE` |
-| `backfill_batch_delay_seconds` | 5.0 | `BACKFILL_BATCH_DELAY_SECONDS` |
+| Attribute | Dev default | Prod default | Env var |
+|-----------|-------------|--------------|---------|
+| `database_url` | from `.env` (required) | from VM `.env` (required) | `DATABASE_URL` |
+| `tickers_file` | `tickers.txt` | `tickers.txt` | `TICKERS_FILE` |
+| `yf_batch_size` | 40 | 40 | `YF_BATCH_SIZE` |
+| `yf_batch_delay_seconds` | 2.0 | 2.0 | `YF_BATCH_DELAY_SECONDS` |
+| `yf_max_retries` | 3 | 3 | `YF_MAX_RETRIES` |
+| `yf_retry_base_seconds` | 5.0 | 5.0 | `YF_RETRY_BASE_SECONDS` |
+| `yf_name_delay_seconds` | 0.25 | 0.25 | `YF_NAME_DELAY_SECONDS` |
+| `metrics_retention_days` | 365 | 365 | `METRICS_RETENTION_DAYS` |
+| `backfill_history_days` | 730 | 730 | `BACKFILL_HISTORY_DAYS` |
+| `backfill_window_weeks` | 52 | 52 | `BACKFILL_WINDOW_WEEKS` |
+| `backfill_batch_size` | 25 | 25 | `BACKFILL_BATCH_SIZE` |
+| `backfill_batch_delay_seconds` | 5.0 | 5.0 | `BACKFILL_BATCH_DELAY_SECONDS` |
+
+`DevConfig` and `ProdConfig` may override shared defaults per environment.
 
 ### Selection logic
 

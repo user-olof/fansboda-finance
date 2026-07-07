@@ -26,6 +26,9 @@ Apply only the migrations you have not yet run, **in order**. Each file is idemp
 | 6 | `migrate_add_tickers_updated_at.sql` | Add `tickers.updated_at` if missing |
 | 7 | `migrate_move_metadata_to_tickers.sql` | Add `tickers.sector`, `tickers.industry`, `metrics.currency`; drop misplaced `metrics.sector` / `metrics.industry` if present |
 | 8 | `migrate_rename_name_to_company.sql` | Rename `name` → `company` on `tickers` and `metrics` (PRD §6) |
+| 9 | `migrate_add_raw_ratios_and_market.sql` | Add `metrics.raw_50`, `metrics.raw_200`, `market` table |
+
+See [RFC-001](./rfc/RFC-001-data-model.md) and [RFC-012](./rfc/RFC-012-normalized-ratios-market.md).
 
 ### Path by starting state
 

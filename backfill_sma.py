@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 
@@ -17,8 +17,10 @@ from fetch_sma import (
     SMA_200_WINDOW,
     _to_decimal,
     chunked,
+    compute_raw_ratios,
     compute_smas,
     trading_date_from_index,
+    upsert_market_for_trading_dates,
 )
 from models import MetricRow
 from yfinance_client import download_batch, load_currency_for_tickers
@@ -79,6 +81,8 @@ def metric_rows_from_weekly_samples(
 
         sma_50, sma_200 = compute_smas(window_close)
         trading_date = trading_date_from_index(window_close.index)
+        current_price = _to_decimal(window_close.iloc[-1])
+        raw_50, raw_200 = compute_raw_ratios(sma_50, sma_200, current_price)
         rows.append(
             MetricRow(
                 ticker=ticker,
@@ -86,8 +90,10 @@ def metric_rows_from_weekly_samples(
                 trading_date=trading_date,
                 sma_50=sma_50,
                 sma_200=sma_200,
-                current_price=_to_decimal(window_close.iloc[-1]),
+                current_price=current_price,
                 currency=currency,
+                raw_50=raw_50,
+                raw_200=raw_200,
             )
         )
 
@@ -185,6 +191,7 @@ def main() -> int:
     total_inserted = 0
     total_skipped_existing = 0
     failed_batches = 0
+    trading_dates: set[date] = set()
 
     logger.info(
         "Backfill starting: tickers=%d batches=%d history_days=%d window_weeks=%d",
@@ -222,6 +229,8 @@ def main() -> int:
             )
             new_rows = filter_new_rows(batch_rows, existing)
             inserted = insert_metrics(database_url, new_rows)
+            for row in batch_rows:
+                trading_dates.add(row.trading_date)
 
             total_generated += len(batch_rows)
             total_inserted += inserted
@@ -247,6 +256,13 @@ def main() -> int:
 
         if i < len(batches) - 1:
             time.sleep(batch_delay)
+
+    if trading_dates:
+        try:
+            upsert_market_for_trading_dates(database_url, trading_dates)
+        except Exception:
+            logger.exception("Failed to upsert market stats")
+            return 1
 
     logger.info(
         "Backfill summary: tickers=%d generated=%d inserted=%d "

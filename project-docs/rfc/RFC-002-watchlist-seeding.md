@@ -25,32 +25,32 @@ Ad-hoc script to load symbols from a text file, resolve company names and watchl
 ### Architecture
 
 ```
-tickers.txt  →  load_tickers()  →  resolve_name()  ─┐
-                      ↑              resolve_metadata() ─┤→  upsert_tickers()
-                 fetch_sma.py                            ↑
-                 (file parsing)                    db/tickers.py
-                                                  (parameterized SQL)
+tickers.txt  →  load_tickers()  →  resolve_watchlist_fields()  ─┐
+                      ↑                    (yfinance_client)     ┤→  upsert_tickers()
+                 symbols.py                                      ↑
+                                                            db/tickers.py
+                                                         (parameterized SQL)
 ```
 
 ### Files
 
 | File | Role |
 |------|------|
-| `seed_tickers.py` | CLI, yfinance company resolution, orchestration |
+| `seed_tickers.py` | CLI, orchestration, `resolve_and_upsert_symbols` |
+| `symbols.py` | `load_tickers(path)` — shared file parsing |
+| `yfinance_client.py` | `resolve_watchlist_fields`, metadata lookups |
 | `db/tickers.py` | `upsert_tickers`, `load_tickers_from_db` |
-| `fetch_sma.py` | `load_tickers(path)` — shared file parsing |
 | `config.py` | `tickers_file`, `yf_name_delay_seconds`, `database_url` |
 | `tickers.txt` | Default symbol list |
-| `tests/test_seed_tickers.py` | Unit tests |
+| `tests/test_seed_tickers.py`, `tests/test_symbols.py`, `tests/test_yfinance_client.py` | Unit tests |
 
 ### Key functions
 
 | Function | Module | Purpose |
 |----------|--------|---------|
-| `load_tickers(path)` | `fetch_sma` | Parse symbol file |
-| `resolve_name(symbol)` | `seed_tickers` | yfinance company name lookup (maps to `company` column) |
-| `resolve_metadata(symbol)` | `seed_tickers` | yfinance `sectorKey`, `industryKey` lookup (reuse in RFC-010) |
-| `resolve_watchlist_fields(symbol)` | `seed_tickers` | Single yfinance lookup for company + sector + industry (seed orchestration) |
+| `load_tickers(path)` | `symbols` | Parse symbol file |
+| `resolve_watchlist_fields(symbol)` | `yfinance_client` | Single yfinance lookup for company + sector + industry |
+| `resolve_and_upsert_symbols(...)` | `seed_tickers` | Rate-limited resolve loop + upsert |
 | `upsert_tickers(url, rows)` | `db.tickers` | Parameterized upsert |
 | `seed_tickers_from_file(...)` | `seed_tickers` | Orchestration |
 | `main()` | `seed_tickers` | CLI entry point |

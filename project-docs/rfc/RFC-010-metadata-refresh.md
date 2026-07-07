@@ -29,10 +29,11 @@ Ad-hoc script to refresh watchlist metadata (`company`, `sector`, `industry`) wi
 | File | Role |
 |------|------|
 | `refresh_tickers.py` | CLI, symbol selection, orchestration |
-| `seed_tickers.py` | Shared `resolve_and_upsert_symbols`, `resolve_watchlist_fields` |
+| `symbols.py` | `load_tickers`, `parse_symbols_arg` |
+| `seed_tickers.py` | Shared `resolve_and_upsert_symbols` |
+| `yfinance_client.py` | `resolve_watchlist_fields` (via seed) |
 | `db/tickers.py` | `upsert_tickers`, `load_tickers_from_db` |
-| `fetch_sma.py` | `load_tickers(path)` — shared file parsing |
-| `tests/test_refresh_tickers.py` | Unit tests |
+| `tests/test_refresh_tickers.py`, `tests/test_symbols.py` | Unit tests |
 
 ### Key functions (`refresh_tickers.py`)
 
@@ -70,4 +71,4 @@ pipenv run python refresh_tickers.py custom-tickers.txt   # optional file path
 ## Open questions
 
 - Share CLI parsing with `seed_tickers.py` or keep scripts independent? **Kept independent** — refresh has argparse flags; seed keeps positional file arg.
-- Extract shared `resolve_name()` / `resolve_metadata()` into a module used by seed, refresh, and tests? **Deferred** — `resolve_and_upsert_symbols` shared via `seed_tickers.py`.
+- Extract shared `resolve_name()` / `resolve_metadata()` into a module used by seed, refresh, and tests? **Done** — `yfinance_client.py`.

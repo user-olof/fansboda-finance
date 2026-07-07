@@ -193,6 +193,18 @@ environments differ (e.g. more conservative batch delays in production).
 | `sma_50` | NUMERIC(18,6) | 50-day SMA of closes |
 | `sma_200` | NUMERIC(18,6) | 200-day SMA of closes |
 | `current_price` | NUMERIC(18,6) | Adjusted close on `trading_date` |
+| `raw_50` | NUMERIC(18,6) | 50-day SMA / current price |
+| `raw_200`| NUMERIC(18,6) | 200-day SMA / current price |
+
+### Table `market` (market data based on SMA calculations, one row per `trading_date`)
+| Column | Type | Notes |
+|--------|------|-------|
+| `raw_mean_50` | NUMERIC(18,6) | Mean value of all stocks' raw_50 data |
+| `raw_mean_200`| NUMERIC(18,6) | Mean value of all stocks' raw_200 data|
+| `raw_std_50` | NUMERIC(18,6) | St. dev. of all stocks' raw_50 data |
+| `raw_std_200` | NUMERIC(18,6) | St. dev. of all stocks' raw_200 data|
+| `trading_date` | DATE | Market session used for this snapshot |
+| `updated_at` | TIMESTAMPTZ | When the row was written |
 
 Unique constraint on `(ticker, trading_date)`. Multiple rows per ticker are
 expected; each weekly run appends a new snapshot. Rows with `trading_date`

@@ -10,7 +10,7 @@
 
 ## Summary
 
-One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **Not** cron-scheduled. SMA price fields are backfilled from OHLCV. `sector` and `industry` live on `tickers` (RFC-002). `metrics.currency` is resolved per ticker during backfill (shared `load_currency_for_tickers` from RFC-003).
+One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **Not** cron-scheduled. SMA price fields, `raw_50` / `raw_200` ratios, and cross-sectional `market` stats are backfilled from OHLCV. `sector` and `industry` live on `tickers` (RFC-002). `metrics.currency` is resolved per ticker during backfill (`yfinance_client.load_currency_for_tickers`).
 
 ## Requirements
 
@@ -21,6 +21,7 @@ One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **N
 | FR-15 | Append with `ON CONFLICT (ticker, trading_date) DO NOTHING` |
 | FR-16 | Skip `(ticker, trading_date)` pairs already in database |
 | FR-17 | Log per-batch generated/new/inserted/skipped counts and final summary |
+| — | Set `raw_50`, `raw_200` on each inserted metrics row (RFC-012) |
 
 ## Implementation
 
@@ -29,7 +30,8 @@ One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **N
 | File | Role |
 |------|------|
 | `backfill_sma.py` | Week indexing, rolling windows, orchestration |
-| `fetch_sma.py` | Shared: `download_batch`, `compute_smas`, `chunked`, `_to_decimal`, `load_currency_for_tickers` |
+| `fetch_sma.py` | Shared: `compute_smas`, `compute_raw_ratios`, `chunked`, `_to_decimal`, `trading_date_from_index` |
+| `yfinance_client.py` | Shared: `download_batch`, `load_currency_for_tickers` |
 | `db/metrics.py` | `insert_metrics`, `load_existing_metric_keys` |
 | `db/tickers.py` | `load_tickers_from_db` |
 | `config.py` | Backfill batch size, delays, history days, window weeks |
@@ -58,12 +60,12 @@ pipenv run python backfill_sma.py
 
 ### Configuration (via `config.py`)
 
-| Setting | Default |
-|---------|---------|
-| `backfill_history_days` | 730 |
-| `backfill_window_weeks` | 52 |
-| `backfill_batch_size` | 25 |
-| `backfill_batch_delay_seconds` | 5.0 |
+| Setting | Dev default | Prod default |
+|---------|-------------|--------------|
+| `backfill_history_days` | 730 | 730 |
+| `backfill_window_weeks` | 52 | 52 |
+| `backfill_batch_size` | 25 | 25 |
+| `backfill_batch_delay_seconds` | 5.0 | 5.0 |
 
 ## Acceptance criteria
 
@@ -77,6 +79,8 @@ pipenv run python backfill_sma.py
 - [x] Unit tests for week indexing, window logic, and `main()` orchestration
 - [x] Not scheduled in cron
 - [x] Populates `metrics.currency` per ticker during backfill (PRD §6)
+- [x] Uses `yfinance_client.py` for batch download and currency resolution
+- [x] Populates `raw_50`, `raw_200` on backfilled metrics rows (RFC-012)
 
 ## Open questions
 

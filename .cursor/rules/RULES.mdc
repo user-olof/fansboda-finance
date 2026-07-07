@@ -20,11 +20,12 @@ Lightweight weekly pipeline: yfinance → SMA-50/200 + close → Neon Postgres. 
 
 | Path | Role |
 |------|------|
-| `fetch_sma.py`, `seed_tickers.py`, `backfill_sma.py`, `refresh_tickers.py` | Job entrypoints |
+| `fetch_sma.py`, `seed_tickers.py`, `backfill_sma.py`, `backfill_market.py`, `refresh_tickers.py` | Job entrypoints |
 | `symbols.py`, `yfinance_client.py` | Shared symbol parsing and yfinance I/O |
 | `config.py` | `BaseConfig`, `DevConfig`, `ProdConfig`, `get_config()` |
 | `models.py` | `TickerEntry`, `MetricRow` |
 | `db/metrics.py`, `db/tickers.py` | Parameterized SQL — no SQL in job scripts |
+| `db/retention.py` | Rolling retention purge (RFC-004) |
 | `schema.sql`, `migrate_*.sql` | DDL (commit both; see MIGRATIONS.md for upgrade order) |
 | `scripts/` | VM bootstrap, schema verify, branch protection, dev-backfill verify |
 | `tests/` | Unit tests; `pytest.ini` sets `pythonpath = .` |
@@ -38,7 +39,8 @@ Dependencies: **Pipenv only** (`Pipfile` / `Pipfile.lock`). No `requirements.txt
 |--------|------|
 | `fetch_sma.py` | Weekly job: load watchlist from DB, skip fresh tickers, batch-download ~300d OHLCV, compute SMAs, append metrics, purge rows older than retention |
 | `seed_tickers.py` | Load symbols from file, resolve names via yfinance, upsert `tickers` |
-| `backfill_sma.py` | One-off: ~730d history, rolling 52-week SMA windows, append to `metrics` |
+| `backfill_sma.py` | One-off: ~730d history, rolling 52-week SMA windows, append to `metrics`, upsert `market` |
+| `backfill_market.py` | One-off: recompute all `market` rows from stored `metrics` |
 
 | Utility | Role |
 |---------|------|

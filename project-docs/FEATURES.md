@@ -7,6 +7,8 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 | Area | Description |
 |------|-------------|
 | Weekly SMA pipeline | Thursday job fetches prices, computes SMA-50/200, appends history |
+| Normalized SMA ratios | Per-ticker `raw_50` / `raw_200` (SMA ÷ price) for cross-sectional comparison |
+| Market aggregates | Per-`trading_date` mean and std of `raw_50` / `raw_200` across the watchlist |
 | Historical backfill | Bootstrap of rolling weekly SMA snapshots (~2 years of data) |
 | Watchlist seeding | Load symbols from file, resolve company metadata, upsert into Postgres |
 | Rolling retention | Keeps ~1 year of `metrics` history; older rows purged after each weekly run |
@@ -20,7 +22,7 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 ## Users & use cases
 
 - **Primary user:** project owner with a personal watchlist (Swedish `.ST` symbols and others).
-- **Primary use case:** query `metrics` to compare `current_price`, `sma_50`, and `sma_200` — including trends over retained history (golden-cross / death-cross style signals).
+- **Primary use case:** query `metrics` to compare `current_price`, `sma_50`, and `sma_200` — including trends over retained history (golden-cross / death-cross style signals). Use `raw_50`, `raw_200`, and the `market` table to rank tickers relative to the watchlist on each `trading_date` (cross-sectional normalization for heatmaps and sector views).
 - **Watchlist management:** add or remove symbols via SQL on `tickers` or by running `seed_tickers.py`.
 
 ---
@@ -30,10 +32,18 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 ### SMA metrics history
 
 - Stores **SMA-50**, **SMA-200**, and **current price** (adjusted close) per ticker.
+- Stores **raw_50** and **raw_200** — SMA divided by `current_price` (`sma_50 / current_price`, `sma_200 / current_price`) for scale-free comparison across tickers.
 - Stores **currency** from yfinance at fetch/backfill time. **Company** is copied from `tickers` into each snapshot.
 - **Sector** and **industry** are watchlist-level fields on `tickers`, not duplicated per metric row.
 - One row per `(ticker, trading_date)` — each weekly run appends a new snapshot.
 - Idempotent inserts: `ON CONFLICT (ticker, trading_date) DO NOTHING`.
+
+### Market aggregates
+
+- **`market` table:** one row per `trading_date` with cross-sectional stats over the watchlist for that date.
+- **`raw_mean_50` / `raw_mean_200`:** mean of all tickers' `raw_50` / `raw_200` on the date.
+- **`raw_std_50` / `raw_std_200`:** standard deviation of all tickers' `raw_50` / `raw_200` on the date.
+- Supports unbiased heatmap coloring (e.g. z-scores or percentile ranks vs the watchlist) without raw SMA-distance bias.
 
 ### Watchlist
 
@@ -44,17 +54,20 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 
 ### Data retention
 
-- After each weekly run, rows with `trading_date` older than **365 days** are deleted.
-- Retention purge is safe to repeat.
+- After each weekly run, `metrics` and `market` rows with `trading_date` older than **365 days** are deleted (`db/retention.py`).
+- Retention purge runs even when all tickers are already fresh (nothing to fetch).
+- Purge counts appear in the weekly job summary log.
+- Cutoff uses UTC date via `metrics_retention_days` (configurable).
 
-### Schema (`tickers` / `metrics`)
+### Schema (`tickers` / `metrics` / `market`)
 
 | Table | Key columns |
 |-------|-------------|
 | `tickers` | `symbol` (PK), `company`, `sector`, `industry`, `updated_at` |
-| `metrics` | `id` (PK), `ticker` (FK → `tickers.symbol`), `company`, `trading_date`, `updated_at`, `currency`, `sma_50`, `sma_200`, `current_price` |
+| `metrics` | `id` (PK), `ticker` (FK → `tickers.symbol`), `company`, `trading_date`, `updated_at`, `currency`, `sma_50`, `sma_200`, `current_price`, `raw_50`, `raw_200` |
+| `market` | `trading_date`, `updated_at`, `raw_mean_50`, `raw_mean_200`, `raw_std_50`, `raw_std_200` |
 
-`company` on `metrics` is copied from `tickers` at fetch time. `currency` is the listing currency code captured per snapshot. Price columns use `NUMERIC(18, 6)`. Unique on `(ticker, trading_date)`.
+`company` on `metrics` is copied from `tickers` at fetch time. `currency` is the listing currency code captured per snapshot. `raw_50` and `raw_200` are `sma_50 / current_price` and `sma_200 / current_price`. Price and ratio columns use `NUMERIC(18, 6)`. Unique on `metrics (ticker, trading_date)`; one `market` row per `trading_date`.
 
 DDL: `schema.sql` for new databases; `migrate_*.sql` for upgrades ([MIGRATIONS.md](./MIGRATIONS.md)).
 
@@ -73,9 +86,11 @@ Scheduled **Thursdays at 11:00 UTC** on the Production VM (FR-1 – FR-8).
 | Batch download | ~300 days OHLCV via yfinance (default 40 symbols/batch) |
 | Retry / backoff | Retries 429, rate limits, timeouts, connection errors, empty frames |
 | Compute SMAs | Requires ≥200 valid daily closes; captures latest close and `trading_date` |
+| Raw ratios | Computes `raw_50` and `raw_200` (`sma / current_price`) per ticker |
+| Market stats | Aggregates mean and std of `raw_50` / `raw_200` into `market` for the snapshot date |
 | yfinance metadata | Captures `currency` per snapshot; copies `company` from `tickers` |
 | Append metrics | Inserts new rows without overwriting history |
-| Retention purge | Deletes metrics older than configured retention (default 365 days) |
+| Retention purge | Deletes `metrics` and `market` rows older than configured retention (default 365 days) |
 | Observability | Per-batch progress, per-ticker results, insert/purge counts, final summary |
 
 ### Watchlist seeding (`seed_tickers.py`)
@@ -110,6 +125,8 @@ Bootstrap script for SMA history — **not** part of the weekly cron (FR-13 – 
 | Batch download | ~730 days daily OHLCV (default 25 symbols/batch) with retry and inter-batch delay |
 | Rolling 52-week windows | Week 0 anchored at oldest bar; windows 0–51, 1–52, 2–53, … |
 | SMA snapshots | One metric row per window at the last trading day in the window |
+| Raw ratios | Populates `raw_50` and `raw_200` on each inserted metrics row |
+| Market stats | Upserts cross-sectional `market` rows for all backfilled trading dates |
 | Currency | Resolves listing `currency` per ticker (same rate-limit pattern as weekly fetch) |
 | Skip existing | Skips `(ticker, trading_date)` pairs already in the database |
 | Resume-safe | `ON CONFLICT DO NOTHING`; interrupted runs can continue without duplicates |
@@ -131,20 +148,22 @@ All tunables live in **`config.py`** (PRD §5.5):
 
 `get_config()` selects by `APP_ENV` (`dev` default; `prod` / `production` → `ProdConfig`).
 
-| Setting | Default | Purpose |
-|---------|---------|---------|
-| `database_url` | required | Neon connection string |
-| `tickers_file` | `tickers.txt` | Default seed file path |
-| `yf_batch_size` | 40 | Weekly fetch batch size |
-| `yf_batch_delay_seconds` | 2.0 | Delay between fetch batches |
-| `yf_max_retries` | 3 | Max retries per batch |
-| `yf_retry_base_seconds` | 5.0 | Exponential backoff base |
-| `yf_name_delay_seconds` | 0.25 | Delay between name lookups |
-| `metrics_retention_days` | 365 | Retention purge cutoff |
-| `backfill_history_days` | 730 | Backfill download window |
-| `backfill_window_weeks` | 52 | Rolling SMA window length |
-| `backfill_batch_size` | 25 | Backfill batch size |
-| `backfill_batch_delay_seconds` | 5.0 | Delay between backfill batches |
+| Setting | Dev default | Prod default | Purpose |
+|---------|-------------|--------------|---------|
+| `database_url` | from `.env` (required) | from VM `.env` (required) | Neon connection string |
+| `tickers_file` | `tickers.txt` | `tickers.txt` | Default seed file path |
+| `yf_batch_size` | 40 | 40 | Weekly fetch batch size |
+| `yf_batch_delay_seconds` | 2.0 | 2.0 | Delay between fetch batches |
+| `yf_max_retries` | 3 | 3 | Max retries per batch |
+| `yf_retry_base_seconds` | 5.0 | 5.0 | Exponential backoff base |
+| `yf_name_delay_seconds` | 0.25 | 0.25 | Delay between name lookups |
+| `metrics_retention_days` | 365 | 365 | Retention purge cutoff |
+| `backfill_history_days` | 730 | 730 | Backfill download window |
+| `backfill_window_weeks` | 52 | 52 | Rolling SMA window length |
+| `backfill_batch_size` | 25 | 25 | Backfill batch size |
+| `backfill_batch_delay_seconds` | 5.0 | 5.0 | Delay between backfill batches |
+
+`DevConfig` and `ProdConfig` may override shared defaults per environment.
 
 ---
 
@@ -154,7 +173,7 @@ All tunables live in **`config.py`** (PRD §5.5):
 
 ```
 GCP e2-micro VM  ──cron Thu 11:00 UTC──▶  fetch_sma.py  ──▶  Neon Postgres
-  (Debian 12)         yfinance batches        tickers + metrics
+  (Debian 12)         yfinance batches        tickers + metrics + market
 ```
 
 - **Compute:** one `e2-micro`, UTC, weekly on Thursdays.
@@ -223,6 +242,7 @@ Uses GitHub **`DEV`** environment and `DATABASE_URL_DEV` secret. Deploy SA needs
 | Manual weekly run | `sudo -u fansboda bash -c 'cd /opt/fansboda-finance && set -a && . ./.env && set +a && PIPENV_VENV_IN_PROJECT=1 pipenv run python fetch_sma.py'` |
 | Verify data | `SELECT * FROM metrics ORDER BY trading_date DESC, ticker LIMIT 10;` |
 | Check retention | `SELECT MIN(trading_date), MAX(trading_date), COUNT(*) FROM metrics;` |
+| Market snapshot | `SELECT * FROM market ORDER BY trading_date DESC LIMIT 10;` |
 
 ---
 

@@ -20,8 +20,19 @@ CREATE TABLE IF NOT EXISTS metrics (
     sma_50         NUMERIC(18, 6),
     sma_200        NUMERIC(18, 6),
     current_price  NUMERIC(18, 6),
+    raw_50         NUMERIC(18, 6),
+    raw_200        NUMERIC(18, 6),
     CONSTRAINT metrics_ticker_trading_date_key UNIQUE (ticker, trading_date)
 );
 
 -- Retention purge: DELETE FROM metrics WHERE trading_date < cutoff
 CREATE INDEX IF NOT EXISTS idx_metrics_trading_date ON metrics (trading_date);
+
+CREATE TABLE IF NOT EXISTS market (
+    trading_date    DATE            PRIMARY KEY,
+    updated_at      TIMESTAMPTZ     NOT NULL,
+    raw_mean_50     NUMERIC(18, 6),
+    raw_mean_200    NUMERIC(18, 6),
+    raw_std_50      NUMERIC(18, 6),
+    raw_std_200     NUMERIC(18, 6)
+);
