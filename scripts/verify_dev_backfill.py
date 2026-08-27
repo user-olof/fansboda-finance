@@ -81,14 +81,12 @@ def query_database(database_url: str) -> dict[str, int]:
             metrics_ticker_count = int(cur.fetchone()[0])
             cur.execute("SELECT COUNT(*) FROM metrics")
             metrics_row_count = int(cur.fetchone()[0])
-            cur.execute("SELECT COUNT(*) FROM market")
-            market_row_count = int(cur.fetchone()[0])
+
 
     return {
         "ticker_count": ticker_count,
         "metrics_ticker_count": metrics_ticker_count,
-        "metrics_row_count": metrics_row_count,
-        "market_row_count": market_row_count,
+        "metrics_row_count": metrics_row_count
     }
 
 
