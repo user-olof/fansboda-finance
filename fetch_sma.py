@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
-"""Fetch daily SMA metrics from yfinance and upsert into Neon Postgres."""
+"""Fetch weekly SMA metrics from yfinance and append to Neon Postgres."""
 
 from __future__ import annotations
 
 import logging
-import os
+import statistics
 import sys
 import time
-from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from pathlib import Path
 
 import pandas as pd
-import psycopg2
-import yfinance as yf
-from dotenv import load_dotenv
-from psycopg2.extras import execute_values
+
+from config import get_config
+from db.market import upsert_market_stats
+from db.metrics import filter_stale_tickers, insert_metrics, load_raw_ratios_for_date
+from db.retention import purge_stale_data
+from db.tickers import load_tickers_from_db
+from models import MarketRow, MetricRow
+from yfinance_client import download_batch, load_currency_for_tickers
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,46 +26,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DEFAULT_TICKERS_FILE = Path(__file__).parent / "tickers.txt"
 HISTORY_DAYS = 300
 SMA_50_WINDOW = 50
 SMA_200_WINDOW = 200
-TICKER_DELAY_SECONDS = 0.5
-
-UPSERT_SQL = """
-INSERT INTO metrics (ticker, trading_date, updated_at, sma_50, sma_200)
-VALUES %s
-ON CONFLICT (ticker, trading_date) DO UPDATE SET
-    sma_50 = EXCLUDED.sma_50,
-    sma_200 = EXCLUDED.sma_200,
-    updated_at = NOW();
-"""
 
 
-@dataclass(frozen=True)
-class MetricRow:
-    ticker: str
-    trading_date: date
-    sma_50: Decimal | None
-    sma_200: Decimal | None
-
-
-def load_tickers(path: Path) -> list[str]:
-    """Read ticker symbols from a text file, one per line."""
-    if not path.exists():
-        raise FileNotFoundError(f"Tickers file not found: {path}")
-
-    tickers: list[str] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        tickers.append(stripped.upper())
-
-    if not tickers:
-        raise ValueError(f"No tickers found in {path}")
-
-    return tickers
+def chunked(items: list[str], size: int) -> list[list[str]]:
+    """Split a list into fixed-size chunks."""
+    return [items[i : i + size] for i in range(0, len(items), size)]
 
 
 def compute_smas(close: pd.Series) -> tuple[Decimal | None, Decimal | None]:
@@ -94,11 +64,68 @@ def trading_date_from_index(index: pd.DatetimeIndex) -> date:
     return pd.Timestamp(ts).date()
 
 
-def fetch_metric_row(ticker: str) -> MetricRow | None:
-    """Download history for a ticker and compute SMA metrics."""
-    start = datetime.now(timezone.utc).date() - timedelta(days=HISTORY_DAYS)
-    history = yf.Ticker(ticker).history(start=start.isoformat(), auto_adjust=True)
+def compute_raw_ratios(
+    sma_50: Decimal | None,
+    sma_200: Decimal | None,
+    current_price: Decimal | None,
+) -> tuple[Decimal | None, Decimal | None]:
+    """Return sma/current_price ratios; None when inputs are missing or price is zero."""
+    if current_price is None or current_price == 0:
+        return None, None
 
+    raw_50 = (
+        _to_decimal(float(sma_50) / float(current_price))
+        if sma_50 is not None
+        else None
+    )
+    raw_200 = (
+        _to_decimal(float(sma_200) / float(current_price))
+        if sma_200 is not None
+        else None
+    )
+    return raw_50, raw_200
+
+
+def _mean_decimal(values: list[Decimal]) -> Decimal | None:
+    if not values:
+        return None
+    return _to_decimal(sum(float(value) for value in values) / len(values))
+
+
+def _population_std_decimal(values: list[Decimal]) -> Decimal | None:
+    if not values:
+        return None
+    if len(values) == 1:
+        return Decimal("0")
+    return _to_decimal(statistics.pstdev(float(value) for value in values))
+
+
+def aggregate_market_stats(
+    trading_date: date,
+    raw_50_values: list[Decimal],
+    raw_200_values: list[Decimal],
+) -> MarketRow | None:
+    """Build cross-sectional market stats for one trading_date."""
+    if not raw_50_values and not raw_200_values:
+        return None
+
+    return MarketRow(
+        trading_date=trading_date,
+        raw_mean_50=_mean_decimal(raw_50_values),
+        raw_mean_200=_mean_decimal(raw_200_values),
+        raw_std_50=_population_std_decimal(raw_50_values),
+        raw_std_200=_population_std_decimal(raw_200_values),
+    )
+
+
+def metric_row_from_history(
+    ticker: str,
+    history: pd.DataFrame,
+    *,
+    company: str | None = None,
+    currency: str | None = None,
+) -> MetricRow | None:
+    """Compute SMA metrics from a single ticker's OHLCV history."""
     if history.empty:
         logger.warning("No history returned for %s", ticker)
         return None
@@ -115,85 +142,271 @@ def fetch_metric_row(ticker: str) -> MetricRow | None:
 
     sma_50, sma_200 = compute_smas(close)
     trading_date = trading_date_from_index(history.index)
+    current_price = _to_decimal(close.iloc[-1])
+    raw_50, raw_200 = compute_raw_ratios(sma_50, sma_200, current_price)
 
     return MetricRow(
         ticker=ticker,
+        company=company,
         trading_date=trading_date,
         sma_50=sma_50,
         sma_200=sma_200,
+        current_price=current_price,
+        currency=currency,
+        raw_50=raw_50,
+        raw_200=raw_200,
     )
 
 
-def upsert_metrics(database_url: str, rows: list[MetricRow]) -> None:
-    """Upsert metric rows into the metrics table."""
-    if not rows:
-        logger.warning("No rows to upsert")
-        return
+def metric_rows_from_batch(
+    data: pd.DataFrame,
+    tickers: list[str],
+    companies: dict[str, str | None],
+    currencies: dict[str, str | None] | None = None,
+) -> list[MetricRow]:
+    """Parse a yfinance batch download into MetricRow objects."""
+    if data.empty:
+        return []
 
-    now = datetime.now(timezone.utc)
-    values = [
-        (row.ticker, row.trading_date, now, row.sma_50, row.sma_200)
-        for row in rows
-    ]
+    currencies = currencies or {}
+    rows: list[MetricRow] = []
 
-    with psycopg2.connect(database_url) as conn:
-        with conn.cursor() as cur:
-            execute_values(cur, UPSERT_SQL, values)
-        conn.commit()
+    if isinstance(data.columns, pd.MultiIndex):
+        available = set(data.columns.get_level_values(0))
+        for ticker in tickers:
+            if ticker not in available:
+                logger.warning("No history returned for %s", ticker)
+                continue
+            ticker_data = data[ticker].dropna(how="all")
+            row = metric_row_from_history(
+                ticker,
+                ticker_data,
+                company=companies.get(ticker),
+                currency=currencies.get(ticker),
+            )
+            if row is not None:
+                rows.append(row)
+    elif len(tickers) == 1:
+        ticker = tickers[0]
+        row = metric_row_from_history(
+            ticker,
+            data,
+            company=companies.get(ticker),
+            currency=currencies.get(ticker),
+        )
+        if row is not None:
+            rows.append(row)
 
-    logger.info("Upserted %d row(s)", len(rows))
+    return rows
+
+
+def upsert_market_for_trading_dates(
+    database_url: str,
+    trading_dates: set[date],
+) -> None:
+    """Recompute and upsert market stats for each trading_date from stored metrics."""
+    for trading_date in sorted(trading_dates):
+        raw_50_values, raw_200_values = load_raw_ratios_for_date(
+            database_url,
+            trading_date,
+        )
+        market_row = aggregate_market_stats(
+            trading_date,
+            raw_50_values,
+            raw_200_values,
+        )
+        if market_row is None:
+            logger.warning("No raw ratios available for market stats on %s", trading_date)
+            continue
+
+        upsert_market_stats(database_url, market_row)
+        logger.info(
+            "Market stats for %s: raw_mean_50=%s raw_mean_200=%s "
+            "raw_std_50=%s raw_std_200=%s (n_50=%d n_200=%d)",
+            trading_date,
+            market_row.raw_mean_50,
+            market_row.raw_mean_200,
+            market_row.raw_std_50,
+            market_row.raw_std_200,
+            len(raw_50_values),
+            len(raw_200_values),
+        )
+
+
+def _run_retention_purge(database_url: str, retention_days: int) -> tuple[int, int]:
+    metrics_purged, market_purged = purge_stale_data(database_url, retention_days)
+    logger.info(
+        "Retention purge: deleted %d metrics and %d market row(s) older than %d days",
+        metrics_purged,
+        market_purged,
+        retention_days,
+    )
+    return metrics_purged, market_purged
 
 
 def main() -> int:
-    load_dotenv()
-
-    database_url = os.environ.get("DATABASE_URL")
-    if not database_url:
-        logger.error("DATABASE_URL is not set")
-        return 1
-
-    tickers_path = Path(os.environ.get("TICKERS_FILE", DEFAULT_TICKERS_FILE))
-
     try:
-        tickers = load_tickers(tickers_path)
-    except (FileNotFoundError, ValueError) as exc:
+        config = get_config()
+    except ValueError as exc:
         logger.error("%s", exc)
         return 1
 
-    rows: list[MetricRow] = []
-    failures = 0
+    database_url = config.database_url
+    batch_size = config.yf_batch_size
+    batch_delay = config.yf_batch_delay_seconds
+    name_delay = config.yf_name_delay_seconds
+    max_retries = config.yf_max_retries
+    retry_base = config.yf_retry_base_seconds
+    retention_days = config.metrics_retention_days
 
-    for i, ticker in enumerate(tickers):
-        if i > 0:
-            time.sleep(TICKER_DELAY_SECONDS)
+    try:
+        watchlist = load_tickers_from_db(database_url)
+    except ValueError as exc:
+        logger.error("%s", exc)
+        return 1
+    except Exception:
+        logger.exception("Failed to load tickers from database")
+        return 1
 
+    all_tickers = [entry.symbol for entry in watchlist]
+    companies = {entry.symbol: entry.company for entry in watchlist}
+
+    try:
+        stale_tickers, skipped_count, max_date = filter_stale_tickers(
+            database_url, all_tickers
+        )
+    except Exception:
+        logger.exception("Failed to query stale tickers from database")
+        return 1
+
+    if max_date is not None and skipped_count:
+        logger.info(
+            "Skipping %d tickers already up to date (trading_date=%s)",
+            skipped_count,
+            max_date,
+        )
+
+    if not stale_tickers:
+        logger.info(
+            "All %d tickers already up to date, nothing to fetch",
+            len(all_tickers),
+        )
         try:
-            row = fetch_metric_row(ticker)
-            if row is not None:
-                rows.append(row)
+            metrics_purged, market_purged = _run_retention_purge(
+                database_url, retention_days
+            )
+        except Exception:
+            logger.exception("Retention purge failed")
+            return 1
+        logger.info(
+            "Summary: total=%d skipped=%d fetched=0 inserted=0 "
+            "purged_metrics=%d purged_market=%d failed_batches=0",
+            len(all_tickers),
+            skipped_count,
+            metrics_purged,
+            market_purged,
+        )
+        return 0
+
+    start = datetime.now(timezone.utc).date() - timedelta(days=HISTORY_DAYS)
+    batches = chunked(stale_tickers, batch_size)
+    fetched_count = 0
+    inserted_count = 0
+    failed_batches = 0
+    trading_dates: set[date] = set()
+
+    for i, batch in enumerate(batches):
+        logger.info(
+            "Fetching batch %d/%d (%d tickers)",
+            i + 1,
+            len(batches),
+            len(batch),
+        )
+        try:
+            batch_currencies = load_currency_for_tickers(
+                batch,
+                name_delay=name_delay,
+            )
+            data = download_batch(
+                batch,
+                start,
+                max_retries=max_retries,
+                retry_base_seconds=retry_base,
+            )
+            batch_rows = metric_rows_from_batch(
+                data, batch, companies, currencies=batch_currencies
+            )
+            fetched_count += len(batch_rows)
+            for row in batch_rows:
+                trading_dates.add(row.trading_date)
                 logger.info(
-                    "Fetched %s: trading_date=%s sma_50=%s sma_200=%s",
+                    "Fetched %s (%s): trading_date=%s currency=%s current_price=%s "
+                    "sma_50=%s sma_200=%s raw_50=%s raw_200=%s",
                     row.ticker,
+                    row.company,
                     row.trading_date,
+                    row.currency,
+                    row.current_price,
                     row.sma_50,
                     row.sma_200,
+                    row.raw_50,
+                    row.raw_200,
                 )
+            batch_inserted = insert_metrics(database_url, batch_rows)
+            inserted_count += batch_inserted
+            logger.info(
+                "Batch %d/%d: fetched=%d inserted=%d",
+                i + 1,
+                len(batches),
+                len(batch_rows),
+                batch_inserted,
+            )
         except Exception:
-            failures += 1
-            logger.exception("Failed to fetch %s", ticker)
+            failed_batches += 1
+            logger.exception(
+                "Failed batch %d/%d (%d tickers)",
+                i + 1,
+                len(batches),
+                len(batch),
+            )
 
-    if not rows:
+        if i < len(batches) - 1:
+            time.sleep(batch_delay)
+
+    if trading_dates:
+        try:
+            upsert_market_for_trading_dates(database_url, trading_dates)
+        except Exception:
+            logger.exception("Failed to upsert market stats")
+            return 1
+
+    try:
+        metrics_purged, market_purged = _run_retention_purge(
+            database_url, retention_days
+        )
+    except Exception:
+        logger.exception("Retention purge failed")
+        return 1
+
+    logger.info(
+        "Summary: total=%d skipped=%d fetched=%d inserted=%d "
+        "purged_metrics=%d purged_market=%d failed_batches=%d http_batches=%d",
+        len(all_tickers),
+        skipped_count,
+        fetched_count,
+        inserted_count,
+        metrics_purged,
+        market_purged,
+        failed_batches,
+        len(batches),
+    )
+
+    if fetched_count == 0:
         logger.error("No metrics collected")
         return 1
 
-    try:
-        upsert_metrics(database_url, rows)
-    except Exception:
-        logger.exception("Database upsert failed")
-        return 1
-
-    if failures:
-        logger.warning("Completed with %d ticker failure(s)", failures)
+    if failed_batches:
+        logger.warning("Completed with %d failed batch(es)", failed_batches)
 
     return 0
 

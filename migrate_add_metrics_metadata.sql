@@ -1,0 +1,2 @@
+-- Superseded by migrate_move_metadata_to_tickers.sql (PRD §6 layout change).
+-- Kept for migration history; new databases use schema.sql only.
