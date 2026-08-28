@@ -16,6 +16,7 @@ MIGRATIONS = [
     REPO_ROOT / "migrate_rename_name_to_company.sql",
     REPO_ROOT / "migrate_add_raw_ratios_and_market.sql",
 ]
+APPLY_MIGRATIONS_SH = REPO_ROOT / "scripts" / "apply_migrations.sh"
 
 
 @pytest.mark.parametrize("path", [SCHEMA_SQL, *MIGRATIONS])
@@ -133,3 +134,23 @@ def test_migrate_metrics_history_restores_composite_unique() -> None:
     sql = (REPO_ROOT / "migrate_metrics_history.sql").read_text(encoding="utf-8")
     assert "DROP CONSTRAINT IF EXISTS metrics_ticker_key" in sql
     assert "metrics_ticker_trading_date_key" in sql
+
+
+def test_apply_migrations_script_lists_ci_safe_migrations_in_order() -> None:
+    script = APPLY_MIGRATIONS_SH.read_text(encoding="utf-8")
+    ci_safe = [
+        "migrate_add_current_price.sql",
+        "migrate_metrics_history.sql",
+        "migrate_add_trading_date_index.sql",
+        "migrate_add_tickers_updated_at.sql",
+        "migrate_move_metadata_to_tickers.sql",
+        "migrate_rename_name_to_company.sql",
+        "migrate_add_raw_ratios_and_market.sql",
+    ]
+    for name in ci_safe:
+        assert name in script
+    positions = [script.index(name) for name in ci_safe]
+    assert positions == sorted(positions)
+    migrations_block = script.split("MIGRATIONS=(", 1)[1].split(")", 1)[0]
+    assert "migrate_one_row_per_ticker.sql" not in migrations_block
+    assert "migrate_add_tickers_table.sql" not in migrations_block
