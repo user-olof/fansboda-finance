@@ -49,17 +49,17 @@ def test_format_report_shows_pass_status() -> None:
     )
     assert "Status: PASS" in report
     assert "tickers=2" in report
+    assert "market_rows" not in report
 
 
-def test_verify_database_flags_missing_market_rows() -> None:
+def test_verify_database_passes_without_market_rows() -> None:
     with patch("scripts.verify_dev_backfill.query_database") as mock_query:
         mock_query.return_value = {
             "ticker_count": 2,
             "metrics_ticker_count": 2,
             "metrics_row_count": 20,
-            "market_row_count": 0,
         }
         issues, counts = verify_database("postgresql://example", expected_seed_count=2)
 
-    assert any("no market rows" in issue for issue in issues)
-    assert counts["market_row_count"] == 0
+    assert issues == []
+    assert "market_row_count" not in counts

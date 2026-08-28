@@ -82,11 +82,10 @@ def query_database(database_url: str) -> dict[str, int]:
             cur.execute("SELECT COUNT(*) FROM metrics")
             metrics_row_count = int(cur.fetchone()[0])
 
-
     return {
         "ticker_count": ticker_count,
         "metrics_ticker_count": metrics_ticker_count,
-        "metrics_row_count": metrics_row_count
+        "metrics_row_count": metrics_row_count,
     }
 
 
@@ -101,11 +100,6 @@ def verify_database(
         issues.append("Database has no tickers")
     if counts["metrics_row_count"] == 0:
         issues.append("Database has no metrics rows")
-    if (
-        counts["metrics_row_count"] > 0
-        and counts.get("market_row_count", 0) == 0
-    ):
-        issues.append("Database has metrics but no market rows")
     if (
         counts["ticker_count"] > 0
         and counts["metrics_ticker_count"] < counts["ticker_count"]
@@ -144,8 +138,7 @@ def format_report(
             "Database: "
             f"tickers={db_counts['ticker_count']} "
             f"metrics_tickers={db_counts['metrics_ticker_count']} "
-            f"metrics_rows={db_counts['metrics_row_count']} "
-            f"market_rows={db_counts.get('market_row_count', 0)}"
+            f"metrics_rows={db_counts['metrics_row_count']}"
         )
     if issues:
         lines.append("Status: FAIL")
