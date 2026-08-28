@@ -1,0 +1,9 @@
+{
+  "name": "fansboda-finance",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "user": "ubuntu",
+  "install": "pipenv install --dev",
+  "start": "bash .cursor/start.sh"
+}
