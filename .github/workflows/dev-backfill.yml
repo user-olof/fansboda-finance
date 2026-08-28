@@ -144,6 +144,14 @@ jobs:
             --tunnel-through-iap \
             --command="sudo install -o fansboda -g fansboda -m 600 /tmp/.env.tmp $APP_DIR/.env && rm -f /tmp/.env.tmp"
 
+      - name: Apply schema migrations on Neon dev branch
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client
+          bash scripts/apply_migrations.sh
+
   collect-data:
     needs: deploy
     runs-on: ubuntu-latest
