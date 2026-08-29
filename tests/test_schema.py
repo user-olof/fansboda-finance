@@ -15,6 +15,7 @@ MIGRATIONS = [
     REPO_ROOT / "migrate_move_metadata_to_tickers.sql",
     REPO_ROOT / "migrate_rename_name_to_company.sql",
     REPO_ROOT / "migrate_add_raw_ratios_and_market.sql",
+    REPO_ROOT / "migrate_tickers_market_and_market_metrics.sql",
 ]
 APPLY_MIGRATIONS_SH = REPO_ROOT / "scripts" / "apply_migrations.sh"
 
@@ -24,11 +25,11 @@ def test_sql_file_exists(path: Path) -> None:
     assert path.is_file(), f"missing {path.name}"
 
 
-def test_schema_defines_tickers_metrics_and_market() -> None:
+def test_schema_defines_tickers_metrics_and_market_metrics() -> None:
     sql = SCHEMA_SQL.read_text(encoding="utf-8")
     assert "CREATE TABLE IF NOT EXISTS tickers" in sql
     assert "CREATE TABLE IF NOT EXISTS metrics" in sql
-    assert "CREATE TABLE IF NOT EXISTS market" in sql
+    assert "CREATE TABLE IF NOT EXISTS market_metrics" in sql
 
 
 def test_schema_enforces_history_unique_constraint() -> None:
@@ -60,6 +61,8 @@ def test_schema_retention_index() -> None:
     sql = SCHEMA_SQL.read_text(encoding="utf-8")
     assert "idx_metrics_trading_date" in sql
     assert "ON metrics (trading_date)" in sql
+    assert "idx_market_metrics_trading_date" in sql
+    assert "ON market_metrics (trading_date)" in sql
 
 
 def test_schema_tickers_updated_at() -> None:
@@ -72,6 +75,12 @@ def test_schema_tickers_sector_industry_columns() -> None:
     tickers_section = sql.split("CREATE TABLE IF NOT EXISTS metrics", 1)[0]
     for column in ("sector", "industry"):
         assert re.search(rf"\b{column}\s+TEXT", tickers_section)
+
+
+def test_schema_tickers_market_column() -> None:
+    sql = SCHEMA_SQL.read_text(encoding="utf-8")
+    tickers_section = sql.split("CREATE TABLE IF NOT EXISTS metrics", 1)[0]
+    assert re.search(r"\bmarket\s+TEXT", tickers_section)
 
 
 def test_schema_metrics_currency_column() -> None:
@@ -92,15 +101,16 @@ def test_schema_tickers_company_column() -> None:
 
 def test_schema_metrics_raw_ratio_columns() -> None:
     sql = SCHEMA_SQL.read_text(encoding="utf-8")
-    metrics_section = sql.split("CREATE TABLE IF NOT EXISTS market", 1)[0]
+    metrics_section = sql.split("CREATE TABLE IF NOT EXISTS market_metrics", 1)[0]
     for column in ("raw_50", "raw_200"):
         assert re.search(rf"\b{column}\s+NUMERIC\(18,\s*6\)", metrics_section)
 
 
-def test_schema_market_primary_key_on_trading_date() -> None:
+def test_schema_market_metrics_primary_key() -> None:
     sql = SCHEMA_SQL.read_text(encoding="utf-8")
-    market_section = sql.split("CREATE TABLE IF NOT EXISTS market", 1)[1]
-    assert re.search(r"\btrading_date\s+DATE\s+PRIMARY KEY", market_section)
+    market_section = sql.split("CREATE TABLE IF NOT EXISTS market_metrics", 1)[1]
+    assert re.search(r"\bmarket\s+TEXT\s+NOT NULL", market_section)
+    assert "PRIMARY KEY (market, trading_date)" in market_section
 
 
 def test_migrate_add_raw_ratios_and_market() -> None:
@@ -112,6 +122,17 @@ def test_migrate_add_raw_ratios_and_market() -> None:
     assert "CREATE TABLE IF NOT EXISTS market" in sql
     assert "raw_mean_50" in sql
     assert "raw_std_200" in sql
+
+
+def test_migrate_tickers_market_and_market_metrics() -> None:
+    sql = (
+        REPO_ROOT / "migrate_tickers_market_and_market_metrics.sql"
+    ).read_text(encoding="utf-8")
+    assert "ADD COLUMN IF NOT EXISTS market TEXT" in sql
+    assert "CREATE TABLE IF NOT EXISTS market_metrics" in sql
+    assert "PRIMARY KEY (market, trading_date)" in sql
+    assert "DROP TABLE IF EXISTS market" in sql
+    assert "idx_market_metrics_trading_date" in sql
 
 
 def test_migrate_move_metadata_to_tickers() -> None:
@@ -146,6 +167,7 @@ def test_apply_migrations_script_lists_ci_safe_migrations_in_order() -> None:
         "migrate_move_metadata_to_tickers.sql",
         "migrate_rename_name_to_company.sql",
         "migrate_add_raw_ratios_and_market.sql",
+        "migrate_tickers_market_and_market_metrics.sql",
     ]
     for name in ci_safe:
         assert name in script

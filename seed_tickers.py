@@ -27,24 +27,25 @@ def resolve_and_upsert_symbols(
     name_delay: float = DEFAULT_YF_NAME_DELAY_SECONDS,
 ) -> int:
     """Resolve yfinance metadata for each symbol and upsert into tickers."""
-    rows: list[tuple[str, str | None, str | None, str | None]] = []
+    rows: list[tuple[str, str | None, str | None, str | None, str | None]] = []
 
     for i, symbol in enumerate(symbols):
         if i > 0:
             time.sleep(name_delay)
         try:
-            company, sector, industry = resolve_watchlist_fields(symbol)
-            rows.append((symbol, company, sector, industry))
+            company, sector, industry, market = resolve_watchlist_fields(symbol)
+            rows.append((symbol, company, sector, industry, market))
             logger.info(
-                "Resolved %s: company=%s sector=%s industry=%s",
+                "Resolved %s: company=%s sector=%s industry=%s market=%s",
                 symbol,
                 company,
                 sector,
                 industry,
+                market,
             )
         except Exception:
             logger.exception("Failed to resolve metadata for %s", symbol)
-            rows.append((symbol, None, None, None))
+            rows.append((symbol, None, None, None, None))
 
     return upsert_tickers(database_url, rows)
 

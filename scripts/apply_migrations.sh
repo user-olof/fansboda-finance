@@ -29,6 +29,7 @@ MIGRATIONS=(
   migrate_move_metadata_to_tickers.sql
   migrate_rename_name_to_company.sql
   migrate_add_raw_ratios_and_market.sql
+  migrate_tickers_market_and_market_metrics.sql
 )
 
 for migration in "${MIGRATIONS[@]}"; do

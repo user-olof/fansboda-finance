@@ -10,7 +10,7 @@
 
 ## Summary
 
-After each weekly `fetch_sma.py` run, delete `metrics` and `market` rows where `trading_date` is older than the configured retention window (default 365 days).
+After each weekly `fetch_sma.py` run, delete `metrics` and `market_metrics` rows where `trading_date` is older than the configured retention window (default 365 days).
 
 ## Requirements
 
@@ -19,9 +19,9 @@ After each weekly `fetch_sma.py` run, delete `metrics` and `market` rows where `
 | FR-7 | Purge rows with `trading_date` older than one year after inserts |
 | — | Purge runs even when all tickers are already fresh (nothing to fetch) |
 | — | Purge count included in job summary logs |
-| — | Parameterized SQL in `db/metrics.py` (and `db/market.py` when RFC-012 lands) |
+| — | Parameterized SQL in `db/metrics.py` and `db/market.py` (→ `market_metrics` after step 10) |
 | — | Cutoff uses UTC date |
-| — | Purge `market` rows with `trading_date` &lt; cutoff alongside `metrics` |
+| — | Purge aggregate rows with `trading_date` &lt; cutoff alongside `metrics` |
 
 ## Implementation
 
@@ -29,9 +29,9 @@ After each weekly `fetch_sma.py` run, delete `metrics` and `market` rows where `
 
 | File | Role |
 |------|------|
-| `db/retention.py` | `purge_stale_data` — orchestrates metrics + market purge |
+| `db/retention.py` | `purge_stale_data` — orchestrates metrics + aggregate purge |
 | `db/metrics.py` | `retention_cutoff`, `purge_stale_metrics`, `DELETE_STALE_SQL` |
-| `db/market.py` | `purge_stale_market`, `DELETE_STALE_MARKET_SQL` |
+| `db/market.py` | `purge_stale_market`, `DELETE_STALE_MARKET_SQL` → `market_metrics` table |
 | `fetch_sma.py` | Calls `_run_retention_purge` at end of every successful `main()` path |
 | `config.py` | `metrics_retention_days` (default 365) |
 | `tests/test_retention.py` | Cutoff math, SQL, purge DB call, `main()` integration |
@@ -49,10 +49,10 @@ SQL:
 
 ```sql
 DELETE FROM metrics WHERE trading_date < %s;
-DELETE FROM market WHERE trading_date < %s;
+DELETE FROM market_metrics WHERE trading_date < %s;
 ```
 
-Index `idx_metrics_trading_date` (RFC-001) supports efficient deletes. `market.trading_date` is the primary key.
+Index `idx_metrics_trading_date` and `idx_market_metrics_trading_date` (RFC-001, RFC-004) support efficient deletes. `market_metrics` uses `(market, trading_date)` as primary key.
 
 ### Configuration
 
@@ -68,8 +68,8 @@ Index `idx_metrics_trading_date` (RFC-001) supports efficient deletes. `market.t
 - [x] Parameterized SQL in `db/metrics.py` and `db/market.py`
 - [x] `purge_stale_data` in `db/retention.py` purges both tables
 - [x] Unit tests in `tests/test_retention.py`
-- [x] `purge_stale_market` deletes stale `market` rows with same cutoff
+- [x] `purge_stale_market` deletes stale `market_metrics` rows with same cutoff
 
 ## Open questions
 
-- None for `metrics` and `market` purge.
+- None.

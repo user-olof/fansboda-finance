@@ -10,7 +10,9 @@
 
 ## Summary
 
-Extend the weekly pipeline and backfill to store scale-free SMA ratios on each `metrics` row (`raw_50`, `raw_200`) and cross-sectional watchlist statistics in a `market` table (one row per `trading_date`). Supports unbiased heatmap coloring — ranking tickers relative to the watchlist on each date rather than using raw SMA-distance signals.
+Extend the weekly pipeline and backfill to store scale-free SMA ratios on each `metrics` row (`raw_50`, `raw_200`) and cross-sectional statistics in **`market_metrics`** — one row per (`trading_date`, listing `market`). Listing `market` comes from `tickers.market` (yfinance bucket, e.g. `us_market`, `se_market`; RFC-002, RFC-010).
+
+Supports unbiased heatmap coloring — ranking tickers relative to peers in the same listing market on each date rather than using raw SMA-distance signals.
 
 ## Requirements (PRD §6)
 
@@ -23,20 +25,21 @@ Extend the weekly pipeline and backfill to store scale-free SMA ratios on each `
 
 Computed at insert time in `fetch_sma.py` and `backfill_sma.py` alongside existing SMA fields.
 
-### Cross-sectional aggregates (`market`)
+### Cross-sectional aggregates (`market_metrics`)
 
-One row per `trading_date` present in the weekly run:
+One row per (`trading_date`, listing `market`) present in the run:
 
 | Column | Formula |
 |--------|---------|
-| `raw_mean_50` | Mean of `raw_50` across all tickers with non-null values on that date |
-| `raw_mean_200` | Mean of `raw_200` across all tickers with non-null values on that date |
-| `raw_std_50` | Sample or population std dev of `raw_50` on that date |
-| `raw_std_200` | Sample or population std dev of `raw_200` on that date |
-| `trading_date` | Snapshot date (unique) |
+| `market` | Listing market bucket; matches `tickers.market` |
+| `trading_date` | Snapshot date |
 | `updated_at` | When the row was written |
+| `raw_mean_50` | Mean of `raw_50` across tickers with the same `tickers.market` and non-null values on that date |
+| `raw_mean_200` | Mean of `raw_200` across tickers with the same `tickers.market` and non-null values on that date |
+| `raw_std_50` | Population std dev of `raw_50` in that `market` on that date |
+| `raw_std_200` | Population std dev of `raw_200` in that `market` on that date |
 
-Upsert on `trading_date` conflict (replace stats when the weekly job re-processes a date).
+Primary key on `(market, trading_date)`. Upsert on conflict (replace stats when the weekly job re-processes a date for that market).
 
 ### Downstream use (out of scope for this RFC)
 
@@ -48,61 +51,62 @@ Consumers may derive z-scores, e.g. `(raw_50 - raw_mean_50) / raw_std_50`, or pe
 
 | Artifact | Role |
 |----------|------|
-| `schema.sql` | Add `raw_50`, `raw_200` to `metrics`; create `market` table — **done (RFC-001)** |
-| `migrate_add_raw_ratios_and_market.sql` | Upgrade path for existing databases — **done (RFC-001)** |
-| `scripts/verify_schema.sql` | Assert new columns and `market` table — **done (RFC-001)** |
-| `tests/test_schema.py` | CI validation — **done (RFC-001)** |
+| `schema.sql` | `raw_50`, `raw_200` on `metrics`; `market_metrics` table |
+| `migrate_add_raw_ratios_and_market.sql` | Step 9 — ratios + legacy watchlist-wide `market` |
+| `migrate_tickers_market_and_market_metrics.sql` | Step 10 — `tickers.market`, `market_metrics` ([MIGRATIONS.md](../MIGRATIONS.md)) |
+| `scripts/verify_schema.sql` | Assert columns, `market_metrics`, retention indexes |
+| `tests/test_schema.py` | CI validation |
 
 ### Domain & DB
 
 | File | Role |
 |------|------|
-| `models.py` | `MetricRow.raw_50`, `MetricRow.raw_200`; `MarketRow` — **done (RFC-001)** |
-| `db/metrics.py` | `insert_metrics`, `load_raw_ratios_for_date`, `load_distinct_trading_dates` |
-| `db/market.py` | `upsert_market_stats(database_url, row)` — **done (RFC-001)** |
+| `models.py` | `MetricRow.raw_50`, `MetricRow.raw_200`; `MarketRow.market` |
+| `db/metrics.py` | `insert_metrics`, `load_raw_ratios_by_market_for_date`, `load_distinct_trading_dates` |
+| `db/market.py` | `upsert_market_stats`, `purge_stale_market` → `market_metrics` table |
 
 ### Pure logic
 
 | Function | Module | Purpose |
 |----------|--------|---------|
-| `compute_raw_ratios(sma_50, sma_200, current_price)` | `fetch_sma.py` or shared module | Return `(raw_50, raw_200)` with divide-by-zero guards |
-| `aggregate_market_stats(...)` | `fetch_sma.py` | Population mean/std for one `trading_date` |
-| `upsert_market_for_trading_dates(...)` | `fetch_sma.py` | Load ratios from DB and upsert `market` |
+| `compute_raw_ratios(sma_50, sma_200, current_price)` | `fetch_sma.py` | Return `(raw_50, raw_200)` with divide-by-zero guards |
+| `aggregate_market_stats(...)` | `fetch_sma.py` | Population mean/std for one (`market`, `trading_date`) group |
+| `upsert_market_for_trading_dates(...)` | `fetch_sma.py` | Load ratios from DB grouped by `tickers.market`; upsert `market_metrics` |
 
 ### Job integration
 
-**`fetch_sma.py` `main()`** — after `insert_metrics` for a batch (or once per run after all inserts for the session date):
+**`fetch_sma.py` `main()`** — after `insert_metrics`:
 
-1. Collect all `MetricRow` objects inserted or fetched for the active `trading_date`.
-2. Compute mean/std → `upsert_market_stats`.
+1. For each processed `trading_date`, load `raw_50` / `raw_200` from `metrics` joined to `tickers`.
+2. Group by `tickers.market`; compute mean/std per group → `upsert_market_stats`.
 
-**`backfill_sma.py`** — compute `raw_50` / `raw_200` on each generated row; after all batches, `upsert_market_for_trading_dates` for every `trading_date` in the run.
+**`backfill_sma.py`** — compute `raw_50` / `raw_200` on each generated row; after all batches, upsert `market_metrics` for every (`trading_date`, `market`) in the run.
 
-**`backfill_market.py`** — one-off manual script to recompute `market` rows from all distinct `metrics.trading_date` values (for legacy DBs or after schema upgrade).
+**`backfill_market.py`** — one-off manual script to recompute all `market_metrics` rows from distinct `metrics.trading_date` values (for legacy DBs or after schema upgrade).
 
 ### Retention (RFC-004)
 
-Purge `market` rows where `trading_date` is older than `metrics_retention_days`, in the same `fetch_sma.py` run as `purge_stale_metrics`.
+Purge `market_metrics` rows where `trading_date` is older than `metrics_retention_days`, in the same `fetch_sma.py` run as `purge_stale_metrics`.
 
 ## Acceptance criteria
 
-- [x] `metrics.raw_50` and `metrics.raw_200` columns in `schema.sql` and migration (RFC-001)
-- [x] `market` table in `schema.sql` with primary key on `trading_date` (RFC-001)
-- [x] `MetricRow` includes `raw_50`, `raw_200`; `insert_metrics` persists them (RFC-001)
-- [x] `db/market.py` upsert and purge helpers (RFC-001)
-- [x] `scripts/verify_schema.sql` and `tests/test_schema.py` updated (RFC-001)
+- [x] `metrics.raw_50` and `metrics.raw_200` columns in `schema.sql` and migrations (RFC-001)
+- [x] `market_metrics` table with PK on `(market, trading_date)`; step 10 migration
+- [x] `MetricRow` includes `raw_50`, `raw_200`; `insert_metrics` persists them
+- [x] `MarketRow.market`; `db/market.py` upsert and purge helpers target `market_metrics`
 - [x] `fetch_sma.py` computes ratios on every new metrics row
-- [x] `fetch_sma.py` upserts one `market` row per processed `trading_date`
+- [x] `fetch_sma.py` upserts `market_metrics` grouped by listing `market`
 - [x] `backfill_sma.py` populates `raw_50` and `raw_200` on backfilled rows
-- [x] Retention purge deletes stale `market` rows (RFC-004)
-- [x] Unit tests for ratio math, aggregation, market upsert, and backfill integration
-- [x] `backfill_sma.py` upserts `market` rows for backfilled trading dates
-- [x] `backfill_market.py` recomputes historical `market` rows from stored metrics
+- [x] `backfill_sma.py` upserts `market_metrics` for backfilled trading dates
+- [x] `backfill_market.py` recomputes historical `market_metrics` from stored metrics
+- [x] Retention purge deletes stale `market_metrics` rows (RFC-004)
+- [x] `tickers.market` populated by seed/refresh (RFC-002, RFC-010)
+- [x] Unit tests for ratio math, per-market aggregation, market upsert, and backfill integration
 
 ## Resolved decisions
 
-- **Backfill `market` history:** `backfill_sma.py` upserts per run; `backfill_market.py` recomputes all dates from `metrics`.
-- **Std dev:** population std dev (`statistics.pstdev`) for full watchlist.
+- **Backfill aggregate history:** `backfill_sma.py` upserts per run; `backfill_market.py` recomputes all dates from `metrics`.
+- **Std dev:** population std dev (`statistics.pstdev`) within each listing `market` group.
 - **Per-sector market stats:** defer to consumer queries joining `tickers.sector` — not separate tables in v1.
 
 ## Open questions

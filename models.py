@@ -13,6 +13,7 @@ class TickerEntry:
     company: str | None
     sector: str | None = None
     industry: str | None = None
+    market: str | None = None
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class MetricRow:
 
 @dataclass(frozen=True)
 class MarketRow:
+    market: str
     trading_date: date
     raw_mean_50: Decimal | None
     raw_mean_200: Decimal | None

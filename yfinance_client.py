@@ -18,11 +18,19 @@ def _fetch_info(symbol: str) -> dict:
     return yf.Ticker(symbol).info
 
 
+def _listing_market_from_info(info: dict, *, symbol: str) -> str | None:
+    market = info.get("market")
+    if not market:
+        logger.warning("No listing market found for %s", symbol)
+        return None
+    return str(market)
+
+
 def _watchlist_fields_from_info(
     info: dict,
     *,
     symbol: str,
-) -> tuple[str | None, str | None, str | None]:
+) -> tuple[str | None, str | None, str | None, str | None]:
     company = info.get("longName") or info.get("shortName")
     sector = info.get("sectorKey") or info.get("sector")
     industry = info.get("industryKey") or info.get("industry")
@@ -32,18 +40,19 @@ def _watchlist_fields_from_info(
         str(company) if company else None,
         str(sector) if sector else None,
         str(industry) if industry else None,
+        _listing_market_from_info(info, symbol=symbol),
     )
 
 
 def resolve_name(symbol: str) -> str | None:
     """Fetch company name from yfinance metadata (longName, fallback shortName)."""
-    company, _, _ = _watchlist_fields_from_info(_fetch_info(symbol), symbol=symbol)
+    company, _, _, _ = _watchlist_fields_from_info(_fetch_info(symbol), symbol=symbol)
     return company
 
 
 def resolve_metadata(symbol: str) -> tuple[str | None, str | None]:
     """Fetch sector and industry from yfinance metadata."""
-    _, sector, industry = _watchlist_fields_from_info(
+    _, sector, industry, _ = _watchlist_fields_from_info(
         _fetch_info(symbol), symbol=symbol
     )
     return sector, industry
@@ -51,8 +60,8 @@ def resolve_metadata(symbol: str) -> tuple[str | None, str | None]:
 
 def resolve_watchlist_fields(
     symbol: str,
-) -> tuple[str | None, str | None, str | None]:
-    """Resolve company, sector, and industry in one yfinance lookup."""
+) -> tuple[str | None, str | None, str | None, str | None]:
+    """Resolve company, sector, industry, and listing market in one yfinance lookup."""
     return _watchlist_fields_from_info(_fetch_info(symbol), symbol=symbol)
 
 

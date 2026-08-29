@@ -122,10 +122,11 @@ def filter_stale_tickers(
     return stale, skipped, max_date
 
 
-LOAD_RAW_RATIOS_FOR_DATE_SQL = """
-SELECT raw_50, raw_200
-FROM metrics
-WHERE trading_date = %s
+LOAD_RAW_RATIOS_BY_MARKET_FOR_DATE_SQL = """
+SELECT t.market, m.raw_50, m.raw_200
+FROM metrics m
+JOIN tickers t ON t.symbol = m.ticker
+WHERE m.trading_date = %s
 """
 
 LOAD_DISTINCT_TRADING_DATES_SQL = """
@@ -135,25 +136,25 @@ ORDER BY trading_date
 """
 
 
-def load_raw_ratios_for_date(
+def load_raw_ratios_by_market_for_date(
     database_url: str,
     trading_date: date,
-) -> tuple[list[Decimal], list[Decimal]]:
-    """Return non-null raw_50 and raw_200 values for a trading_date."""
+) -> dict[str | None, tuple[list[Decimal], list[Decimal]]]:
+    """Return raw_50/raw_200 values grouped by tickers.market for a trading_date."""
     with psycopg2.connect(database_url) as conn:
         with conn.cursor() as cur:
-            cur.execute(LOAD_RAW_RATIOS_FOR_DATE_SQL, (trading_date,))
+            cur.execute(LOAD_RAW_RATIOS_BY_MARKET_FOR_DATE_SQL, (trading_date,))
             rows = cur.fetchall()
 
-    raw_50_values: list[Decimal] = []
-    raw_200_values: list[Decimal] = []
-    for raw_50, raw_200 in rows:
+    grouped: dict[str | None, tuple[list[Decimal], list[Decimal]]] = {}
+    for market, raw_50, raw_200 in rows:
+        raw_50_values, raw_200_values = grouped.setdefault(market, ([], []))
         if raw_50 is not None:
             raw_50_values.append(raw_50)
         if raw_200 is not None:
             raw_200_values.append(raw_200)
 
-    return raw_50_values, raw_200_values
+    return grouped
 
 
 def load_distinct_trading_dates(database_url: str) -> list[date]:

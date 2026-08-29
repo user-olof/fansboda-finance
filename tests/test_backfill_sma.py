@@ -13,7 +13,7 @@ from backfill_sma import (
     week_index_series,
 )
 from config import BaseConfig
-from fetch_sma import compute_raw_ratios
+from fetch_sma import compute_raw_ratios, upsert_market_for_trading_dates
 from models import MetricRow, TickerEntry
 
 
@@ -218,6 +218,61 @@ def test_main_succeeds_when_all_rows_already_exist() -> None:
         "postgresql://example",
         {date(2025, 6, 6)},
     )
+
+
+def test_main_returns_failure_when_market_metrics_upsert_fails() -> None:
+    metric_row = MetricRow(
+        ticker="AAA.ST",
+        company="Alpha AB",
+        trading_date=date(2025, 6, 6),
+        sma_50=Decimal("1"),
+        sma_200=Decimal("2"),
+        current_price=Decimal("3"),
+        currency="SEK",
+        raw_50=Decimal("0.333333"),
+        raw_200=Decimal("0.666667"),
+    )
+
+    with patch("backfill_sma.get_config", return_value=_mock_config()):
+        with patch(
+            "backfill_sma.load_tickers_from_db",
+            return_value=[TickerEntry(symbol="AAA.ST", company="Alpha AB")],
+        ):
+            with patch("backfill_sma.load_existing_metric_keys", return_value=set()):
+                with patch(
+                    "backfill_sma.load_currency_for_tickers",
+                    return_value={"AAA.ST": "SEK"},
+                ):
+                    with patch("backfill_sma.download_batch"):
+                        with patch(
+                            "backfill_sma.metric_rows_from_backfill_batch",
+                            return_value=[metric_row],
+                        ):
+                            with patch("backfill_sma.insert_metrics", return_value=1):
+                                with patch(
+                                    "backfill_sma.upsert_market_for_trading_dates",
+                                    side_effect=RuntimeError("db error"),
+                                ):
+                                    assert main() == 1
+
+
+def test_upsert_market_for_trading_dates_groups_backfill_dates_by_listing_market() -> None:
+    with patch(
+        "fetch_sma.load_raw_ratios_by_market_for_date",
+        return_value={
+            "se_market": ([Decimal("0.5")], [Decimal("0.4")]),
+            "us_market": ([Decimal("0.6")], [Decimal("0.5")]),
+        },
+    ):
+        with patch("fetch_sma.upsert_market_stats") as mock_upsert:
+            upsert_market_for_trading_dates(
+                "postgresql://example",
+                {date(2025, 6, 6)},
+            )
+
+    assert mock_upsert.call_count == 2
+    markets = {call.args[1].market for call in mock_upsert.call_args_list}
+    assert markets == {"se_market", "us_market"}
 
 
 def test_main_returns_failure_on_failed_batch() -> None:

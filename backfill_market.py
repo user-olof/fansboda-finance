@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-off backfill: recompute market stats from existing metrics rows."""
+"""One-off backfill: recompute market_metrics rows from existing metrics."""
 
 from __future__ import annotations
 
@@ -36,16 +36,18 @@ def main() -> int:
         logger.error("No metrics trading dates found")
         return 1
 
-    logger.info("Backfilling market stats for %d trading date(s)", len(trading_dates))
+    logger.info(
+        "Backfilling market_metrics for %d trading date(s)", len(trading_dates)
+    )
 
     try:
         upsert_market_for_trading_dates(database_url, set(trading_dates))
     except Exception:
-        logger.exception("Failed to upsert market stats")
+        logger.exception("Failed to upsert market_metrics stats")
         return 1
 
     logger.info(
-        "Market backfill summary: trading_dates=%d",
+        "Market_metrics backfill summary: trading_dates=%d",
         len(trading_dates),
     )
     return 0

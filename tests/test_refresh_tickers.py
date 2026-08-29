@@ -127,6 +127,40 @@ def test_main_refresh_symbols_subset() -> None:
     assert mock_load.call_args.kwargs["symbols"] == ["AAPL", "MSFT"]
 
 
+def test_main_refresh_resolves_listing_market() -> None:
+    mock_config = type(
+        "Cfg",
+        (),
+        {
+            "database_url": "postgresql://example",
+            "tickers_file": Path("tickers.txt"),
+            "yf_name_delay_seconds": 0.25,
+        },
+    )()
+
+    with patch("refresh_tickers.get_config", return_value=mock_config):
+        with patch(
+            "refresh_tickers.load_symbols_for_refresh",
+            return_value=["AAPL"],
+        ):
+            with patch(
+                "seed_tickers.resolve_watchlist_fields",
+                return_value=(
+                    "Apple Inc.",
+                    "technology",
+                    "consumer-electronics",
+                    "us_market",
+                ),
+            ):
+                with patch("seed_tickers.upsert_tickers", return_value=1) as mock_upsert:
+                    assert main(["--symbols", "AAPL"]) == 0
+
+    mock_upsert.assert_called_once_with(
+        "postgresql://example",
+        [("AAPL", "Apple Inc.", "technology", "consumer-electronics", "us_market")],
+    )
+
+
 def test_main_rejects_from_db_and_symbols_together() -> None:
     with pytest.raises(SystemExit):
         main(["--from-db", "--symbols", "AAPL"])

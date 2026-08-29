@@ -23,9 +23,9 @@ SELECT column_name
 FROM information_schema.columns
 WHERE table_schema = 'public'
   AND table_name = 'tickers'
-  AND column_name IN ('sector', 'industry', 'company')
+  AND column_name IN ('sector', 'industry', 'company', 'market')
 ORDER BY column_name;
--- expect 3 rows after migrate_rename_name_to_company.sql or fresh schema.sql
+-- expect 4 rows after migrate_tickers_market_and_market_metrics.sql or fresh schema.sql
 
 SELECT column_name
 FROM information_schema.columns
@@ -35,17 +35,17 @@ WHERE table_schema = 'public'
 ORDER BY column_name;
 -- expect 4 rows after migrate_add_raw_ratios_and_market.sql or fresh schema.sql
 
--- market table and columns
+-- market_metrics table and columns
 SELECT column_name, data_type, numeric_precision, numeric_scale
 FROM information_schema.columns
-WHERE table_schema = 'public' AND table_name = 'market'
+WHERE table_schema = 'public' AND table_name = 'market_metrics'
 ORDER BY ordinal_position;
 
 SELECT conname
 FROM pg_constraint
-WHERE conrelid = 'public.market'::regclass
+WHERE conrelid = 'public.market_metrics'::regclass
   AND contype = 'p'
-  AND conname = 'market_pkey';
+  AND conname = 'market_metrics_pkey';
 
 -- unique (ticker, trading_date)
 SELECT conname
@@ -68,3 +68,9 @@ FROM pg_indexes
 WHERE schemaname = 'public'
   AND tablename = 'metrics'
   AND indexname = 'idx_metrics_trading_date';
+
+SELECT indexname
+FROM pg_indexes
+WHERE schemaname = 'public'
+  AND tablename = 'market_metrics'
+  AND indexname = 'idx_market_metrics_trading_date';

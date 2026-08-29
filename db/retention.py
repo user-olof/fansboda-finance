@@ -1,4 +1,4 @@
-"""Rolling data retention for metrics and market tables (RFC-004)."""
+"""Rolling data retention for metrics and market_metrics tables (RFC-004)."""
 
 from __future__ import annotations
 
@@ -14,7 +14,10 @@ __all__ = [
 
 
 def purge_stale_data(database_url: str, retention_days: int) -> tuple[int, int]:
-    """Delete stale metrics and market rows. Returns (metrics_deleted, market_deleted)."""
+    """Delete stale metrics and market_metrics rows.
+
+    Returns ``(metrics_deleted, market_metrics_deleted)``.
+    """
     metrics_purged = purge_stale_metrics(database_url, retention_days)
-    market_purged = purge_stale_market(database_url, retention_days)
-    return metrics_purged, market_purged
+    market_metrics_purged = purge_stale_market(database_url, retention_days)
+    return metrics_purged, market_metrics_purged

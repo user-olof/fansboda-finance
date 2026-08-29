@@ -1,4 +1,4 @@
-"""Database access for the market table."""
+"""Database access for the market_metrics table."""
 
 from __future__ import annotations
 
@@ -10,12 +10,12 @@ from db.metrics import retention_cutoff
 from models import MarketRow
 
 UPSERT_MARKET_SQL = """
-INSERT INTO market (
-    trading_date, updated_at,
+INSERT INTO market_metrics (
+    market, trading_date, updated_at,
     raw_mean_50, raw_mean_200, raw_std_50, raw_std_200
 )
-VALUES (%s, %s, %s, %s, %s, %s)
-ON CONFLICT (trading_date) DO UPDATE SET
+VALUES (%s, %s, %s, %s, %s, %s, %s)
+ON CONFLICT (market, trading_date) DO UPDATE SET
     updated_at = EXCLUDED.updated_at,
     raw_mean_50 = EXCLUDED.raw_mean_50,
     raw_mean_200 = EXCLUDED.raw_mean_200,
@@ -24,19 +24,20 @@ ON CONFLICT (trading_date) DO UPDATE SET
 """
 
 DELETE_STALE_MARKET_SQL = """
-DELETE FROM market
+DELETE FROM market_metrics
 WHERE trading_date < %s
 """
 
 
 def upsert_market_stats(database_url: str, row: MarketRow) -> int:
-    """Insert or update cross-sectional stats for one trading_date."""
+    """Insert or update cross-sectional stats for one (market, trading_date)."""
     now = datetime.now(timezone.utc)
     with psycopg2.connect(database_url) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 UPSERT_MARKET_SQL,
                 (
+                    row.market,
                     row.trading_date,
                     now,
                     row.raw_mean_50,
@@ -52,7 +53,7 @@ def upsert_market_stats(database_url: str, row: MarketRow) -> int:
 
 
 def purge_stale_market(database_url: str, retention_days: int) -> int:
-    """Delete market rows older than retention_days (UTC). Returns rows deleted."""
+    """Delete market_metrics rows older than retention_days (UTC). Returns rows deleted."""
     cutoff = retention_cutoff(retention_days)
     with psycopg2.connect(database_url) as conn:
         with conn.cursor() as cur:

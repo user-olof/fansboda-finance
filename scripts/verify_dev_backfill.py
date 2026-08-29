@@ -12,7 +12,7 @@ import psycopg2
 
 BACKFILL_SUMMARY_RE = re.compile(
     r"Backfill summary: tickers=(\d+) generated=(\d+) inserted=(\d+) "
-    r"skipped_existing=(\d+) failed_batches=(\d+)"
+    r"skipped_existing=(\d+) market_trading_dates=(\d+) failed_batches=(\d+)"
 )
 SEED_SUMMARY_RE = re.compile(r"Seeded (\d+) ticker\(s\) from ")
 
@@ -22,12 +22,13 @@ def parse_backfill_summary(log_text: str) -> dict[str, int] | None:
     matches = BACKFILL_SUMMARY_RE.findall(log_text)
     if not matches:
         return None
-    tickers, generated, inserted, skipped, failed = matches[-1]
+    tickers, generated, inserted, skipped, market_trading_dates, failed = matches[-1]
     return {
         "tickers": int(tickers),
         "generated": int(generated),
         "inserted": int(inserted),
         "skipped_existing": int(skipped),
+        "market_trading_dates": int(market_trading_dates),
         "failed_batches": int(failed),
     }
 
@@ -131,6 +132,7 @@ def format_report(
             f"generated={log_fields['generated']} "
             f"inserted={log_fields.get('inserted')} "
             f"skipped_existing={log_fields.get('skipped_existing')} "
+            f"market_trading_dates={log_fields.get('market_trading_dates')} "
             f"failed_batches={log_fields.get('failed_batches')}"
         )
     if db_counts:

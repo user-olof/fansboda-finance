@@ -8,10 +8,10 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 |------|-------------|
 | Weekly SMA pipeline | Thursday job fetches prices, computes SMA-50/200, appends history |
 | Normalized SMA ratios | Per-ticker `raw_50` / `raw_200` (SMA ÷ price) for cross-sectional comparison |
-| Market aggregates | Per-`trading_date` mean and std of `raw_50` / `raw_200` across the watchlist |
+| Market aggregates | Per-(`trading_date`, listing `market`) mean and std of `raw_50` / `raw_200` in `market_metrics` |
 | Historical backfill | Bootstrap of rolling weekly SMA snapshots (~2 years of data) |
 | Watchlist seeding | Load symbols from file, resolve company metadata, upsert into Postgres |
-| Rolling retention | Keeps ~1 year of `metrics` history; older rows purged after each weekly run |
+| Rolling retention | Keeps ~1 year of `metrics` and `market_metrics` history; older rows purged after each weekly run |
 | Centralized configuration | `DevConfig` / `ProdConfig` in `config.py`; selected via `APP_ENV` |
 | Zero-cost ops | **One** GCP `e2-micro` (Always Free) + Neon Postgres free tier |
 | CI/CD — production | `pytest` on PR to `main`; deploy to long-lived Production VM on push to `main` |
@@ -22,7 +22,7 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 ## Users & use cases
 
 - **Primary user:** project owner with a personal watchlist (Swedish `.ST` symbols and others).
-- **Primary use case:** query `metrics` to compare `current_price`, `sma_50`, and `sma_200` — including trends over retained history (golden-cross / death-cross style signals). Use `raw_50`, `raw_200`, and the `market` table to rank tickers relative to the watchlist on each `trading_date` (cross-sectional normalization for heatmaps and sector views).
+- **Primary use case:** query `metrics` to compare `current_price`, `sma_50`, and `sma_200` — including trends over retained history (golden-cross / death-cross style signals). Use `raw_50`, `raw_200`, and the `market_metrics` table to rank tickers relative to peers in the same listing `market` on each `trading_date` (cross-sectional normalization for heatmaps; sector views via `tickers.sector`).
 - **Watchlist management:** add or remove symbols via SQL on `tickers` or by running `seed_tickers.py`.
 
 ---
@@ -40,34 +40,35 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 
 ### Market aggregates
 
-- **`market` table:** one row per `trading_date` with cross-sectional stats over the watchlist for that date.
-- **`raw_mean_50` / `raw_mean_200`:** mean of all tickers' `raw_50` / `raw_200` on the date.
-- **`raw_std_50` / `raw_std_200`:** standard deviation of all tickers' `raw_50` / `raw_200` on the date.
-- Supports unbiased heatmap coloring (e.g. z-scores or percentile ranks vs the watchlist) without raw SMA-distance bias.
+- **`market_metrics` table:** one row per (`trading_date`, listing `market`) with cross-sectional stats over tickers in that market on that date (PRD §6).
+- Aggregates `raw_50` / `raw_200` from `metrics` rows whose tickers share the same `tickers.market` value (yfinance listing market bucket, e.g. `us_market`, `se_market`).
+- **`raw_mean_50` / `raw_mean_200`:** mean of tickers' `raw_50` / `raw_200` in the group on the date.
+- **`raw_std_50` / `raw_std_200`:** standard deviation of tickers' `raw_50` / `raw_200` in the group on the date.
+- Supports unbiased heatmap coloring (e.g. z-scores or percentile ranks vs peers in the same listing market) without raw SMA-distance bias.
 
 ### Watchlist
 
-- **`tickers` table:** `symbol` (primary key), `company`, `sector`, `industry`, `updated_at`.
-- `sector` and `industry` come from yfinance (`sectorKey`, `industryKey`).
+- **`tickers` table:** `symbol` (primary key), `company`, `sector`, `industry`, `market`, `updated_at`.
+- `sector`, `industry`, and `market` come from yfinance (`sectorKey`, `industryKey`, and listing `market`).
 - Symbols include Swedish `.ST` listings and other markets.
 - Deleting a ticker cascades to all its `metrics` rows.
 
 ### Data retention
 
-- After each weekly run, `metrics` and `market` rows with `trading_date` older than **365 days** are deleted (`db/retention.py`).
+- After each weekly run, `metrics` and `market_metrics` rows with `trading_date` older than **365 days** are deleted (`db/retention.py`).
 - Retention purge runs even when all tickers are already fresh (nothing to fetch).
 - Purge counts appear in the weekly job summary log.
 - Cutoff uses UTC date via `metrics_retention_days` (configurable).
 
-### Schema (`tickers` / `metrics` / `market`)
+### Schema (`tickers` / `metrics` / `market_metrics`)
 
 | Table | Key columns |
 |-------|-------------|
-| `tickers` | `symbol` (PK), `company`, `sector`, `industry`, `updated_at` |
+| `tickers` | `symbol` (PK), `company`, `sector`, `industry`, `market`, `updated_at` |
 | `metrics` | `id` (PK), `ticker` (FK → `tickers.symbol`), `company`, `trading_date`, `updated_at`, `currency`, `sma_50`, `sma_200`, `current_price`, `raw_50`, `raw_200` |
-| `market` | `trading_date`, `updated_at`, `raw_mean_50`, `raw_mean_200`, `raw_std_50`, `raw_std_200` |
+| `market_metrics` | `market`, `trading_date`, `updated_at`, `raw_mean_50`, `raw_mean_200`, `raw_std_50`, `raw_std_200` |
 
-`company` on `metrics` is copied from `tickers` at fetch time. `currency` is the listing currency code captured per snapshot. `raw_50` and `raw_200` are `sma_50 / current_price` and `sma_200 / current_price`. Price and ratio columns use `NUMERIC(18, 6)`. Unique on `metrics (ticker, trading_date)`; one `market` row per `trading_date`.
+`company` on `metrics` is copied from `tickers` at fetch time. `currency` is the listing currency code captured per snapshot. Listing `market` lives on `tickers` and groups rows in `market_metrics`. `raw_50` and `raw_200` are `sma_50 / current_price` and `sma_200 / current_price`. Price and ratio columns use `NUMERIC(18, 6)`. Unique on `metrics (ticker, trading_date)` and `market_metrics (market, trading_date)`.
 
 DDL: `schema.sql` for new databases; `migrate_*.sql` for upgrades ([MIGRATIONS.md](./MIGRATIONS.md)).
 
@@ -87,10 +88,10 @@ Scheduled **Thursdays at 11:00 UTC** on the Production VM (FR-1 – FR-8).
 | Retry / backoff | Retries 429, rate limits, timeouts, connection errors, empty frames |
 | Compute SMAs | Requires ≥200 valid daily closes; captures latest close and `trading_date` |
 | Raw ratios | Computes `raw_50` and `raw_200` (`sma / current_price`) per ticker |
-| Market stats | Aggregates mean and std of `raw_50` / `raw_200` into `market` for the snapshot date |
-| yfinance metadata | Captures `currency` per snapshot; copies `company` from `tickers` |
+| Market stats | Aggregates mean and std of `raw_50` / `raw_200` into `market_metrics` per (`trading_date`, listing `market`) |
+| yfinance metadata | Captures `currency` per snapshot; copies `company` from `tickers` (listing `market` on `tickers`) |
 | Append metrics | Inserts new rows without overwriting history |
-| Retention purge | Deletes `metrics` and `market` rows older than configured retention (default 365 days) |
+| Retention purge | Deletes `metrics` and `market_metrics` rows older than configured retention (default 365 days) |
 | Observability | Per-batch progress, per-ticker results, insert/purge counts, final summary |
 
 ### Watchlist seeding (`seed_tickers.py`)
@@ -101,8 +102,8 @@ Manual / ad-hoc script for initial and ongoing watchlist setup (FR-9 – FR-11).
 |------------|--------|
 | Load symbols | Reads symbol file (one per line; `#` comments ignored); uppercases |
 | Resolve company | Fetches company name from yfinance (`longName`, fallback `shortName`) |
-| Resolve sector / industry | Fetches `sectorKey` / `industryKey` from yfinance (same rate-limit pattern as company lookups) |
-| Upsert | Insert or update `(symbol, company, sector, industry)` on conflict by `symbol`; sets `updated_at` |
+| Resolve sector / industry / market | Fetches `sectorKey`, `industryKey`, and listing `market` from yfinance (same rate-limit pattern as company lookups) |
+| Upsert | Insert or update `(symbol, company, sector, industry, market)` on conflict by `symbol`; sets `updated_at` |
 | Rate limiting | Configurable delay between yfinance lookups (default 0.25s) |
 
 ### Watchlist metadata refresh (`refresh_tickers.py`)
@@ -111,7 +112,7 @@ Ad-hoc script to refresh watchlist metadata without a full re-seed (FR-12, RFC-0
 
 | Capability | Detail |
 |------------|--------|
-| Refresh existing | Re-resolve `company`, `sector`, and `industry` for symbols already in `tickers` |
+| Refresh existing | Re-resolve `company`, `sector`, `industry`, and `market` for symbols already in `tickers` |
 | Add new | Include symbols from file not yet in `tickers` (same upsert as seed) |
 | Symbol selection | Default: union of tickers file and DB; `--from-db` for all DB symbols; `--symbols AAPL,MSFT.ST` for a subset |
 | Reuse | Same yfinance resolution and rate limiting as `seed_tickers.py` via `resolve_and_upsert_symbols` |
@@ -126,7 +127,7 @@ Bootstrap script for SMA history — **not** part of the weekly cron (FR-13 – 
 | Rolling 52-week windows | Week 0 anchored at oldest bar; windows 0–51, 1–52, 2–53, … |
 | SMA snapshots | One metric row per window at the last trading day in the window |
 | Raw ratios | Populates `raw_50` and `raw_200` on each inserted metrics row |
-| Market stats | Upserts cross-sectional `market` rows for all backfilled trading dates |
+| Market stats | Upserts `market_metrics` rows for all backfilled (`trading_date`, listing `market`) pairs |
 | Currency | Resolves listing `currency` per ticker (same rate-limit pattern as weekly fetch) |
 | Skip existing | Skips `(ticker, trading_date)` pairs already in the database |
 | Resume-safe | `ON CONFLICT DO NOTHING`; interrupted runs can continue without duplicates |
@@ -173,7 +174,7 @@ All tunables live in **`config.py`** (PRD §5.5):
 
 ```
 GCP e2-micro VM  ──cron Thu 11:00 UTC──▶  fetch_sma.py  ──▶  Neon Postgres
-  (Debian 12)         yfinance batches        tickers + metrics + market
+  (Debian 12)         yfinance batches        tickers + metrics + market_metrics
 ```
 
 - **Compute:** one `e2-micro`, UTC, weekly on Thursdays.
@@ -242,7 +243,7 @@ Uses GitHub **`DEV`** environment and `DATABASE_URL_DEV` secret. Deploy SA needs
 | Manual weekly run | `sudo -u fansboda bash -c 'cd /opt/fansboda-finance && set -a && . ./.env && set +a && PIPENV_VENV_IN_PROJECT=1 pipenv run python fetch_sma.py'` |
 | Verify data | `SELECT * FROM metrics ORDER BY trading_date DESC, ticker LIMIT 10;` |
 | Check retention | `SELECT MIN(trading_date), MAX(trading_date), COUNT(*) FROM metrics;` |
-| Market snapshot | `SELECT * FROM market ORDER BY trading_date DESC LIMIT 10;` |
+| Market snapshot | `SELECT * FROM market_metrics ORDER BY trading_date DESC, market LIMIT 10;` |
 
 ---
 

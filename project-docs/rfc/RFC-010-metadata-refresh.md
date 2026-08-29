@@ -10,14 +10,14 @@
 
 ## Summary
 
-Ad-hoc script to refresh watchlist metadata (`company`, `sector`, `industry`) without a full re-seed. Handles existing DB symbols and new symbols from the tickers file.
+Ad-hoc script to refresh watchlist metadata (`company`, `sector`, `industry`, listing `market`) without a full re-seed. Handles existing DB symbols and new symbols from the tickers file.
 
-**Scope note (PRD §6):** `company`, `sector`, and `industry` live on **`tickers`** and are refreshed by this script (and `seed_tickers.py`). `currency` lives on **`metrics`** snapshots and is populated by the weekly fetch (RFC-003) and backfill (RFC-005) — out of scope for this script.
+**Scope note (PRD §6):** `company`, `sector`, `industry`, and listing `market` live on **`tickers`** and are refreshed by this script (and `seed_tickers.py`). `currency` lives on **`metrics`** snapshots and is populated by the weekly fetch (RFC-003) and backfill (RFC-005) — out of scope for this script.
 
 ## Requirements (FR-12)
 
-- Refresh `company`, `sector`, and `industry` for symbols already in `tickers`
-- Add new symbols from file not yet in `tickers` (resolve all three fields)
+- Refresh `company`, `sector`, `industry`, and listing `market` for symbols already in `tickers`
+- Add new symbols from file not yet in `tickers` (resolve all four fields)
 - Same rate-limiting and upsert-on-conflict as `seed_tickers.py`
 - Optional: accept a subset of symbols via CLI (e.g. `--symbols AAPL,MSFT.ST`)
 - Optional: `--from-db` to refresh all DB symbols without reading file
@@ -61,6 +61,7 @@ pipenv run python refresh_tickers.py custom-tickers.txt   # optional file path
 ## Acceptance criteria
 
 - [x] Refreshes `company`, `sector`, and `industry` for existing `tickers` rows
+- [x] Refreshes listing `market` on `tickers` via yfinance (RFC-002)
 - [x] Adds new symbols from file with resolved watchlist metadata
 - [x] Rate limiting matches seed script
 - [x] Optional subset and `--from-db` modes

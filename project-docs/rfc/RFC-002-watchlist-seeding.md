@@ -10,7 +10,7 @@
 
 ## Summary
 
-Ad-hoc script to load symbols from a text file, resolve company names and watchlist metadata (`sector`, `industry`) via yfinance, and upsert into the `tickers` table.
+Ad-hoc script to load symbols from a text file, resolve company names and watchlist metadata (`sector`, `industry`, listing `market`) via yfinance, and upsert into the `tickers` table.
 
 ## Requirements
 
@@ -18,7 +18,7 @@ Ad-hoc script to load symbols from a text file, resolve company names and watchl
 |----|-------------|
 | FR-9 | Read symbols from file (one per line; `#` comments and blanks ignored); uppercase |
 | FR-10 | Resolve company name from yfinance (`longName`, fallback `shortName`); rate-limit delay between lookups |
-| FR-11 | Upsert `(symbol, company, sector, industry)` on conflict by `symbol`; `sector` / `industry` from `sectorKey` / `industryKey` |
+| FR-11 | Upsert `(symbol, company, sector, industry, market)` on conflict by `symbol`; `sector` / `industry` from `sectorKey` / `industryKey`; listing `market` from yfinance (e.g. `market` / exchange bucket) |
 
 ## Implementation
 
@@ -49,7 +49,7 @@ tickers.txt  →  load_tickers()  →  resolve_watchlist_fields()  ─┐
 | Function | Module | Purpose |
 |----------|--------|---------|
 | `load_tickers(path)` | `symbols` | Parse symbol file |
-| `resolve_watchlist_fields(symbol)` | `yfinance_client` | Single yfinance lookup for company + sector + industry |
+| `resolve_watchlist_fields(symbol)` | `yfinance_client` | Single yfinance lookup for company + sector + industry + listing `market` |
 | `resolve_and_upsert_symbols(...)` | `seed_tickers` | Rate-limited resolve loop + upsert |
 | `upsert_tickers(url, rows)` | `db.tickers` | Parameterized upsert |
 | `seed_tickers_from_file(...)` | `seed_tickers` | Orchestration |
@@ -74,6 +74,11 @@ Optional CLI arg overrides default file; config provides `tickers_file` and `yf_
 - [x] SQL in `db/tickers.py` with parameterized queries
 - [x] Uses `get_config()` for database URL and tunables (RFC-006)
 - [x] Tests cover resolve, upsert, and orchestration paths
+
+### Pending (PRD §6)
+
+- [ ] Resolve listing `market` from yfinance and upsert into `tickers.market`
+- [ ] `TickerEntry` / `upsert_tickers` include `market` column (RFC-001 step 10)
 
 ## Open questions
 
