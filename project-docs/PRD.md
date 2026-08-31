@@ -178,6 +178,7 @@ environments differ (e.g. more conservative batch delays in production).
 | `company` | TEXT | Company name |
 | `sector` | TEXT | Sector from yfinance (using sectorKey) |
 | `industry` | TEXT | Industry from yfinance (using industryKey) |
+| `market` | TEXT | Listing market from yfinance (e.g. `us_market`, `se_market`) |
 | `updated_at` | TIMESTAMPTZ | When the row was written |
 
 ### Table `metrics` (SMA history, one row per ticker per `trading_date`)
@@ -196,19 +197,26 @@ environments differ (e.g. more conservative batch delays in production).
 | `raw_50` | NUMERIC(18,6) | 50-day SMA / current price |
 | `raw_200`| NUMERIC(18,6) | 200-day SMA / current price |
 
-### Table `market` (market data based on SMA calculations, one row per `trading_date`)
-| Column | Type | Notes |
-|--------|------|-------|
-| `raw_mean_50` | NUMERIC(18,6) | Mean value of all stocks' raw_50 data |
-| `raw_mean_200`| NUMERIC(18,6) | Mean value of all stocks' raw_200 data|
-| `raw_std_50` | NUMERIC(18,6) | St. dev. of all stocks' raw_50 data |
-| `raw_std_200` | NUMERIC(18,6) | St. dev. of all stocks' raw_200 data|
-| `trading_date` | DATE | Market session used for this snapshot |
-| `updated_at` | TIMESTAMPTZ | When the row was written |
-
 Unique constraint on `(ticker, trading_date)`. Multiple rows per ticker are
 expected; each weekly run appends a new snapshot. Rows with `trading_date`
 older than one year are deleted on each run.
+
+### Table `market_metrics` (cross-sectional SMA stats; one row per `trading_date` per `market`)
+
+Aggregates `raw_50` / `raw_200` from `metrics` rows whose tickers share the same listing `market` (from `tickers.market`) on that date.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `market` | TEXT | Listing market bucket (e.g. `us_market`, `se_market`); matches `tickers.market` |
+| `trading_date` | DATE | Market session used for this snapshot |
+| `updated_at` | TIMESTAMPTZ | When the row was written |
+| `raw_mean_50` | NUMERIC(18,6) | Mean of tickers' `raw_50` in this `market` on this date |
+| `raw_mean_200`| NUMERIC(18,6) | Mean of tickers' `raw_200` in this `market` on this date |
+| `raw_std_50` | NUMERIC(18,6) | St. dev. of tickers' `raw_50` in this `market` on this date |
+| `raw_std_200` | NUMERIC(18,6) | St. dev. of tickers' `raw_200` in this `market` on this date |
+
+Unique constraint on `(market, trading_date)`. Rows with `trading_date` older
+than one year are deleted on each weekly run (same retention as `metrics`).
 
 Deleting a row from `tickers` cascades to all of its `metrics` rows.
 

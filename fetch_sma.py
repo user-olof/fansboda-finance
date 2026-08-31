@@ -14,7 +14,11 @@ import pandas as pd
 
 from config import get_config
 from db.market import upsert_market_stats
-from db.metrics import filter_stale_tickers, insert_metrics, load_raw_ratios_for_date
+from db.metrics import (
+    filter_stale_tickers,
+    insert_metrics,
+    load_raw_ratios_by_market_for_date,
+)
 from db.retention import purge_stale_data
 from db.tickers import load_tickers_from_db
 from models import MarketRow, MetricRow
@@ -102,14 +106,16 @@ def _population_std_decimal(values: list[Decimal]) -> Decimal | None:
 
 def aggregate_market_stats(
     trading_date: date,
+    market: str,
     raw_50_values: list[Decimal],
     raw_200_values: list[Decimal],
 ) -> MarketRow | None:
-    """Build cross-sectional market stats for one trading_date."""
+    """Build cross-sectional market stats for one (market, trading_date)."""
     if not raw_50_values and not raw_200_values:
         return None
 
     return MarketRow(
+        market=market,
         trading_date=trading_date,
         raw_mean_50=_mean_decimal(raw_50_values),
         raw_mean_200=_mean_decimal(raw_200_values),
@@ -204,44 +210,59 @@ def upsert_market_for_trading_dates(
     database_url: str,
     trading_dates: set[date],
 ) -> None:
-    """Recompute and upsert market stats for each trading_date from stored metrics."""
+    """Recompute and upsert market_metrics rows for each trading_date from stored metrics."""
     for trading_date in sorted(trading_dates):
-        raw_50_values, raw_200_values = load_raw_ratios_for_date(
-            database_url,
-            trading_date,
-        )
-        market_row = aggregate_market_stats(
-            trading_date,
-            raw_50_values,
-            raw_200_values,
-        )
-        if market_row is None:
+        by_market = load_raw_ratios_by_market_for_date(database_url, trading_date)
+        if not by_market:
             logger.warning("No raw ratios available for market stats on %s", trading_date)
             continue
 
-        upsert_market_stats(database_url, market_row)
-        logger.info(
-            "Market stats for %s: raw_mean_50=%s raw_mean_200=%s "
-            "raw_std_50=%s raw_std_200=%s (n_50=%d n_200=%d)",
-            trading_date,
-            market_row.raw_mean_50,
-            market_row.raw_mean_200,
-            market_row.raw_std_50,
-            market_row.raw_std_200,
-            len(raw_50_values),
-            len(raw_200_values),
-        )
+        for market, (raw_50_values, raw_200_values) in sorted(
+            by_market.items(),
+            key=lambda item: (item[0] is None, item[0] or ""),
+        ):
+            if market is None:
+                logger.warning(
+                    "Skipping market stats for tickers without listing market on %s",
+                    trading_date,
+                )
+                continue
+
+            market_row = aggregate_market_stats(
+                trading_date,
+                market,
+                raw_50_values,
+                raw_200_values,
+            )
+            if market_row is None:
+                continue
+
+            upsert_market_stats(database_url, market_row)
+            logger.info(
+                "Market stats for %s %s: raw_mean_50=%s raw_mean_200=%s "
+                "raw_std_50=%s raw_std_200=%s (n_50=%d n_200=%d)",
+                market,
+                trading_date,
+                market_row.raw_mean_50,
+                market_row.raw_mean_200,
+                market_row.raw_std_50,
+                market_row.raw_std_200,
+                len(raw_50_values),
+                len(raw_200_values),
+            )
 
 
 def _run_retention_purge(database_url: str, retention_days: int) -> tuple[int, int]:
-    metrics_purged, market_purged = purge_stale_data(database_url, retention_days)
+    metrics_purged, market_metrics_purged = purge_stale_data(
+        database_url, retention_days
+    )
     logger.info(
-        "Retention purge: deleted %d metrics and %d market row(s) older than %d days",
+        "Retention purge: deleted %d metrics and %d market_metrics row(s) older than %d days",
         metrics_purged,
-        market_purged,
+        market_metrics_purged,
         retention_days,
     )
-    return metrics_purged, market_purged
+    return metrics_purged, market_metrics_purged
 
 
 def main() -> int:
@@ -292,7 +313,7 @@ def main() -> int:
             len(all_tickers),
         )
         try:
-            metrics_purged, market_purged = _run_retention_purge(
+            metrics_purged, market_metrics_purged = _run_retention_purge(
                 database_url, retention_days
             )
         except Exception:
@@ -300,11 +321,11 @@ def main() -> int:
             return 1
         logger.info(
             "Summary: total=%d skipped=%d fetched=0 inserted=0 "
-            "purged_metrics=%d purged_market=%d failed_batches=0",
+            "purged_metrics=%d purged_market_metrics=%d failed_batches=0",
             len(all_tickers),
             skipped_count,
             metrics_purged,
-            market_purged,
+            market_metrics_purged,
         )
         return 0
 
@@ -381,7 +402,7 @@ def main() -> int:
             return 1
 
     try:
-        metrics_purged, market_purged = _run_retention_purge(
+        metrics_purged, market_metrics_purged = _run_retention_purge(
             database_url, retention_days
         )
     except Exception:
@@ -390,13 +411,13 @@ def main() -> int:
 
     logger.info(
         "Summary: total=%d skipped=%d fetched=%d inserted=%d "
-        "purged_metrics=%d purged_market=%d failed_batches=%d http_batches=%d",
+        "purged_metrics=%d purged_market_metrics=%d failed_batches=%d http_batches=%d",
         len(all_tickers),
         skipped_count,
         fetched_count,
         inserted_count,
         metrics_purged,
-        market_purged,
+        market_metrics_purged,
         failed_batches,
         len(batches),
     )

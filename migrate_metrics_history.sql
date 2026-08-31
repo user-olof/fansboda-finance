@@ -3,7 +3,16 @@
 
 ALTER TABLE metrics DROP CONSTRAINT IF EXISTS metrics_ticker_key;
 
-ALTER TABLE metrics
-    ADD CONSTRAINT metrics_ticker_trading_date_key UNIQUE (ticker, trading_date);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'metrics_ticker_trading_date_key'
+          AND conrelid = 'public.metrics'::regclass
+    ) THEN
+        ALTER TABLE metrics
+            ADD CONSTRAINT metrics_ticker_trading_date_key UNIQUE (ticker, trading_date);
+    END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_metrics_trading_date ON metrics (trading_date);

@@ -10,7 +10,7 @@
 
 ## Summary
 
-One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **Not** cron-scheduled. SMA price fields, `raw_50` / `raw_200` ratios, and cross-sectional `market` stats are backfilled from OHLCV. `sector` and `industry` live on `tickers` (RFC-002). `metrics.currency` is resolved per ticker during backfill (`yfinance_client.load_currency_for_tickers`).
+One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **Not** cron-scheduled. SMA price fields, `raw_50` / `raw_200` ratios, and cross-sectional aggregate stats are backfilled from OHLCV (legacy watchlist-wide `market` today; target `market_metrics` grouped by `tickers.market`). `sector`, `industry`, and listing `market` live on `tickers` (RFC-002). `metrics.currency` is resolved per ticker during backfill (`yfinance_client.load_currency_for_tickers`).
 
 ## Requirements
 
@@ -81,6 +81,10 @@ pipenv run python backfill_sma.py
 - [x] Populates `metrics.currency` per ticker during backfill (PRD §6)
 - [x] Uses `yfinance_client.py` for batch download and currency resolution
 - [x] Populates `raw_50`, `raw_200` on backfilled metrics rows (RFC-012)
+
+### Pending (PRD §6)
+
+- [ ] Upsert `market_metrics` per (`trading_date`, listing `market`) after backfill (RFC-012 target layout)
 
 ## Open questions
 

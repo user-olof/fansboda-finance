@@ -5,7 +5,11 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from db.metrics import filter_stale_tickers, insert_metrics
+from db.metrics import (
+    filter_stale_tickers,
+    insert_metrics,
+    load_raw_ratios_by_market_for_date,
+)
 from db.tickers import load_tickers_from_db
 from fetch_sma import (
     aggregate_market_stats,
@@ -15,6 +19,7 @@ from fetch_sma import (
     metric_row_from_history,
     metric_rows_from_batch,
     trading_date_from_index,
+    upsert_market_for_trading_dates,
 )
 from models import MarketRow, MetricRow, TickerEntry
 
@@ -22,8 +27,8 @@ from models import MarketRow, MetricRow, TickerEntry
 def test_load_tickers_from_db() -> None:
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = [
-        ("AAA.ST", "Company A", "Industrials", "Machinery"),
-        ("BBB.ST", None, None, None),
+        ("AAA.ST", "Company A", "Industrials", "Machinery", "se_market"),
+        ("BBB.ST", None, None, None, None),
     ]
 
     mock_conn = MagicMock()
@@ -39,6 +44,7 @@ def test_load_tickers_from_db() -> None:
             company="Company A",
             sector="Industrials",
             industry="Machinery",
+            market="se_market",
         ),
         TickerEntry(symbol="BBB.ST", company=None),
     ]
@@ -79,11 +85,13 @@ def test_compute_raw_ratios_returns_none_when_price_missing_or_zero() -> None:
 def test_aggregate_market_stats_uses_population_std() -> None:
     row = aggregate_market_stats(
         date(2026, 6, 6),
+        "us_market",
         [Decimal("1"), Decimal("3")],
         [Decimal("0.5"), Decimal("0.7")],
     )
 
     assert row == MarketRow(
+        market="us_market",
         trading_date=date(2026, 6, 6),
         raw_mean_50=Decimal("2"),
         raw_mean_200=Decimal("0.6"),
@@ -93,7 +101,80 @@ def test_aggregate_market_stats_uses_population_std() -> None:
 
 
 def test_aggregate_market_stats_returns_none_when_empty() -> None:
-    assert aggregate_market_stats(date(2026, 6, 6), [], []) is None
+    assert aggregate_market_stats(date(2026, 6, 6), "us_market", [], []) is None
+
+
+def test_load_raw_ratios_by_market_for_date_groups_by_tickers_market() -> None:
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = [
+        ("us_market", Decimal("0.5"), Decimal("0.4")),
+        ("us_market", Decimal("0.7"), None),
+        ("se_market", Decimal("0.6"), Decimal("0.5")),
+        (None, Decimal("0.9"), Decimal("0.8")),
+    ]
+    mock_conn = MagicMock()
+    mock_conn.__enter__.return_value = mock_conn
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    with patch("db.metrics.psycopg2.connect", return_value=mock_conn):
+        grouped = load_raw_ratios_by_market_for_date(
+            "postgresql://example",
+            date(2026, 6, 6),
+        )
+
+    sql = mock_cursor.execute.call_args[0][0]
+    assert "JOIN tickers t ON t.symbol = m.ticker" in sql
+    assert grouped == {
+        "us_market": ([Decimal("0.5"), Decimal("0.7")], [Decimal("0.4")]),
+        "se_market": ([Decimal("0.6")], [Decimal("0.5")]),
+        None: ([Decimal("0.9")], [Decimal("0.8")]),
+    }
+
+
+def test_upsert_market_for_trading_dates_upserts_per_listing_market() -> None:
+    trading_date = date(2026, 6, 6)
+    with patch(
+        "fetch_sma.load_raw_ratios_by_market_for_date",
+        return_value={
+            "us_market": ([Decimal("1"), Decimal("3")], [Decimal("0.5"), Decimal("0.7")]),
+            "se_market": ([Decimal("0.6")], [Decimal("0.5")]),
+        },
+    ):
+        with patch("fetch_sma.upsert_market_stats") as mock_upsert:
+            upsert_market_for_trading_dates(
+                "postgresql://example",
+                {trading_date},
+            )
+
+    assert mock_upsert.call_count == 2
+    rows_by_market = {
+        call.args[1].market: call.args[1]
+        for call in mock_upsert.call_args_list
+    }
+    us_row = rows_by_market["us_market"]
+    se_row = rows_by_market["se_market"]
+    assert us_row.trading_date == trading_date
+    assert us_row.raw_mean_50 == Decimal("2")
+    assert se_row.market == "se_market"
+    assert se_row.raw_mean_50 == Decimal("0.6")
+
+
+def test_upsert_market_for_trading_dates_skips_null_market_bucket() -> None:
+    with patch(
+        "fetch_sma.load_raw_ratios_by_market_for_date",
+        return_value={
+            None: ([Decimal("0.9")], [Decimal("0.8")]),
+            "se_market": ([Decimal("0.6")], [Decimal("0.5")]),
+        },
+    ):
+        with patch("fetch_sma.upsert_market_stats") as mock_upsert:
+            upsert_market_for_trading_dates(
+                "postgresql://example",
+                {date(2026, 6, 6)},
+            )
+
+    mock_upsert.assert_called_once()
+    assert mock_upsert.call_args[0][1].market == "se_market"
 
 
 def test_compute_smas_on_fixed_series() -> None:

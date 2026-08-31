@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS tickers (
     company     TEXT,
     sector      TEXT,
     industry    TEXT,
+    market      TEXT,
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -28,11 +29,16 @@ CREATE TABLE IF NOT EXISTS metrics (
 -- Retention purge: DELETE FROM metrics WHERE trading_date < cutoff
 CREATE INDEX IF NOT EXISTS idx_metrics_trading_date ON metrics (trading_date);
 
-CREATE TABLE IF NOT EXISTS market (
-    trading_date    DATE            PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS market_metrics (
+    market          TEXT            NOT NULL,
+    trading_date    DATE            NOT NULL,
     updated_at      TIMESTAMPTZ     NOT NULL,
     raw_mean_50     NUMERIC(18, 6),
     raw_mean_200    NUMERIC(18, 6),
     raw_std_50      NUMERIC(18, 6),
-    raw_std_200     NUMERIC(18, 6)
+    raw_std_200     NUMERIC(18, 6),
+    PRIMARY KEY (market, trading_date)
 );
+
+-- Retention purge: DELETE FROM market_metrics WHERE trading_date < cutoff
+CREATE INDEX IF NOT EXISTS idx_market_metrics_trading_date ON market_metrics (trading_date);

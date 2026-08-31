@@ -146,6 +146,7 @@ def test_dev_backfill_workflow_writes_dev_env_and_runs_pipeline() -> None:
     assert "APP_ENV=dev" in content
     assert "seed_tickers.py" in content
     assert "backfill_sma.py" in content
+    assert "apply_migrations.sh" in content
     assert "GCP_INSTANCE_NAME" not in content
 
 

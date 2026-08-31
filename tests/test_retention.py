@@ -1,6 +1,7 @@
 """Tests for RFC-004 rolling data retention."""
 
-from datetime import date
+import logging
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
@@ -8,7 +9,7 @@ from config import BaseConfig
 from db.market import DELETE_STALE_MARKET_SQL, purge_stale_market
 from db.metrics import DELETE_STALE_SQL, purge_stale_metrics, retention_cutoff
 from db.retention import purge_stale_data
-from fetch_sma import main
+from fetch_sma import _run_retention_purge, main
 from models import MetricRow, TickerEntry
 
 
@@ -27,6 +28,14 @@ def test_retention_cutoff_subtracts_days_from_utc_today() -> None:
     assert retention_cutoff(30, today=date(2026, 3, 31)) == date(2026, 3, 1)
 
 
+def test_retention_cutoff_defaults_to_utc_today() -> None:
+    with patch("db.metrics.datetime") as mock_datetime:
+        mock_datetime.now.return_value = datetime(
+            2026, 6, 6, 15, 30, tzinfo=timezone.utc
+        )
+        assert retention_cutoff(365) == date(2025, 6, 6)
+
+
 def test_delete_stale_sql_is_parameterized() -> None:
     assert "%s" in DELETE_STALE_SQL
     assert "trading_date <" in DELETE_STALE_SQL
@@ -36,7 +45,7 @@ def test_delete_stale_sql_is_parameterized() -> None:
 def test_delete_stale_market_sql_is_parameterized() -> None:
     assert "%s" in DELETE_STALE_MARKET_SQL
     assert "trading_date <" in DELETE_STALE_MARKET_SQL
-    assert "DELETE FROM market" in DELETE_STALE_MARKET_SQL
+    assert "DELETE FROM market_metrics" in DELETE_STALE_MARKET_SQL
 
 
 def test_purge_stale_metrics_executes_delete_with_cutoff() -> None:
@@ -88,21 +97,37 @@ def test_purge_stale_metrics_returns_zero_when_nothing_deleted() -> None:
     assert deleted == 0
 
 
-def test_purge_stale_data_purges_metrics_and_market() -> None:
+def test_purge_stale_data_purges_metrics_and_market_metrics() -> None:
     with patch("db.retention.purge_stale_metrics", return_value=4) as mock_metrics:
-        with patch("db.retention.purge_stale_market", return_value=1) as mock_market:
-            metrics_purged, market_purged = purge_stale_data(
+        with patch(
+            "db.retention.purge_stale_market", return_value=1
+        ) as mock_market_metrics:
+            metrics_purged, market_metrics_purged = purge_stale_data(
                 "postgresql://example",
                 365,
             )
 
     mock_metrics.assert_called_once_with("postgresql://example", 365)
-    mock_market.assert_called_once_with("postgresql://example", 365)
+    mock_market_metrics.assert_called_once_with("postgresql://example", 365)
     assert metrics_purged == 4
-    assert market_purged == 1
+    assert market_metrics_purged == 1
 
 
-def test_main_purges_when_all_tickers_already_fresh() -> None:
+def test_run_retention_purge_delegates_to_purge_stale_data(caplog) -> None:
+    with patch("fetch_sma.purge_stale_data", return_value=(3, 2)) as mock_purge:
+        with caplog.at_level(logging.INFO, logger="fetch_sma"):
+            metrics_purged, market_metrics_purged = _run_retention_purge(
+                "postgresql://example",
+                365,
+            )
+
+    mock_purge.assert_called_once_with("postgresql://example", 365)
+    assert metrics_purged == 3
+    assert market_metrics_purged == 2
+    assert "deleted 3 metrics and 2 market_metrics row(s)" in caplog.text
+
+
+def test_main_purges_when_all_tickers_already_fresh(caplog) -> None:
     with patch("fetch_sma.get_config", return_value=_mock_config()):
         with patch(
             "fetch_sma.load_tickers_from_db",
@@ -115,9 +140,11 @@ def test_main_purges_when_all_tickers_already_fresh() -> None:
                 with patch(
                     "fetch_sma.purge_stale_data", return_value=(3, 1)
                 ) as mock_purge:
-                    assert main() == 0
+                    with caplog.at_level(logging.INFO, logger="fetch_sma"):
+                        assert main() == 0
 
     mock_purge.assert_called_once_with("postgresql://example", 365)
+    assert "purged_market_metrics=1" in caplog.text
 
 
 def test_main_purges_after_fetch_even_when_no_metrics_collected() -> None:
@@ -181,11 +208,13 @@ def test_main_fetches_stale_tickers_and_inserts() -> None:
                                 "fetch_sma.insert_metrics", return_value=1
                             ) as mock_insert:
                                 with patch(
-                                    "fetch_sma.load_raw_ratios_for_date",
-                                    return_value=(
-                                        [Decimal("0.333333")],
-                                        [Decimal("0.666667")],
-                                    ),
+                                    "fetch_sma.load_raw_ratios_by_market_for_date",
+                                    return_value={
+                                        "se_market": (
+                                            [Decimal("0.333333")],
+                                            [Decimal("0.666667")],
+                                        )
+                                    },
                                 ):
                                     with patch(
                                         "fetch_sma.upsert_market_stats"
@@ -201,6 +230,9 @@ def test_main_fetches_stale_tickers_and_inserts() -> None:
     mock_rows.assert_called_once()
     mock_insert.assert_called_once()
     mock_market.assert_called_once()
+    market_row = mock_market.call_args[0][1]
+    assert market_row.market == "se_market"
+    assert market_row.trading_date == date(2026, 6, 6)
     inserted_rows = mock_insert.call_args[0][1]
     assert inserted_rows[0].company == "Alpha"
     assert inserted_rows[0].currency == "SEK"

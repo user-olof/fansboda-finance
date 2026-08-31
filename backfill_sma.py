@@ -261,16 +261,17 @@ def main() -> int:
         try:
             upsert_market_for_trading_dates(database_url, trading_dates)
         except Exception:
-            logger.exception("Failed to upsert market stats")
+            logger.exception("Failed to upsert market_metrics stats")
             return 1
 
     logger.info(
         "Backfill summary: tickers=%d generated=%d inserted=%d "
-        "skipped_existing=%d failed_batches=%d",
+        "skipped_existing=%d market_trading_dates=%d failed_batches=%d",
         len(all_tickers),
         total_generated,
         total_inserted,
         total_skipped_existing,
+        len(trading_dates),
         failed_batches,
     )
 

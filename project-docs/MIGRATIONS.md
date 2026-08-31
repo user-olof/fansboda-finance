@@ -26,9 +26,12 @@ Apply only the migrations you have not yet run, **in order**. Each file is idemp
 | 6 | `migrate_add_tickers_updated_at.sql` | Add `tickers.updated_at` if missing |
 | 7 | `migrate_move_metadata_to_tickers.sql` | Add `tickers.sector`, `tickers.industry`, `metrics.currency`; drop misplaced `metrics.sector` / `metrics.industry` if present |
 | 8 | `migrate_rename_name_to_company.sql` | Rename `name` → `company` on `tickers` and `metrics` (PRD §6) |
-| 9 | `migrate_add_raw_ratios_and_market.sql` | Add `metrics.raw_50`, `metrics.raw_200`, `market` table |
+| 9 | `migrate_add_raw_ratios_and_market.sql` | Add `metrics.raw_50`, `metrics.raw_200`, legacy `market` table (watchlist-wide: PK on `trading_date` only) |
+| 10 | `migrate_tickers_market_and_market_metrics.sql` | Add `tickers.market`; rename `market` → `market_metrics`, add `market` column, PK on `(market, trading_date)` (PRD §6) |
 
 See [RFC-001](./rfc/RFC-001-data-model.md) and [RFC-012](./rfc/RFC-012-normalized-ratios-market.md).
+
+**Note:** Step 10 supersedes the watchlist-wide layout from step 9. Existing databases keep one aggregate row per `trading_date` until step 10 runs; recompute grouped rows with `backfill_market.py` or the next weekly run after migration.
 
 ### Path by starting state
 
@@ -47,6 +50,10 @@ See [RFC-001](./rfc/RFC-001-data-model.md) and [RFC-012](./rfc/RFC-012-normalize
 **After history migration, before backfill:**
 
 Run `migrate_metrics_history.sql`, then `pipenv run python backfill_sma.py`.
+
+**After step 9 (legacy `market` table), before per-market aggregates:**
+
+Run step 10 (`migrate_tickers_market_and_market_metrics.sql`), refresh `tickers.market` (`refresh_tickers.py`), then `pipenv run python backfill_market.py` to recompute grouped rows.
 
 ## Verify schema
 

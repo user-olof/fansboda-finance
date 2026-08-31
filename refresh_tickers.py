@@ -77,7 +77,9 @@ def refresh_tickers(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Refresh tickers metadata (company, sector, industry)",
+        description=(
+            "Refresh tickers metadata (company, sector, industry, listing market)"
+        ),
     )
     parser.add_argument(
         "tickers_file",

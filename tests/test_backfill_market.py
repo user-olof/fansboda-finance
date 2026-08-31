@@ -35,8 +35,11 @@ def test_load_distinct_trading_dates_returns_sorted_dates() -> None:
 
 def test_upsert_market_for_trading_dates_loads_ratios_and_upserts() -> None:
     with patch(
-        "fetch_sma.load_raw_ratios_for_date",
-        return_value=([Decimal("0.5")], [Decimal("0.4")]),
+        "fetch_sma.load_raw_ratios_by_market_for_date",
+        side_effect=[
+            {"us_market": ([Decimal("0.5")], [Decimal("0.4")])},
+            {"se_market": ([Decimal("0.6")], [Decimal("0.5")])},
+        ],
     ) as mock_load:
         with patch("fetch_sma.upsert_market_stats") as mock_upsert:
             upsert_market_for_trading_dates(
@@ -64,6 +67,19 @@ def test_main_backfill_market_upserts_all_dates() -> None:
         "postgresql://example",
         {date(2025, 1, 3), date(2025, 1, 10)},
     )
+
+
+def test_main_backfill_market_returns_failure_on_upsert_error() -> None:
+    with patch("backfill_market.get_config", return_value=_mock_config()):
+        with patch(
+            "backfill_market.load_distinct_trading_dates",
+            return_value=[date(2025, 1, 3)],
+        ):
+            with patch(
+                "backfill_market.upsert_market_for_trading_dates",
+                side_effect=RuntimeError("db error"),
+            ):
+                assert main() == 1
 
 
 def test_main_backfill_market_returns_failure_when_no_dates() -> None:

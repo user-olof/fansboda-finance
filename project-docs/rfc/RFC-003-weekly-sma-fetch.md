@@ -10,7 +10,7 @@
 
 ## Summary
 
-Core weekly job (`fetch_sma.py`): load watchlist, skip tickers that already have a row at their latest `trading_date`, batch-download ~300 days OHLCV from yfinance, compute SMA-50/200, copy `company` from `tickers`, capture `currency` from yfinance, compute `raw_50`/`raw_200`, append metrics rows, upsert cross-sectional `market` stats, purge stale history. Runs **Thursdays 11:00 UTC** via cron (RFC-008).
+Core weekly job (`fetch_sma.py`): load watchlist, skip tickers that already have a row at their latest `trading_date`, batch-download ~300 days OHLCV from yfinance, compute SMA-50/200, copy `company` from `tickers`, capture `currency` from yfinance, compute `raw_50`/`raw_200`, append metrics rows, upsert cross-sectional aggregate stats (legacy watchlist-wide `market` today; target `market_metrics` grouped by `tickers.market`), purge stale history. Runs **Thursdays 11:00 UTC** via cron (RFC-008).
 
 ## Requirements
 
@@ -22,7 +22,7 @@ Core weekly job (`fetch_sma.py`): load watchlist, skip tickers that already have
 | FR-4 | Retry 429, rate, timeout, connection, empty frames with exponential backoff |
 | FR-5 | Compute SMA-50/200; skip if &lt;200 closes; set `current_price`, `trading_date`, `currency`; copy `company` from `tickers` |
 | FR-5a | Set `raw_50 = sma_50 / current_price`, `raw_200 = sma_200 / current_price` |
-| FR-5b | Upsert `market` row per processed `trading_date` (mean/std of `raw_50` / `raw_200` from all metrics on that date) |
+| FR-5b | Upsert aggregate row per (`trading_date`, listing `market`) into `market_metrics` — mean/std of `raw_50` / `raw_200` from metrics whose tickers share that `tickers.market` on that date |
 | FR-6 | Append with `ON CONFLICT (ticker, trading_date) DO NOTHING` |
 | FR-7 | Retention purge after run (RFC-004) |
 | FR-8 | Log batch progress, per-ticker results, summary; non-zero exit on fatal errors |
@@ -49,11 +49,11 @@ Core weekly job (`fetch_sma.py`): load watchlist, skip tickers that already have
 |----------|---------|
 | `compute_smas(close)` | SMA-50 and SMA-200 from close series |
 | `compute_raw_ratios(...)` | `sma / current_price` with divide-by-zero guards |
-| `aggregate_market_stats(...)` | Population mean/std for `market` table |
+| `aggregate_market_stats(...)` | Population mean/std for aggregate table (watchlist-wide today; per listing `market` pending) |
 | `metric_row_from_history(...)` | Single-ticker metric from OHLCV frame |
 | `metric_rows_from_batch(...)` | Parse MultiIndex download into `MetricRow` list |
-| `upsert_market_for_trading_dates(...)` | Load ratios from DB and upsert `market` |
-| `_run_retention_purge(...)` | Purge stale `metrics` and `market` rows |
+| `upsert_market_for_trading_dates(...)` | Load ratios from DB and upsert legacy `market` (target: `market_metrics` by `tickers.market`) |
+| `_run_retention_purge(...)` | Purge stale `metrics` and aggregate rows |
 | `main()` | Full weekly pipeline |
 
 yfinance I/O lives in `yfinance_client.py` (`download_batch`, `load_currency_for_tickers`).
@@ -65,8 +65,8 @@ yfinance I/O lives in `yfinance_client.py` (`download_batch`, `load_currency_for
 3. `stale, skipped, max_date = filter_stale_tickers(...)`
 4. If all fresh: retention purge only, exit 0
 5. For each batch: `load_currency_for_tickers` → `download_batch` → `metric_rows_from_batch` → `insert_metrics`
-6. `upsert_market_for_trading_dates` — reload all ratios for each session date from `metrics`, upsert `market`
-7. `_run_retention_purge` — `purge_stale_metrics` + `purge_stale_market`
+6. `upsert_market_for_trading_dates` — reload ratios for each session date from `metrics`, upsert legacy watchlist-wide `market` (target: group by `tickers.market` → `market_metrics`)
+7. `_run_retention_purge` — `purge_stale_metrics` + `purge_stale_market` (→ `market_metrics` after step 10)
 8. Log summary; exit 1 if no metrics collected or fatal DB error
 
 ### Cron (production)
@@ -82,14 +82,19 @@ Installed by `scripts/bootstrap-vm.sh` — see RFC-008.
 - [x] Copies `company` from `tickers` into each metrics row (PRD §6)
 - [x] Populates `currency` on each metrics row (PRD §6)
 - [x] Computes and stores `raw_50`, `raw_200` on each metrics row
-- [x] Upserts `market` stats per processed `trading_date`
+- [x] Upserts legacy watchlist-wide `market` stats per processed `trading_date`
 - [x] Appends with `ON CONFLICT (ticker, trading_date) DO NOTHING`
 - [x] SQL in `db/` modules, not in job script
-- [x] Retention purge on every run (RFC-004), including `market`
+- [x] Retention purge on every run (RFC-004), including legacy `market`
 - [x] Uses `get_config()` (RFC-006)
 - [x] Logs batch progress and summary
 - [x] Unit tests with mocked DB and yfinance
 - [x] yfinance batch/metadata I/O in `yfinance_client.py`
+
+### Pending (PRD §6)
+
+- [ ] Upsert `market_metrics` grouped by `tickers.market` (FR-5b target layout)
+- [ ] Retention and `db/market.py` use `market_metrics` table name after step 10 migration
 
 ## Open questions
 
