@@ -35,9 +35,6 @@ jobs:
 
       - name: Enable OS Login for SSH
         run: |
-          gcloud compute instances create-access-config "$GCP_INSTANCE_NAME" \
-            --zone="$GCP_ZONE" \
-            --project="$GCP_PROJECT_ID" || true
           gcloud compute os-login ssh-keys add \
             --key-file=/dev/stdin \
             --ttl=3600 <<< "$(cat ~/.ssh/id_rsa.pub 2>/dev/null || echo '')"
@@ -53,6 +50,7 @@ jobs:
             "$GCP_INSTANCE_NAME:/tmp/fansboda-finance.tgz" \
             --zone="$GCP_ZONE" \
             --project="$GCP_PROJECT_ID"
+            --tunnel-through-iap \
           gcloud compute ssh "$GCP_INSTANCE_NAME" \
             --zone="$GCP_ZONE" \
             --project="$GCP_PROJECT_ID" \
