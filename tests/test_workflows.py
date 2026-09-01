@@ -94,6 +94,16 @@ def test_deploy_workflow_copies_code_from_runner() -> None:
     assert "pipenv install --deploy" in content
 
 
+def test_deploy_workflow_uses_iap_tunnel_for_ssh_and_scp() -> None:
+    """RFC-009: production deploy SSH/SCP must use IAP, not public IP."""
+    content = DEPLOY_YML.read_text(encoding="utf-8")
+    remote_commands = content.count("gcloud compute ssh") + content.count(
+        "gcloud compute scp"
+    )
+    assert remote_commands == content.count("--tunnel-through-iap")
+    assert remote_commands == 4
+
+
 def test_dev_backfill_workflow_runs_on_dev_push_only() -> None:
     content = DEV_BACKFILL_YML.read_text(encoding="utf-8")
     assert "branches: [dev]" in content
