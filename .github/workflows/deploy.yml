@@ -33,19 +33,23 @@ jobs:
         with:
           install_components: 'gke-gcloud-auth-plugin'
 
-      - name: Copy code to VM and install dependencies
+      - name: Packaging the code
         run: |
-          tar czf /tmp/fansboda-finance.tgz \
+            tar czf /tmp/fansboda-finance.tgz \
             --exclude='./.git' \
             --exclude='./.venv' \
             --exclude='./.pytest_cache' \
-            -C "$GITHUB_WORKSPACE" . \
+            -C "$GITHUB_WORKSPACE" . 
+
+
+      - name: Copy package to VM and install dependencies
+        run: |
           gcloud compute scp /tmp/fansboda-finance.tgz \
             "$GCP_INSTANCE_NAME:/tmp/fansboda-finance.tgz" \
             --zone="$GCP_ZONE" \
             --project="$GCP_PROJECT_ID" \
             --tunnel-through-iap \
-            --quiet \
+            --quiet 
           gcloud compute ssh "$GCP_INSTANCE_NAME" \
             --zone="$GCP_ZONE" \
             --project="$GCP_PROJECT_ID" \
