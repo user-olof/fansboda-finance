@@ -35,8 +35,11 @@ jobs:
 
       - name: Enable OS Login for SSH
         run: |
-          gcloud compute instances os-login enable-project \
-            --project=$GCP_PROJECT_ID
+          gcloud compute os-config patch-instances \
+            --zone="$GCP_ZONE" \
+            --project="$GCP_PROJECT_ID" \
+            --instance="$GCP_INSTANCE_NAME" \
+            --os-login-state=ENABLE
 
       - name: Copy code to VM and install dependencies
         run: |
