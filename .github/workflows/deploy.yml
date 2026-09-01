@@ -33,28 +33,24 @@ jobs:
         with:
           install_components: 'gke-gcloud-auth-plugin'
 
-      - name: Enable OS Login for SSH
-        run: |
-          gcloud compute os-login ssh-keys add \
-            --key-file=/dev/stdin \
-            --ttl=3600 <<< "$(cat ~/.ssh/id_rsa.pub 2>/dev/null || echo '')"
-
       - name: Copy code to VM and install dependencies
         run: |
           tar czf /tmp/fansboda-finance.tgz \
             --exclude='./.git' \
             --exclude='./.venv' \
             --exclude='./.pytest_cache' \
-            -C "$GITHUB_WORKSPACE" .
+            -C "$GITHUB_WORKSPACE" . \
           gcloud compute scp /tmp/fansboda-finance.tgz \
             "$GCP_INSTANCE_NAME:/tmp/fansboda-finance.tgz" \
             --zone="$GCP_ZONE" \
-            --project="$GCP_PROJECT_ID"
+            --project="$GCP_PROJECT_ID" \
             --tunnel-through-iap \
+            --quiet \
           gcloud compute ssh "$GCP_INSTANCE_NAME" \
             --zone="$GCP_ZONE" \
             --project="$GCP_PROJECT_ID" \
             --tunnel-through-iap \
+            --quiet \
             --command="sudo mkdir -p /opt/fansboda-finance && sudo tar xzf /tmp/fansboda-finance.tgz -C /opt/fansboda-finance && sudo rm -f /tmp/fansboda-finance.tgz && sudo chown -R fansboda:fansboda /opt/fansboda-finance && sudo -u fansboda bash -c 'cd /opt/fansboda-finance && PIPENV_VENV_IN_PROJECT=1 pipenv install --deploy'"
           rm -f /tmp/fansboda-finance.tgz
 
@@ -69,9 +65,13 @@ jobs:
           printf 'DATABASE_URL=%s\nAPP_ENV=production\n' "$DATABASE_URL_PROD" > .env.tmp
           gcloud compute scp .env.tmp "$GCP_INSTANCE_NAME:/tmp/.env.tmp" \
             --zone="$GCP_ZONE" \
-            --project="$GCP_PROJECT_ID"
+            --project="$GCP_PROJECT_ID" \
+            --tunnel-through-iap \
+            --quiet
           rm -f .env.tmp
           gcloud compute ssh "$GCP_INSTANCE_NAME" \
             --zone="$GCP_ZONE" \
             --project="$GCP_PROJECT_ID" \
+            --tunnel-through-iap \
+            --quiet \
             --command="sudo install -o fansboda -g fansboda -m 600 /tmp/.env.tmp /opt/fansboda-finance/.env && rm -f /tmp/.env.tmp"
