@@ -70,9 +70,14 @@ def test_deploy_workflow_requests_oidc_token() -> None:
     assert "id-token: write" in content
 
 
-def test_deploy_workflow_writes_production_env() -> None:
+def test_deploy_workflow_writes_env_for_vm() -> None:
+    """Deploy writes .env owned by fansboda.
+
+    Temporary: APP_ENV=dev while validating the VM. Before prod cutover, switch
+    deploy.yml to APP_ENV=production and update this assertion.
+    """
     content = DEPLOY_YML.read_text(encoding="utf-8")
-    assert "APP_ENV=production" in content
+    assert "APP_ENV=dev" in content
     assert "install -o fansboda -g fansboda -m 600" in content
 
 

@@ -60,10 +60,9 @@ jobs:
 
       - name: Write .env on VM
         env:
+          # Temporary: DEV while validating the VM. Switch to production cutover:
+          # DATABASE_URL_PROD + APP_ENV=production
           DATABASE_URL_DEV: ${{ secrets.DATABASE_URL }}
-          GCP_INSTANCE_NAME: ${{ secrets.GCP_INSTANCE_NAME }}
-          GCP_ZONE: ${{ secrets.GCP_ZONE }}
-          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
         run: |
           set +x
           printf 'DATABASE_URL=%s\nAPP_ENV=dev\n' "$DATABASE_URL_DEV" > .env.tmp

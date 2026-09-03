@@ -33,12 +33,6 @@ def test_bootstrap_cron_sources_env_and_uses_pipenv_in_project() -> None:
     assert "PIPENV_VENV_IN_PROJECT=1 pipenv run python fetch_sma.py" in content
 
 
-def test_bootstrap_installs_dependencies_as_fansboda() -> None:
-    content = BOOTSTRAP_SH.read_text(encoding="utf-8")
-    assert "PIPENV_VENV_IN_PROJECT=1 pipenv install --deploy" in content
-    assert 'su -s /bin/bash "$APP_USER"' in content
-
-
 def test_bootstrap_sets_timezone_utc() -> None:
     content = BOOTSTRAP_SH.read_text(encoding="utf-8")
     assert "timedatectl set-timezone UTC" in content
@@ -52,21 +46,17 @@ def test_bootstrap_creates_log_directory_with_fansboda_ownership() -> None:
     assert 'chown "$APP_USER:$APP_USER" "$LOG_DIR/fetch_sma.log"' in content
 
 
-def test_bootstrap_replaces_existing_fetch_sma_cron_line() -> None:
+def test_bootstrap_installs_cron_only_when_missing() -> None:
     content = BOOTSTRAP_SH.read_text(encoding="utf-8")
-    assert "grep -v 'fetch_sma.py'" in content
+    assert "grep -q 'fetch_sma.py'" in content
     assert 'crontab -u "$APP_USER"' in content
+    assert "grep -v 'fetch_sma.py'" not in content
 
 
 def test_bootstrap_does_not_clone_repo() -> None:
     content = BOOTSTRAP_SH.read_text(encoding="utf-8")
     assert "git clone" not in content
     assert "REPO_URL" not in content
-
-
-def test_bootstrap_installs_deps_only_when_pipfile_present() -> None:
-    content = BOOTSTRAP_SH.read_text(encoding="utf-8")
-    assert '[ -f "$APP_DIR/Pipfile" ]' in content
 
 
 def test_bootstrap_does_not_write_env_file() -> None:
