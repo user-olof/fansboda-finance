@@ -90,11 +90,13 @@ Run once as root/sudo on a fresh Debian/Ubuntu instance:
 
 1. Install `git`, `python3`, `pipenv`
 2. Create system user `fansboda` if missing (`/opt/fansboda-finance` home)
-3. Clone repo to `/opt/fansboda-finance` (override `REPO_URL` if needed)
-4. `PIPENV_VENV_IN_PROJECT=1 pipenv install --deploy` as `fansboda`
+3. Create `/opt/fansboda-finance` owned by `fansboda`
+4. If `Pipfile` is already present (e.g. after deploy), run `PIPENV_VENV_IN_PROJECT=1 pipenv install --deploy` as `fansboda`
 5. Set timezone UTC (`timedatectl`)
 6. Create `/var/log/fansboda-finance/` and `fetch_sma.log` with `fansboda` ownership
 7. Install Thursday cron for `fansboda` (replaces any prior `fetch_sma.py` line)
+
+Application code is **not** cloned here — the deploy workflow copies a tarball to `/opt/fansboda-finance` and runs `pipenv install --deploy`.
 
 Bootstrap does **not** write `.env` — that comes from the deploy workflow or manual setup.
 

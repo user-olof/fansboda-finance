@@ -44,7 +44,7 @@ Dependencies: **Pipenv only** (`Pipfile` / `Pipfile.lock`). No `requirements.txt
 
 | Utility | Role |
 |---------|------|
-| `scripts/bootstrap-vm.sh` | Production VM: pipenv, clone to `/opt/fansboda-finance`, cron as `fansboda` |
+| `scripts/bootstrap-vm.sh` | Production VM: pipenv, app dir, cron as `fansboda` (code via deploy tarball) |
 | `scripts/bootstrap-dev-vm.sh` | Ephemeral dev VM for CI backfill |
 | `scripts/verify_schema.sql` | Post-DDL sanity checks |
 | `scripts/verify_dev_backfill.py` | Parse backfill log + DB checks (dev CI) |

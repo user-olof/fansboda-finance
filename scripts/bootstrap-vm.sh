@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # One-time bootstrap for the GCP e2-micro production VM (RFC-008).
 # Run as root or with sudo on a fresh Debian 12 instance.
+# Application code and locked deps are deployed by deploy.yml (tarball + pipenv).
 
 set -euo pipefail
 
@@ -13,7 +14,6 @@ APP_DIR="/opt/fansboda-finance"
 APP_USER="fansboda"
 LOG_DIR="/var/log/fansboda-finance"
 CRON_SCHEDULE="0 11 * * 4"  # Thursdays 11:00 UTC (PRD §10)
-REPO_URL="${REPO_URL:-https://github.com/user-olof/fansboda-finance.git}"
 
 apt-get update
 apt-get install -y python3 python3-pip python3-venv git pipenv
@@ -23,13 +23,11 @@ if ! id "$APP_USER" &>/dev/null; then
 fi
 
 mkdir -p "$APP_DIR"
-if [ ! -d "$APP_DIR/.git" ]; then
-  git clone "$REPO_URL" "$APP_DIR"
-fi
-
 chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 
-su -s /bin/bash "$APP_USER" -c "cd '$APP_DIR' && PIPENV_VENV_IN_PROJECT=1 pipenv install --deploy"
+if [ -f "$APP_DIR/Pipfile" ]; then
+  su -s /bin/bash "$APP_USER" -c "cd '$APP_DIR' && PIPENV_VENV_IN_PROJECT=1 pipenv install --deploy"
+fi
 
 timedatectl set-timezone UTC
 
