@@ -58,6 +58,17 @@ def test_bootstrap_replaces_existing_fetch_sma_cron_line() -> None:
     assert 'crontab -u "$APP_USER"' in content
 
 
+def test_bootstrap_does_not_clone_repo() -> None:
+    content = BOOTSTRAP_SH.read_text(encoding="utf-8")
+    assert "git clone" not in content
+    assert "REPO_URL" not in content
+
+
+def test_bootstrap_installs_deps_only_when_pipfile_present() -> None:
+    content = BOOTSTRAP_SH.read_text(encoding="utf-8")
+    assert '[ -f "$APP_DIR/Pipfile" ]' in content
+
+
 def test_bootstrap_does_not_write_env_file() -> None:
     content = BOOTSTRAP_SH.read_text(encoding="utf-8")
     assert "printf" not in content
