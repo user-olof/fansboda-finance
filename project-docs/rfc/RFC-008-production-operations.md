@@ -88,15 +88,13 @@ Production deploy is **not** part of this RFC's implementation, but operations d
 
 Run once as root/sudo on a fresh Debian/Ubuntu instance:
 
-1. Install `git`, `python3`, `pipenv`
-2. Create system user `fansboda` if missing (`/opt/fansboda-finance` home)
-3. Create `/opt/fansboda-finance` owned by `fansboda`
-4. If `Pipfile` is already present (e.g. after deploy), run `PIPENV_VENV_IN_PROJECT=1 pipenv install --deploy` as `fansboda`
-5. Set timezone UTC (`timedatectl`)
-6. Create `/var/log/fansboda-finance/` and `fetch_sma.log` with `fansboda` ownership
-7. Install Thursday cron for `fansboda` (replaces any prior `fetch_sma.py` line)
+1. Create system user `fansboda` if missing (`/opt/fansboda-finance` home)
+2. Create `/opt/fansboda-finance` owned by `fansboda`
+3. Set timezone UTC (`timedatectl`)
+4. Create `/var/log/fansboda-finance/` and `fetch_sma.log` with `fansboda` ownership
+5. Install Thursday cron for `fansboda` only if no `fetch_sma.py` line is already present
 
-Application code is **not** cloned here — the deploy workflow copies a tarball to `/opt/fansboda-finance` and runs `pipenv install --deploy`.
+Application code and Python deps are **not** installed here — the deploy workflow copies a tarball to `/opt/fansboda-finance` and runs `pipenv install --deploy`. OS packages (`python3`, `pipenv`, etc.) must already be available on the VM.
 
 Bootstrap does **not** write `.env` — that comes from the deploy workflow or manual setup.
 

@@ -15,8 +15,6 @@ APP_USER="fansboda"
 LOG_DIR="/var/log/fansboda-finance"
 CRON_SCHEDULE="0 11 * * 4"  # Thursdays 11:00 UTC (PRD §10)
 
-apt-get update
-apt-get install -y python3 python3-pip python3-venv git pipenv
 
 if ! id "$APP_USER" &>/dev/null; then
   useradd --system --home-dir "$APP_DIR" --create-home --shell /usr/sbin/nologin "$APP_USER"
@@ -25,10 +23,6 @@ fi
 mkdir -p "$APP_DIR"
 chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 
-if [ -f "$APP_DIR/Pipfile" ]; then
-  su -s /bin/bash "$APP_USER" -c "cd '$APP_DIR' && PIPENV_VENV_IN_PROJECT=1 pipenv install --deploy"
-fi
-
 timedatectl set-timezone UTC
 
 mkdir -p "$LOG_DIR"
@@ -36,8 +30,10 @@ chown "$APP_USER:$APP_USER" "$LOG_DIR"
 touch "$LOG_DIR/fetch_sma.log"
 chown "$APP_USER:$APP_USER" "$LOG_DIR/fetch_sma.log"
 
-CRON_LINE="${CRON_SCHEDULE} cd ${APP_DIR} && set -a && [ -f .env ] && . ./.env && set +a && PIPENV_VENV_IN_PROJECT=1 pipenv run python fetch_sma.py >> ${LOG_DIR}/fetch_sma.log 2>&1"
-(crontab -u "$APP_USER" -l 2>/dev/null | grep -v 'fetch_sma.py' || true; echo "$CRON_LINE") | crontab -u "$APP_USER" -
+if ! crontab -u "$APP_USER" -l 2>/dev/null | grep -q 'fetch_sma.py'; then
+  CRON_LINE="${CRON_SCHEDULE} cd ${APP_DIR} && set -a && [ -f .env ] && . ./.env && set +a && PIPENV_VENV_IN_PROJECT=1 pipenv run python fetch_sma.py >> ${LOG_DIR}/fetch_sma.log 2>&1"
+  (crontab -u "$APP_USER" -l 2>/dev/null || true; echo "$CRON_LINE") | crontab -u "$APP_USER" -
+fi
 
 echo "Bootstrap complete."
 echo "Add DATABASE_URL via GitHub deploy (push to main) or manually:"
