@@ -11,7 +11,10 @@ from config import (
     DEFAULT_YF_BATCH_SIZE,
     DevConfig,
     ProdConfig,
+    get_app_env,
     get_config,
+    is_production_env,
+    require_non_production,
 )
 
 
@@ -102,3 +105,23 @@ def test_tickers_file_override(monkeypatch: pytest.MonkeyPatch) -> None:
         config = DevConfig.load()
 
     assert config.tickers_file == Path("/tmp/custom.txt")
+
+
+def test_get_app_env_defaults_to_dev(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("APP_ENV", raising=False)
+    assert get_app_env() == "dev"
+
+
+def test_is_production_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    assert is_production_env() is True
+    assert is_production_env("dev") is False
+
+
+def test_require_non_production(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_ENV", "dev")
+    require_non_production()
+
+    monkeypatch.setenv("APP_ENV", "production")
+    with pytest.raises(ValueError, match="development only"):
+        require_non_production()

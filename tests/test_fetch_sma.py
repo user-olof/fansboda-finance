@@ -59,7 +59,7 @@ def test_load_tickers_from_db_raises_when_empty() -> None:
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
     with patch("db.tickers.psycopg2.connect", return_value=mock_conn):
-        with pytest.raises(ValueError, match="No tickers found in tickers table"):
+        with pytest.raises(ValueError, match="No tickers found in us_tickers or swe_tickers"):
             load_tickers_from_db("postgresql://example")
 
 
@@ -123,7 +123,9 @@ def test_load_raw_ratios_by_market_for_date_groups_by_tickers_market() -> None:
         )
 
     sql = mock_cursor.execute.call_args[0][0]
-    assert "JOIN tickers t ON t.symbol = m.ticker" in sql
+    assert "JOIN us_tickers t ON t.symbol = m.ticker" in sql
+    assert "JOIN swe_tickers t ON t.symbol = m.ticker" in sql
+    assert mock_cursor.execute.call_args[0][1] == (date(2026, 6, 6), date(2026, 6, 6))
     assert grouped == {
         "us_market": ([Decimal("0.5"), Decimal("0.7")], [Decimal("0.4")]),
         "se_market": ([Decimal("0.6")], [Decimal("0.5")]),
@@ -276,7 +278,7 @@ def test_metric_rows_from_batch_parses_multiindex() -> None:
     assert by_ticker["BBB.ST"].currency == "USD"
 
 
-def test_filter_stale_tickers_skips_fresh() -> None:
+def test_filter_stale_tickers_skips_fresh_within_country() -> None:
     mock_cursor = MagicMock()
     mock_cursor.fetchone.side_effect = [(date(2026, 6, 6),)]
     mock_cursor.fetchall.return_value = [("AAA.ST",), ("BBB.ST",)]
@@ -294,13 +296,17 @@ def test_filter_stale_tickers_skips_fresh() -> None:
     assert stale == ["CCC.ST"]
     assert skipped == 2
     assert max_date == date(2026, 6, 6)
+    assert mock_cursor.execute.call_count == 2
+    max_sql = mock_cursor.execute.call_args_list[0][0][0]
     fresh_sql = mock_cursor.execute.call_args_list[1][0][0]
+    assert "FROM swe_metrics" in max_sql
     assert "MAX(trading_date) AS latest_trading_date" in fresh_sql
+    assert "FROM swe_metrics" in fresh_sql
     assert "GROUP BY ticker" in fresh_sql
 
 
-def test_filter_stale_tickers_marks_ticker_stale_when_behind_global_latest() -> None:
-    """Ticker whose own latest row is older than global max needs fetch (FR-2)."""
+def test_filter_stale_tickers_marks_ticker_stale_when_behind_country_latest() -> None:
+    """Ticker whose own latest row is older than country max needs fetch (FR-2)."""
     mock_cursor = MagicMock()
     mock_cursor.fetchone.return_value = (date(2026, 6, 6),)
     mock_cursor.fetchall.return_value = [("AAA.ST",)]
@@ -320,7 +326,7 @@ def test_filter_stale_tickers_marks_ticker_stale_when_behind_global_latest() -> 
     assert max_date == date(2026, 6, 6)
 
 
-def test_filter_stale_tickers_returns_all_when_db_empty() -> None:
+def test_filter_stale_tickers_returns_all_when_country_metrics_empty() -> None:
     mock_cursor = MagicMock()
     mock_cursor.fetchone.return_value = (None,)
 
@@ -338,6 +344,37 @@ def test_filter_stale_tickers_returns_all_when_db_empty() -> None:
     assert stale == tickers
     assert skipped == 0
     assert max_date is None
+
+
+def test_filter_stale_tickers_evaluates_us_and_swe_separately() -> None:
+    """US freshness uses us_metrics max; SWE uses swe_metrics max (RFC-003)."""
+    mock_cursor = MagicMock()
+    # Order of country iteration follows first-seen ticker country (US then SWE).
+    mock_cursor.fetchone.side_effect = [
+        (date(2026, 6, 6),),  # us max
+        (date(2026, 6, 5),),  # swe max
+    ]
+    mock_cursor.fetchall.side_effect = [
+        [("AAPL",)],  # fresh US
+        [("VOLV-B.ST",)],  # fresh SWE
+    ]
+
+    mock_conn = MagicMock()
+    mock_conn.__enter__.return_value = mock_conn
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    with patch("db.metrics.psycopg2.connect", return_value=mock_conn):
+        stale, skipped, max_date = filter_stale_tickers(
+            "postgresql://example",
+            ["AAPL", "MSFT", "VOLV-B.ST", "ERIC-B.ST"],
+        )
+
+    assert stale == ["MSFT", "ERIC-B.ST"]
+    assert skipped == 2
+    assert max_date == date(2026, 6, 6)
+    sqls = [call.args[0] for call in mock_cursor.execute.call_args_list]
+    assert any("FROM us_metrics" in sql for sql in sqls)
+    assert any("FROM swe_metrics" in sql for sql in sqls)
 
 
 def test_insert_metrics_executes_values() -> None:

@@ -36,5 +36,6 @@ if ! crontab -u "$APP_USER" -l 2>/dev/null | grep -q 'fetch_sma.py'; then
 fi
 
 echo "Bootstrap complete."
-echo "Add DATABASE_URL via GitHub deploy (push to main) or manually:"
-echo "  $APP_DIR/.env  (owner $APP_USER, mode 600, include APP_ENV=production)"
+echo "Application code and Pipenv deps come from deploy.yml (tarball + pipenv install --deploy)."
+echo "Add DATABASE_URL / APP_ENV via GitHub deploy (push to main) or manually:"
+echo "  $APP_DIR/.env  (owner $APP_USER, mode 600)"

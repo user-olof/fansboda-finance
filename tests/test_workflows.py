@@ -99,6 +99,13 @@ def test_deploy_workflow_copies_code_from_runner() -> None:
     assert "pipenv install --deploy" in content
 
 
+def test_deploy_workflow_ensures_pipenv_on_vm() -> None:
+    """Deploy installs pipenv when missing so --deploy can run (RFC-007)."""
+    content = DEPLOY_YML.read_text(encoding="utf-8")
+    assert "command -v pipenv" in content
+    assert "apt-get install -y pipenv" in content
+
+
 def test_deploy_workflow_uses_iap_tunnel_for_ssh_and_scp() -> None:
     """RFC-009: production deploy SSH/SCP must use IAP, not public IP."""
     content = DEPLOY_YML.read_text(encoding="utf-8")
@@ -153,6 +160,7 @@ def test_dev_backfill_workflow_deploys_from_runner_checkout() -> None:
     assert "git fetch" not in content
     assert "repo-url=" not in content
     assert "pipenv install --deploy" in content
+    assert "command -v pipenv" in content
 
 
 def test_dev_backfill_workflow_writes_dev_env_and_runs_pipeline() -> None:
@@ -163,6 +171,8 @@ def test_dev_backfill_workflow_writes_dev_env_and_runs_pipeline() -> None:
     assert "backfill_sma.py" in content
     assert "apply_migrations.sh" in content
     assert "GCP_INSTANCE_NAME" not in content
+    assert "workflow_dispatch:" in content
+    assert "workflow_dispatch:\n    branches:" not in content
 
 
 def test_dev_backfill_workflow_deletes_vm_on_failure() -> None:

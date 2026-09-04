@@ -1,44 +1,94 @@
-"""Database access for the metrics table."""
+"""Database access for the country metrics tables (RFC-001)."""
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import psycopg2
 from psycopg2.extras import execute_values
 
+from db.country import CountrySet, country_set_for
 from models import MetricRow
 
-INSERT_METRICS_SQL = """
-INSERT INTO metrics (
+INSERT_METRICS_SQL = {
+    CountrySet.US: """
+INSERT INTO us_metrics (
     ticker, company, trading_date, updated_at,
     currency, sma_50, sma_200, current_price, raw_50, raw_200
 )
 VALUES %s
 ON CONFLICT (ticker, trading_date) DO NOTHING
-"""
+""",
+    CountrySet.SWE: """
+INSERT INTO swe_metrics (
+    ticker, company, trading_date, updated_at,
+    currency, sma_50, sma_200, current_price, raw_50, raw_200
+)
+VALUES %s
+ON CONFLICT (ticker, trading_date) DO NOTHING
+""",
+}
 
-FRESH_TICKERS_SQL = """
+MAX_TRADING_DATE_SQL = {
+    CountrySet.US: "SELECT MAX(trading_date) FROM us_metrics",
+    CountrySet.SWE: "SELECT MAX(trading_date) FROM swe_metrics",
+}
+
+FRESH_TICKERS_SQL = {
+    CountrySet.US: """
 SELECT lt.ticker
 FROM (
     SELECT ticker, MAX(trading_date) AS latest_trading_date
-    FROM metrics
+    FROM us_metrics
     WHERE ticker = ANY(%s)
     GROUP BY ticker
 ) lt
-WHERE lt.latest_trading_date = (SELECT MAX(trading_date) FROM metrics)
-"""
+WHERE lt.latest_trading_date = (SELECT MAX(trading_date) FROM us_metrics)
+""",
+    CountrySet.SWE: """
+SELECT lt.ticker
+FROM (
+    SELECT ticker, MAX(trading_date) AS latest_trading_date
+    FROM swe_metrics
+    WHERE ticker = ANY(%s)
+    GROUP BY ticker
+) lt
+WHERE lt.latest_trading_date = (SELECT MAX(trading_date) FROM swe_metrics)
+""",
+}
 
 EXISTING_METRICS_SQL = """
-SELECT ticker, trading_date
-FROM metrics
-WHERE ticker = ANY(%s)
+SELECT ticker, trading_date FROM us_metrics WHERE ticker = ANY(%s)
+UNION ALL
+SELECT ticker, trading_date FROM swe_metrics WHERE ticker = ANY(%s)
 """
 
-DELETE_STALE_SQL = """
-DELETE FROM metrics
-WHERE trading_date < %s
+DELETE_STALE_SQL = (
+    "DELETE FROM us_metrics WHERE trading_date < %s",
+    "DELETE FROM swe_metrics WHERE trading_date < %s",
+)
+
+LOAD_RAW_RATIOS_BY_MARKET_FOR_DATE_SQL = """
+SELECT t.market, m.raw_50, m.raw_200
+FROM us_metrics m
+JOIN us_tickers t ON t.symbol = m.ticker
+WHERE m.trading_date = %s
+UNION ALL
+SELECT t.market, m.raw_50, m.raw_200
+FROM swe_metrics m
+JOIN swe_tickers t ON t.symbol = m.ticker
+WHERE m.trading_date = %s
+"""
+
+LOAD_DISTINCT_TRADING_DATES_SQL = """
+SELECT DISTINCT trading_date FROM (
+    SELECT trading_date FROM us_metrics
+    UNION ALL
+    SELECT trading_date FROM swe_metrics
+) dates
+ORDER BY trading_date
 """
 
 
@@ -67,17 +117,25 @@ def _metric_values(rows: list[MetricRow], *, updated_at: datetime) -> list[tuple
 
 
 def insert_metrics(database_url: str, rows: list[MetricRow]) -> int:
-    """Append metric rows, skipping duplicates. Returns rows inserted."""
+    """Append metric rows into us_metrics / swe_metrics. Returns rows inserted."""
     if not rows:
         return 0
 
+    by_country: dict[CountrySet, list[MetricRow]] = defaultdict(list)
+    for row in rows:
+        by_country[country_set_for(symbol=row.ticker)].append(row)
+
     now = datetime.now(timezone.utc)
+    inserted = 0
     with psycopg2.connect(database_url) as conn:
         with conn.cursor() as cur:
-            execute_values(
-                cur, INSERT_METRICS_SQL, _metric_values(rows, updated_at=now)
-            )
-            inserted = cur.rowcount
+            for country, country_rows in by_country.items():
+                execute_values(
+                    cur,
+                    INSERT_METRICS_SQL[country],
+                    _metric_values(country_rows, updated_at=now),
+                )
+                inserted += cur.rowcount
         conn.commit()
 
     return inserted
@@ -92,48 +150,42 @@ def load_existing_metric_keys(
 
     with psycopg2.connect(database_url) as conn:
         with conn.cursor() as cur:
-            cur.execute(EXISTING_METRICS_SQL, (tickers,))
+            cur.execute(EXISTING_METRICS_SQL, (tickers, tickers))
             return {(row[0], row[1]) for row in cur.fetchall()}
 
 
 def filter_stale_tickers(
     database_url: str, tickers: list[str]
 ) -> tuple[list[str], int, date | None]:
-    """Return tickers needing fetch (PRD FR-2).
+    """Return tickers needing fetch (PRD FR-2 / RFC-003).
 
-    A ticker is fresh when its latest ``trading_date`` equals the global max
-    ``trading_date`` in ``metrics`` — i.e. it already has a row for the current
-    market session. All others are stale and need fetching.
+    Freshness is evaluated **per country set**: a ticker is fresh when its latest
+    ``trading_date`` in ``us_metrics`` or ``swe_metrics`` equals that table's
+    ``MAX(trading_date)``. US and Swedish calendars are compared separately.
     """
+    by_country: dict[CountrySet, list[str]] = defaultdict(list)
+    for ticker in tickers:
+        by_country[country_set_for(symbol=ticker)].append(ticker)
+
+    fresh: set[str] = set()
+    max_dates: list[date] = []
+
     with psycopg2.connect(database_url) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT MAX(trading_date) FROM metrics")
-            max_row = cur.fetchone()
+            for country, country_tickers in by_country.items():
+                cur.execute(MAX_TRADING_DATE_SQL[country])
+                max_row = cur.fetchone()
+                if not max_row or max_row[0] is None:
+                    continue
 
-            if not max_row or max_row[0] is None:
-                return tickers, 0, None
-
-            max_date = max_row[0]
-            cur.execute(FRESH_TICKERS_SQL, (tickers,))
-            fresh = {row[0] for row in cur.fetchall()}
+                max_dates.append(max_row[0])
+                cur.execute(FRESH_TICKERS_SQL[country], (country_tickers,))
+                fresh.update(row[0] for row in cur.fetchall())
 
     stale = [ticker for ticker in tickers if ticker not in fresh]
     skipped = len(tickers) - len(stale)
+    max_date = max(max_dates) if max_dates else None
     return stale, skipped, max_date
-
-
-LOAD_RAW_RATIOS_BY_MARKET_FOR_DATE_SQL = """
-SELECT t.market, m.raw_50, m.raw_200
-FROM metrics m
-JOIN tickers t ON t.symbol = m.ticker
-WHERE m.trading_date = %s
-"""
-
-LOAD_DISTINCT_TRADING_DATES_SQL = """
-SELECT DISTINCT trading_date
-FROM metrics
-ORDER BY trading_date
-"""
 
 
 def load_raw_ratios_by_market_for_date(
@@ -143,7 +195,10 @@ def load_raw_ratios_by_market_for_date(
     """Return raw_50/raw_200 values grouped by tickers.market for a trading_date."""
     with psycopg2.connect(database_url) as conn:
         with conn.cursor() as cur:
-            cur.execute(LOAD_RAW_RATIOS_BY_MARKET_FOR_DATE_SQL, (trading_date,))
+            cur.execute(
+                LOAD_RAW_RATIOS_BY_MARKET_FOR_DATE_SQL,
+                (trading_date, trading_date),
+            )
             rows = cur.fetchall()
 
     grouped: dict[str | None, tuple[list[Decimal], list[Decimal]]] = {}
@@ -158,7 +213,7 @@ def load_raw_ratios_by_market_for_date(
 
 
 def load_distinct_trading_dates(database_url: str) -> list[date]:
-    """Return all distinct trading_date values in metrics, oldest first."""
+    """Return all distinct trading_date values across country metrics tables."""
     with psycopg2.connect(database_url) as conn:
         with conn.cursor() as cur:
             cur.execute(LOAD_DISTINCT_TRADING_DATES_SQL)
@@ -166,12 +221,14 @@ def load_distinct_trading_dates(database_url: str) -> list[date]:
 
 
 def purge_stale_metrics(database_url: str, retention_days: int) -> int:
-    """Delete metrics rows older than retention_days (UTC). Returns rows deleted."""
+    """Delete stale rows from ``us_metrics`` and ``swe_metrics`` (RFC-004)."""
     cutoff = retention_cutoff(retention_days)
+    deleted = 0
     with psycopg2.connect(database_url) as conn:
         with conn.cursor() as cur:
-            cur.execute(DELETE_STALE_SQL, (cutoff,))
-            deleted = cur.rowcount
+            for sql in DELETE_STALE_SQL:
+                cur.execute(sql, (cutoff,))
+                deleted += cur.rowcount
         conn.commit()
 
     return deleted

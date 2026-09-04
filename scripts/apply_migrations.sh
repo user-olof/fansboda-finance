@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Apply idempotent schema migrations before dev-backfill CI (MIGRATIONS.md).
+# Apply schema for Neon (dev-backfill CI and manual upgrades).
 #
-# Skips legacy one-time migrations that are unsafe to re-run on a live dev branch:
-#   - migrate_one_row_per_ticker.sql (destructive row collapse)
-#   - migrate_add_tickers_table.sql (bootstrap for DBs without tickers/FK)
+# Fresh / already country-partitioned DBs: schema.sql + step 11 (idempotent).
+# Legacy single-set DBs: run pre-split migrations, then step 11.
 #
-# Safe to re-run on every workflow: each file uses IF NOT EXISTS / conditional DDL.
+# Skips destructive one-time migrations unsafe to re-run:
+#   - migrate_one_row_per_ticker.sql
+#   - migrate_add_tickers_table.sql
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -21,7 +22,27 @@ if ! command -v psql >/dev/null 2>&1; then
   exit 1
 fi
 
-MIGRATIONS=(
+run_sql() {
+  local path="$1"
+  if [[ ! -f "$path" ]]; then
+    echo "Missing SQL file: $path" >&2
+    exit 1
+  fi
+  echo "Applying $(basename "$path")..."
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$path"
+}
+
+# Country baseline (CREATE IF NOT EXISTS) — safe on every run.
+run_sql "$REPO_DIR/schema.sql"
+
+has_legacy="$(
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -tAc \
+    "SELECT CASE WHEN to_regclass('public.metrics') IS NOT NULL
+                  OR to_regclass('public.tickers') IS NOT NULL
+             THEN 'yes' ELSE 'no' END"
+)"
+
+LEGACY_MIGRATIONS=(
   migrate_add_current_price.sql
   migrate_metrics_history.sql
   migrate_add_trading_date_index.sql
@@ -32,14 +53,16 @@ MIGRATIONS=(
   migrate_tickers_market_and_market_metrics.sql
 )
 
-for migration in "${MIGRATIONS[@]}"; do
-  path="$REPO_DIR/$migration"
-  if [[ ! -f "$path" ]]; then
-    echo "Missing migration file: $migration" >&2
-    exit 1
-  fi
-  echo "Applying $migration..."
-  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$path"
-done
+if [[ "$has_legacy" == "yes" ]]; then
+  echo "Legacy tickers/metrics detected — applying pre-split migrations..."
+  for migration in "${LEGACY_MIGRATIONS[@]}"; do
+    run_sql "$REPO_DIR/$migration"
+  done
+else
+  echo "No legacy tickers/metrics — skipping pre-split migrations."
+fi
+
+# Step 11: ensure us_*/swe_* exist; copy from legacy when present; drop legacy.
+run_sql "$REPO_DIR/migrate_split_us_swe_tables.sql"
 
 echo "All migrations applied."

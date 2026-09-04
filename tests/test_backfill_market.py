@@ -31,6 +31,8 @@ def test_load_distinct_trading_dates_returns_sorted_dates() -> None:
     assert dates == [date(2025, 1, 3), date(2025, 1, 10)]
     sql = mock_cursor.execute.call_args[0][0]
     assert "SELECT DISTINCT trading_date" in sql
+    assert "FROM us_metrics" in sql
+    assert "FROM swe_metrics" in sql
 
 
 def test_upsert_market_for_trading_dates_loads_ratios_and_upserts() -> None:

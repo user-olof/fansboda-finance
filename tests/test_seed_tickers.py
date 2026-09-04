@@ -1,33 +1,32 @@
 from unittest.mock import MagicMock, patch
 
-from db.tickers import upsert_tickers
+from db.country import CountrySet
+from db.tickers import UPSERT_TICKER_SQL, upsert_tickers
 from seed_tickers import resolve_and_upsert_symbols, seed_tickers_from_file
 
 
-def test_upsert_tickers_executes_values() -> None:
+def test_upsert_tickers_routes_to_country_tables() -> None:
     mock_cursor = MagicMock()
-    mock_cursor.rowcount = 2
+    mock_cursor.rowcount = 1
     mock_conn = MagicMock()
     mock_conn.__enter__.return_value = mock_conn
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
     rows = [
+        ("AAPL", "Apple Inc.", "technology", "consumer-electronics", "us_market"),
         ("AAA.ST", "Alpha AB", "Industrials", "Machinery", "se_market"),
-        ("BBB.ST", None, None, None, None),
     ]
 
     with patch("db.tickers.psycopg2.connect", return_value=mock_conn):
         with patch("db.tickers.execute_values") as mock_execute:
             affected = upsert_tickers("postgresql://example", rows)
 
-    mock_execute.assert_called_once()
-    sql = mock_execute.call_args[0][1]
-    assert "company" in sql
-    assert "sector" in sql
-    assert "industry" in sql
-    assert "market" in sql
-    assert "ON CONFLICT (symbol)" in sql
-    assert "updated_at = NOW()" in sql
+    assert mock_execute.call_count == 2
+    sqls = {call_args.args[1] for call_args in mock_execute.call_args_list}
+    assert UPSERT_TICKER_SQL[CountrySet.US] in sqls
+    assert UPSERT_TICKER_SQL[CountrySet.SWE] in sqls
+    assert "INSERT INTO us_tickers" in UPSERT_TICKER_SQL[CountrySet.US]
+    assert "INSERT INTO swe_tickers" in UPSERT_TICKER_SQL[CountrySet.SWE]
     mock_conn.commit.assert_called_once()
     assert affected == 2
 
@@ -42,15 +41,15 @@ def test_resolve_and_upsert_symbols_resolves_market_and_upserts() -> None:
     with patch(
         "seed_tickers.resolve_watchlist_fields",
         side_effect=[
+            ("Apple Inc.", "technology", "consumer-electronics", "us_market"),
             ("Alpha AB", "Industrials", "Machinery", "se_market"),
-            ("Beta AB", "Technology", "Software", None),
         ],
     ):
         with patch("seed_tickers.time.sleep") as mock_sleep:
             with patch("seed_tickers.upsert_tickers", return_value=2) as mock_upsert:
                 count = resolve_and_upsert_symbols(
                     "postgresql://example",
-                    ["AAA.ST", "BBB.ST"],
+                    ["AAPL", "AAA.ST"],
                     name_delay=0.25,
                 )
 
@@ -59,21 +58,21 @@ def test_resolve_and_upsert_symbols_resolves_market_and_upserts() -> None:
     mock_upsert.assert_called_once_with(
         "postgresql://example",
         [
+            ("AAPL", "Apple Inc.", "technology", "consumer-electronics", "us_market"),
             ("AAA.ST", "Alpha AB", "Industrials", "Machinery", "se_market"),
-            ("BBB.ST", "Beta AB", "Technology", "Software", None),
         ],
     )
 
 
 def test_seed_tickers_from_file_resolves_and_upserts(tmp_path) -> None:
     tickers_file = tmp_path / "tickers.txt"
-    tickers_file.write_text("aaa.st\n# comment\n\nbbb.st\n", encoding="utf-8")
+    tickers_file.write_text("aapl\n# comment\n\naaa.st\n", encoding="utf-8")
 
     with patch(
         "seed_tickers.resolve_watchlist_fields",
         side_effect=[
+            ("Apple Inc.", "technology", "consumer-electronics", "us_market"),
             ("Alpha AB", "Industrials", "Machinery", "se_market"),
-            ("Beta AB", "Technology", "Software", "se_market"),
         ],
     ):
         with patch("seed_tickers.time.sleep") as mock_sleep:
@@ -89,22 +88,26 @@ def test_seed_tickers_from_file_resolves_and_upserts(tmp_path) -> None:
     mock_upsert.assert_called_once_with(
         "postgresql://example",
         [
+            ("AAPL", "Apple Inc.", "technology", "consumer-electronics", "us_market"),
             ("AAA.ST", "Alpha AB", "Industrials", "Machinery", "se_market"),
-            ("BBB.ST", "Beta AB", "Technology", "Software", "se_market"),
         ],
     )
 
 
-def test_seed_tickers_from_file_records_none_on_resolve_failure(tmp_path) -> None:
+def test_seed_tickers_from_file_infers_market_on_resolve_failure(tmp_path) -> None:
     tickers_file = tmp_path / "tickers.txt"
-    tickers_file.write_text("aaa.st\n", encoding="utf-8")
+    tickers_file.write_text("aaa.st\naapl\n", encoding="utf-8")
 
     with patch("seed_tickers.resolve_watchlist_fields", side_effect=RuntimeError("boom")):
-        with patch("seed_tickers.upsert_tickers", return_value=1) as mock_upsert:
-            count = seed_tickers_from_file("postgresql://example", tickers_file)
+        with patch("seed_tickers.time.sleep"):
+            with patch("seed_tickers.upsert_tickers", return_value=2) as mock_upsert:
+                count = seed_tickers_from_file("postgresql://example", tickers_file)
 
-    assert count == 1
+    assert count == 2
     mock_upsert.assert_called_once_with(
         "postgresql://example",
-        [("AAA.ST", None, None, None, None)],
+        [
+            ("AAA.ST", None, None, None, "se_market"),
+            ("AAPL", None, None, None, "us_market"),
+        ],
     )

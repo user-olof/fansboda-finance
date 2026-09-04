@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-off backfill: recompute market_metrics rows from existing metrics."""
+"""One-off: recompute us_market_metrics / swe_market_metrics from stored metrics."""
 
 from __future__ import annotations
 
@@ -29,21 +29,22 @@ def main() -> int:
     try:
         trading_dates = load_distinct_trading_dates(database_url)
     except Exception:
-        logger.exception("Failed to load trading dates from database")
+        logger.exception("Failed to load trading dates from us_metrics / swe_metrics")
         return 1
 
     if not trading_dates:
-        logger.error("No metrics trading dates found")
+        logger.error("No metrics trading dates found in us_metrics / swe_metrics")
         return 1
 
     logger.info(
-        "Backfilling market_metrics for %d trading date(s)", len(trading_dates)
+        "Backfilling us_/swe_market_metrics for %d trading date(s)",
+        len(trading_dates),
     )
 
     try:
         upsert_market_for_trading_dates(database_url, set(trading_dates))
     except Exception:
-        logger.exception("Failed to upsert market_metrics stats")
+        logger.exception("Failed to upsert us_/swe_market_metrics stats")
         return 1
 
     logger.info(

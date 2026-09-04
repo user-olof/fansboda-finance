@@ -63,4 +63,11 @@ def test_bootstrap_does_not_write_env_file() -> None:
     content = BOOTSTRAP_SH.read_text(encoding="utf-8")
     assert "printf" not in content
     assert "DATABASE_URL=" not in content
-    assert "deploy workflow" in content.lower() or "deploy (push to main)" in content
+    assert "deploy (push to main)" in content
+
+
+def test_bootstrap_does_not_install_app_deps() -> None:
+    """OS packages may be preinstalled; Pipfile deps come from deploy (RFC-008)."""
+    content = BOOTSTRAP_SH.read_text(encoding="utf-8")
+    assert "apt-get install" not in content
+    assert "PIPENV_VENV_IN_PROJECT=1 pipenv install" not in content

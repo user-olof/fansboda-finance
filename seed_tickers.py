@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ad-hoc script to seed the tickers watchlist from a symbol file."""
+"""Ad-hoc script to seed us_tickers / swe_tickers from a symbol file (RFC-002)."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from config import DEFAULT_YF_NAME_DELAY_SECONDS, get_config
+from db.country import infer_listing_market
 from db.tickers import upsert_tickers
 from symbols import load_tickers
 from yfinance_client import resolve_watchlist_fields
@@ -26,7 +27,7 @@ def resolve_and_upsert_symbols(
     *,
     name_delay: float = DEFAULT_YF_NAME_DELAY_SECONDS,
 ) -> int:
-    """Resolve yfinance metadata for each symbol and upsert into tickers."""
+    """Resolve yfinance metadata and upsert into us_tickers / swe_tickers."""
     rows: list[tuple[str, str | None, str | None, str | None, str | None]] = []
 
     for i, symbol in enumerate(symbols):
@@ -45,7 +46,15 @@ def resolve_and_upsert_symbols(
             )
         except Exception:
             logger.exception("Failed to resolve metadata for %s", symbol)
-            rows.append((symbol, None, None, None, None))
+            rows.append(
+                (
+                    symbol,
+                    None,
+                    None,
+                    None,
+                    infer_listing_market(symbol=symbol),
+                )
+            )
 
     return upsert_tickers(database_url, rows)
 
@@ -56,7 +65,7 @@ def seed_tickers_from_file(
     *,
     name_delay: float = DEFAULT_YF_NAME_DELAY_SECONDS,
 ) -> int:
-    """Load symbols from file, resolve metadata, upsert into tickers. Returns row count."""
+    """Load symbols from file, resolve metadata, upsert country tickers tables."""
     symbols = load_tickers(tickers_path)
     return resolve_and_upsert_symbols(database_url, symbols, name_delay=name_delay)
 

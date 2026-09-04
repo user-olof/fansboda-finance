@@ -81,7 +81,7 @@ def test_resolve_watchlist_fields_uses_single_yfinance_lookup() -> None:
     mock_ctor.assert_called_once_with("AAPL")
 
 
-def test_resolve_watchlist_fields_returns_none_market_when_missing(caplog) -> None:
+def test_resolve_watchlist_fields_infers_us_market_when_missing(caplog) -> None:
     mock_ticker = MagicMock()
     mock_ticker.info = {
         "longName": "Unknown Co",
@@ -94,10 +94,29 @@ def test_resolve_watchlist_fields_returns_none_market_when_missing(caplog) -> No
             "Unknown Co",
             "technology",
             "software",
-            None,
+            "us_market",
         )
 
-    assert "No listing market found for UNKNOWN" in caplog.text
+    assert "No listing market found for UNKNOWN; inferring us_market" in caplog.text
+
+
+def test_resolve_watchlist_fields_infers_se_market_for_st_suffix(caplog) -> None:
+    mock_ticker = MagicMock()
+    mock_ticker.info = {
+        "longName": "Alpha AB",
+        "sectorKey": "industrials",
+        "industryKey": "machinery",
+    }
+
+    with patch("yfinance_client.yf.Ticker", return_value=mock_ticker):
+        assert resolve_watchlist_fields("AAA.ST") == (
+            "Alpha AB",
+            "industrials",
+            "machinery",
+            "se_market",
+        )
+
+    assert "No listing market found for AAA.ST; inferring se_market" in caplog.text
 
 
 def test_resolve_currency_uses_yfinance_info() -> None:

@@ -261,7 +261,7 @@ def main() -> int:
         try:
             upsert_market_for_trading_dates(database_url, trading_dates)
         except Exception:
-            logger.exception("Failed to upsert market_metrics stats")
+            logger.exception("Failed to upsert us_/swe_market_metrics stats")
             return 1
 
     logger.info(

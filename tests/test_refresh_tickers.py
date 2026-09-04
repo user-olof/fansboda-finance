@@ -50,6 +50,18 @@ def test_load_symbols_for_refresh_merges_file_and_db() -> None:
     assert symbols == ["AAA.ST", "BBB.ST", "CCC.ST"]
 
 
+def test_load_symbols_for_refresh_from_db_raises_when_empty() -> None:
+    with patch("refresh_tickers._load_db_symbols", return_value=[]):
+        with pytest.raises(
+            ValueError, match="No tickers found in us_tickers or swe_tickers"
+        ):
+            load_symbols_for_refresh(
+                "postgresql://example",
+                tickers_path=Path("tickers.txt"),
+                from_db=True,
+            )
+
+
 def test_load_symbols_for_refresh_raises_when_empty() -> None:
     with patch("refresh_tickers._load_file_symbols", return_value=[]):
         with patch("refresh_tickers._load_db_symbols", return_value=[]):
@@ -58,6 +70,22 @@ def test_load_symbols_for_refresh_raises_when_empty() -> None:
                     "postgresql://example",
                     tickers_path=Path("tickers.txt"),
                 )
+
+
+def test_load_db_symbols_uses_country_tickers_loader() -> None:
+    from models import TickerEntry
+    from refresh_tickers import _load_db_symbols
+
+    with patch(
+        "refresh_tickers.load_tickers_from_db",
+        return_value=[
+            TickerEntry("AAPL", "Apple", "technology", "consumer-electronics", "us_market"),
+            TickerEntry("VOLV-A.ST", "Volvo", "consumer-cyclical", "auto-manufacturers", "se_market"),
+        ],
+    ) as mock_load:
+        assert _load_db_symbols("postgresql://example") == ["AAPL", "VOLV-A.ST"]
+
+    mock_load.assert_called_once_with("postgresql://example")
 
 
 def test_refresh_tickers_delegates_to_seed_upsert() -> None:

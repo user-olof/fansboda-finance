@@ -1,8 +1,19 @@
 """Tests for dev backfill verification script (RFC-011)."""
 
+from pathlib import Path
 from unittest.mock import patch
 
-from scripts.verify_dev_backfill import analyze_log, format_report, parse_backfill_summary, verify_database
+from scripts.verify_dev_backfill import (
+    analyze_log,
+    format_report,
+    parse_backfill_summary,
+    query_database,
+    verify_database,
+)
+
+VERIFY_SCRIPT = (
+    Path(__file__).resolve().parents[1] / "scripts" / "verify_dev_backfill.py"
+)
 
 
 def test_parse_backfill_summary_extracts_last_line() -> None:
@@ -64,3 +75,15 @@ def test_verify_database_passes_without_market_rows() -> None:
 
     assert issues == []
     assert "market_row_count" not in counts
+
+
+def test_query_database_targets_country_tables() -> None:
+    """RFC-009 / RFC-001: verification SQL must use us_* / swe_* (not legacy)."""
+    content = VERIFY_SCRIPT.read_text(encoding="utf-8")
+    assert "FROM us_tickers" in content
+    assert "FROM swe_tickers" in content
+    assert "FROM us_metrics" in content
+    assert "FROM swe_metrics" in content
+    assert "FROM tickers" not in content
+    assert "FROM metrics" not in content
+    assert query_database.__doc__ is not None

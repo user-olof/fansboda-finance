@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Fetch weekly SMA metrics from yfinance and append to Neon Postgres."""
+"""Weekly SMA fetch into us_metrics / swe_metrics (RFC-003).
+
+Loads us_tickers + swe_tickers, skips fresh symbols per country metrics table,
+batch-downloads OHLCV, appends SMA snapshots, upserts us_/swe_market_metrics,
+and purges stale history.
+"""
 
 from __future__ import annotations
 
@@ -210,7 +215,7 @@ def upsert_market_for_trading_dates(
     database_url: str,
     trading_dates: set[date],
 ) -> None:
-    """Recompute and upsert market_metrics rows for each trading_date from stored metrics."""
+    """Recompute and upsert us_market_metrics / swe_market_metrics for each date."""
     for trading_date in sorted(trading_dates):
         by_market = load_raw_ratios_by_market_for_date(database_url, trading_date)
         if not by_market:
@@ -257,7 +262,8 @@ def _run_retention_purge(database_url: str, retention_days: int) -> tuple[int, i
         database_url, retention_days
     )
     logger.info(
-        "Retention purge: deleted %d metrics and %d market_metrics row(s) older than %d days",
+        "Retention purge: deleted %d us_/swe_ metrics and %d us_/swe_ market_metrics "
+        "row(s) older than %d days",
         metrics_purged,
         market_metrics_purged,
         retention_days,

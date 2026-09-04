@@ -73,14 +73,34 @@ def analyze_log(log_text: str) -> tuple[list[str], dict[str, int | None]]:
 
 
 def query_database(database_url: str) -> dict[str, int]:
-    """Return ticker and metrics counts from the dev database."""
+    """Return ticker and metrics counts from the country-set tables."""
     with psycopg2.connect(database_url) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM tickers")
+            cur.execute(
+                """
+                SELECT
+                  (SELECT COUNT(*) FROM us_tickers)
+                  + (SELECT COUNT(*) FROM swe_tickers)
+                """
+            )
             ticker_count = int(cur.fetchone()[0])
-            cur.execute("SELECT COUNT(DISTINCT ticker) FROM metrics")
+            cur.execute(
+                """
+                SELECT COUNT(DISTINCT ticker) FROM (
+                    SELECT ticker FROM us_metrics
+                    UNION
+                    SELECT ticker FROM swe_metrics
+                ) t
+                """
+            )
             metrics_ticker_count = int(cur.fetchone()[0])
-            cur.execute("SELECT COUNT(*) FROM metrics")
+            cur.execute(
+                """
+                SELECT
+                  (SELECT COUNT(*) FROM us_metrics)
+                  + (SELECT COUNT(*) FROM swe_metrics)
+                """
+            )
             metrics_row_count = int(cur.fetchone()[0])
 
     return {

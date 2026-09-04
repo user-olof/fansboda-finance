@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ad-hoc script to refresh watchlist metadata (FR-12, RFC-010)."""
+"""Ad-hoc script to refresh us_tickers / swe_tickers metadata (FR-12, RFC-010)."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def load_symbols_for_refresh(
     if from_db:
         db_symbols = _load_db_symbols(database_url)
         if not db_symbols:
-            raise ValueError("No tickers found in tickers table")
+            raise ValueError("No tickers found in us_tickers or swe_tickers")
         return sorted(db_symbols)
 
     merged = sorted(
@@ -67,7 +67,7 @@ def refresh_tickers(
     *,
     name_delay: float,
 ) -> int:
-    """Resolve and upsert watchlist metadata for the given symbols."""
+    """Resolve and upsert watchlist metadata into us_tickers / swe_tickers."""
     return resolve_and_upsert_symbols(
         database_url,
         symbols,
@@ -78,7 +78,8 @@ def refresh_tickers(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Refresh tickers metadata (company, sector, industry, listing market)"
+            "Refresh us_tickers / swe_tickers metadata "
+            "(company, sector, industry, listing market)"
         ),
     )
     parser.add_argument(
@@ -89,7 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--from-db",
         action="store_true",
-        help="Refresh all symbols already in the tickers table",
+        help="Refresh all symbols already in us_tickers / swe_tickers",
     )
     parser.add_argument(
         "--symbols",

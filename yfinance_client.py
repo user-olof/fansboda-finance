@@ -18,19 +18,26 @@ def _fetch_info(symbol: str) -> dict:
     return yf.Ticker(symbol).info
 
 
-def _listing_market_from_info(info: dict, *, symbol: str) -> str | None:
+def _listing_market_from_info(info: dict, *, symbol: str) -> str:
     market = info.get("market")
-    if not market:
-        logger.warning("No listing market found for %s", symbol)
-        return None
-    return str(market)
+    if market:
+        return str(market)
+    from db.country import infer_listing_market
+
+    inferred = infer_listing_market(symbol=symbol)
+    logger.warning(
+        "No listing market found for %s; inferring %s",
+        symbol,
+        inferred,
+    )
+    return inferred
 
 
 def _watchlist_fields_from_info(
     info: dict,
     *,
     symbol: str,
-) -> tuple[str | None, str | None, str | None, str | None]:
+) -> tuple[str | None, str | None, str | None, str]:
     company = info.get("longName") or info.get("shortName")
     sector = info.get("sectorKey") or info.get("sector")
     industry = info.get("industryKey") or info.get("industry")
@@ -60,8 +67,13 @@ def resolve_metadata(symbol: str) -> tuple[str | None, str | None]:
 
 def resolve_watchlist_fields(
     symbol: str,
-) -> tuple[str | None, str | None, str | None, str | None]:
-    """Resolve company, sector, industry, and listing market in one yfinance lookup."""
+) -> tuple[str | None, str | None, str | None, str]:
+    """Resolve company, sector, industry, and listing market in one yfinance lookup.
+
+    Listing ``market`` comes from yfinance when present; otherwise it is inferred
+    from the symbol (``.ST`` → ``se_market``, else ``us_market``) for country-table
+    routing (RFC-002).
+    """
     return _watchlist_fields_from_info(_fetch_info(symbol), symbol=symbol)
 
 

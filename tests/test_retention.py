@@ -37,15 +37,21 @@ def test_retention_cutoff_defaults_to_utc_today() -> None:
 
 
 def test_delete_stale_sql_is_parameterized() -> None:
-    assert "%s" in DELETE_STALE_SQL
-    assert "trading_date <" in DELETE_STALE_SQL
-    assert "DELETE FROM metrics" in DELETE_STALE_SQL
+    assert len(DELETE_STALE_SQL) == 2
+    for sql in DELETE_STALE_SQL:
+        assert "%s" in sql
+        assert "trading_date <" in sql
+    assert "DELETE FROM us_metrics" in DELETE_STALE_SQL[0]
+    assert "DELETE FROM swe_metrics" in DELETE_STALE_SQL[1]
 
 
 def test_delete_stale_market_sql_is_parameterized() -> None:
-    assert "%s" in DELETE_STALE_MARKET_SQL
-    assert "trading_date <" in DELETE_STALE_MARKET_SQL
-    assert "DELETE FROM market_metrics" in DELETE_STALE_MARKET_SQL
+    assert len(DELETE_STALE_MARKET_SQL) == 2
+    for sql in DELETE_STALE_MARKET_SQL:
+        assert "%s" in sql
+        assert "trading_date <" in sql
+    assert "DELETE FROM us_market_metrics" in DELETE_STALE_MARKET_SQL[0]
+    assert "DELETE FROM swe_market_metrics" in DELETE_STALE_MARKET_SQL[1]
 
 
 def test_purge_stale_metrics_executes_delete_with_cutoff() -> None:
@@ -59,9 +65,11 @@ def test_purge_stale_metrics_executes_delete_with_cutoff() -> None:
         with patch("db.metrics.retention_cutoff", return_value=date(2025, 6, 19)):
             deleted = purge_stale_metrics("postgresql://example", 365)
 
-    mock_cursor.execute.assert_called_once_with(DELETE_STALE_SQL, (date(2025, 6, 19),))
+    assert mock_cursor.execute.call_count == 2
+    mock_cursor.execute.assert_any_call(DELETE_STALE_SQL[0], (date(2025, 6, 19),))
+    mock_cursor.execute.assert_any_call(DELETE_STALE_SQL[1], (date(2025, 6, 19),))
     mock_conn.commit.assert_called_once()
-    assert deleted == 5
+    assert deleted == 10
 
 
 def test_purge_stale_market_executes_delete_with_cutoff() -> None:
@@ -75,12 +83,17 @@ def test_purge_stale_market_executes_delete_with_cutoff() -> None:
         with patch("db.market.retention_cutoff", return_value=date(2025, 6, 19)):
             deleted = purge_stale_market("postgresql://example", 365)
 
-    mock_cursor.execute.assert_called_once_with(
-        DELETE_STALE_MARKET_SQL,
+    assert mock_cursor.execute.call_count == 2
+    mock_cursor.execute.assert_any_call(
+        DELETE_STALE_MARKET_SQL[0],
+        (date(2025, 6, 19),),
+    )
+    mock_cursor.execute.assert_any_call(
+        DELETE_STALE_MARKET_SQL[1],
         (date(2025, 6, 19),),
     )
     mock_conn.commit.assert_called_once()
-    assert deleted == 2
+    assert deleted == 4
 
 
 def test_purge_stale_metrics_returns_zero_when_nothing_deleted() -> None:
@@ -113,6 +126,37 @@ def test_purge_stale_data_purges_metrics_and_market_metrics() -> None:
     assert market_metrics_purged == 1
 
 
+def test_purge_stale_data_deletes_from_all_four_country_tables() -> None:
+    """purge_stale_data must hit us_/swe_ metrics and market_metrics (RFC-004)."""
+    mock_cursor = MagicMock()
+    mock_cursor.rowcount = 1
+    mock_conn = MagicMock()
+    mock_conn.__enter__.return_value = mock_conn
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    with patch("db.metrics.psycopg2.connect", return_value=mock_conn):
+        with patch("db.market.psycopg2.connect", return_value=mock_conn):
+            with patch(
+                "db.metrics.retention_cutoff", return_value=date(2025, 6, 19)
+            ):
+                with patch(
+                    "db.market.retention_cutoff", return_value=date(2025, 6, 19)
+                ):
+                    metrics_purged, market_purged = purge_stale_data(
+                        "postgresql://example",
+                        365,
+                    )
+
+    sqls = [call.args[0] for call in mock_cursor.execute.call_args_list]
+    assert "DELETE FROM us_metrics WHERE trading_date < %s" in sqls
+    assert "DELETE FROM swe_metrics WHERE trading_date < %s" in sqls
+    assert "DELETE FROM us_market_metrics WHERE trading_date < %s" in sqls
+    assert "DELETE FROM swe_market_metrics WHERE trading_date < %s" in sqls
+    assert metrics_purged == 2
+    assert market_purged == 2
+
+
+
 def test_run_retention_purge_delegates_to_purge_stale_data(caplog) -> None:
     with patch("fetch_sma.purge_stale_data", return_value=(3, 2)) as mock_purge:
         with caplog.at_level(logging.INFO, logger="fetch_sma"):
@@ -124,7 +168,7 @@ def test_run_retention_purge_delegates_to_purge_stale_data(caplog) -> None:
     mock_purge.assert_called_once_with("postgresql://example", 365)
     assert metrics_purged == 3
     assert market_metrics_purged == 2
-    assert "deleted 3 metrics and 2 market_metrics row(s)" in caplog.text
+    assert "deleted 3 us_/swe_ metrics and 2 us_/swe_ market_metrics row(s)" in caplog.text
 
 
 def test_main_purges_when_all_tickers_already_fresh(caplog) -> None:
