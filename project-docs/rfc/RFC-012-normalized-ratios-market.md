@@ -10,13 +10,15 @@
 
 ## Summary
 
-Extend the weekly pipeline and backfill to store scale-free SMA ratios on each metrics row (`raw_50`, `raw_200`) and cross-sectional statistics in **`us_market_metrics` / `swe_market_metrics`** — one row per `(market, trading_date)` within each country set. Listing `market` comes from `us_tickers.market` / `swe_tickers.market` (yfinance bucket, e.g. `us_market`, `se_market`; RFC-002, RFC-010).
+Extend the weekly pipeline and backfill to store scale-free SMA ratios on each metrics row (`raw_50`, `raw_200`) and cross-sectional statistics in **`us_market_metrics` / `swe_market_metrics` / `uk_market_metrics`** — one row per `(market, trading_date)` within each country set. Listing `market` comes from `*_tickers.market` (yfinance bucket, e.g. `us_market`, `se_market`, `uk_market`; RFC-002, RFC-010).
 
 Supports unbiased heatmap coloring — ranking tickers relative to peers in the same country set on each date rather than using raw SMA-distance signals.
 
+**Implemented:** US, Swedish, and UK aggregate tables and routing (`uk_market` → `uk_market_metrics`).
+
 ## Requirements (PRD §6)
 
-### Per-ticker ratios (`us_metrics` / `swe_metrics`)
+### Per-ticker ratios (`us_metrics` / `swe_metrics` / `uk_metrics`)
 
 | Column | Formula | Notes |
 |--------|---------|-------|
@@ -25,7 +27,7 @@ Supports unbiased heatmap coloring — ranking tickers relative to peers in the 
 
 Computed at insert time in `fetch_sma.py` and `backfill_sma.py` alongside existing SMA fields.
 
-### Cross-sectional aggregates (`us_market_metrics` / `swe_market_metrics`)
+### Cross-sectional aggregates (`us_market_metrics` / `swe_market_metrics` / `uk_market_metrics`)
 
 One row per listing-`market` bucket and `trading_date` present in the run (routed to the matching country aggregate table):
 
@@ -41,7 +43,7 @@ One row per listing-`market` bucket and `trading_date` present in the run (route
 
 Primary key on `(market, trading_date)`. Upsert on conflict (replace stats when the weekly job re-processes a date for that market).
 
-`us_market` → `us_market_metrics`; `se_market` → `swe_market_metrics` (`db.country.country_set_for`).
+**Routing:** `us_market` → `us_market_metrics`; `se_market` → `swe_market_metrics`; `uk_market` → `uk_market_metrics` (`db.country.country_set_for`).
 
 ### Downstream use (out of scope for this RFC)
 
@@ -53,10 +55,11 @@ Consumers may derive z-scores, e.g. `(raw_50 - raw_mean_50) / raw_std_50`, or pe
 
 | Artifact | Role |
 |----------|------|
-| `schema.sql` | `raw_50`, `raw_200` on `us_metrics` / `swe_metrics`; `us_market_metrics` / `swe_market_metrics` |
+| `schema.sql` | `raw_50`, `raw_200` on `*_metrics`; `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics` |
 | `migrate_add_raw_ratios_and_market.sql` | Step 9 — ratios + legacy watchlist-wide `market` |
 | `migrate_tickers_market_and_market_metrics.sql` | Step 10 — `tickers.market`, `market_metrics` ([MIGRATIONS.md](../MIGRATIONS.md)) |
-| `migrate_split_us_swe_tables.sql` | Step 11 — country partition — **done** |
+| `migrate_split_us_swe_tables.sql` | Step 11 — US/SWE country partition — **done** |
+| `migrate_add_uk_tables.sql` | Step 13 — UK set including `uk_market_metrics` |
 | `scripts/verify_schema.sql` | Assert columns, country market metrics tables, retention indexes |
 | `tests/test_schema.py` | CI validation |
 
@@ -65,9 +68,9 @@ Consumers may derive z-scores, e.g. `(raw_50 - raw_mean_50) / raw_std_50`, or pe
 | File | Role |
 |------|------|
 | `models.py` | `MetricRow.raw_50`, `MetricRow.raw_200`; `MarketRow.market` |
-| `db/country.py` | Route upserts to US vs SWE aggregate tables |
+| `db/country.py` | Route upserts to US / SWE / UK aggregate tables |
 | `db/metrics.py` | `insert_metrics`, `load_raw_ratios_by_market_for_date`, `load_distinct_trading_dates` |
-| `db/market.py` | `upsert_market_stats`, `purge_stale_market` → `us_market_metrics` / `swe_market_metrics` |
+| `db/market.py` | `upsert_market_stats`, `purge_stale_market` → `*_market_metrics` |
 
 ### Pure logic
 
@@ -81,18 +84,20 @@ Consumers may derive z-scores, e.g. `(raw_50 - raw_mean_50) / raw_std_50`, or pe
 
 **`fetch_sma.py` `main()`** — after `insert_metrics`:
 
-1. For each processed `trading_date`, load `raw_50` / `raw_200` from `us_metrics` / `swe_metrics` joined to the matching tickers table, grouped by listing `market`.
-2. Compute mean/std per market bucket → `upsert_market_stats` into `us_market_metrics` / `swe_market_metrics`.
+1. For each processed `trading_date`, load `raw_50` / `raw_200` from `*_metrics` joined to the matching tickers table, grouped by listing `market`.
+2. Compute mean/std per market bucket → `upsert_market_stats` into `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics`.
 
 **`backfill_sma.py`** — compute `raw_50` / `raw_200` on each generated row; after all batches, upsert `*_market_metrics` for every `trading_date` in the run.
 
-**`backfill_market.py`** — one-off manual script to recompute all `us_market_metrics` / `swe_market_metrics` rows from distinct `*_metrics.trading_date` values.
+**`backfill_market.py`** — one-off manual script to recompute all `*_market_metrics` rows from distinct `*_metrics.trading_date` values.
 
 ### Retention (RFC-004)
 
-Purge `us_market_metrics` / `swe_market_metrics` rows where `trading_date` is older than `metrics_retention_days`, in the same `fetch_sma.py` run as `purge_stale_metrics`.
+Purge `*_market_metrics` rows where `trading_date` is older than `metrics_retention_days`, in the same `fetch_sma.py` run as `purge_stale_metrics`.
 
 ## Acceptance criteria
+
+### Shipped (US / Swedish)
 
 - [x] `raw_50` and `raw_200` columns in schema and migrations (RFC-001)
 - [x] Aggregate tables with PK on `(market, trading_date)` — `us_market_metrics` / `swe_market_metrics`
@@ -105,6 +110,14 @@ Purge `us_market_metrics` / `swe_market_metrics` rows where `trading_date` is ol
 - [x] Retention purge deletes stale aggregate rows (RFC-004)
 - [x] Listing `market` populated by seed/refresh (RFC-002, RFC-010)
 - [x] Unit tests for ratio math, aggregation, market upsert (US + SWE), and backfill integration
+
+### Shipped (UK)
+
+- [x] `uk_market_metrics` table in schema and step 13 migration
+- [x] Route `uk_market` → `uk_market_metrics` in `db.country` / `db/market.py`
+- [x] Weekly fetch, backfill, and `backfill_market.py` upsert UK aggregates
+- [x] Retention purge includes `uk_market_metrics`
+- [x] Tests cover UK aggregate routing
 
 ## Resolved decisions
 

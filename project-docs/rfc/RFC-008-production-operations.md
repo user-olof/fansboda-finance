@@ -10,9 +10,9 @@
 
 ## Summary
 
-A **single** GCP `e2-micro` Always-Free VM runs the weekly pipeline via cron as user `fansboda`. Application code lives at `/opt/fansboda-finance`; Neon Postgres holds the US and Swedish table sets (`us_tickers` / `us_metrics` / `us_market_metrics`, `swe_tickers` / `swe_metrics` / `swe_market_metrics`). First-time VM setup is handled by `scripts/bootstrap-vm.sh`; ongoing code and `.env` updates come from the production deploy workflow (RFC-007, RFC-009).
+A **single** GCP `e2-micro` Always-Free VM runs the weekly pipeline via cron as user `fansboda`. Application code lives at `/opt/fansboda-finance`; Neon Postgres holds the US, Swedish, and UK table sets (`us_*`, `swe_*`, `uk_*` tickers / metrics / market_metrics). First-time VM setup is handled by `scripts/bootstrap-vm.sh`; ongoing code and `.env` updates come from the production deploy workflow (RFC-007, RFC-009).
 
-PRD §8.1 (ephemeral dev VM on push to `dev`) is **out of scope** for this RFC — see [RFC-011](./RFC-011-dev-backfill-ci.md).
+PRD §8.1 (ephemeral dev VM via manual `workflow_dispatch`) is **out of scope** for this RFC — see [RFC-011](./RFC-011-dev-backfill-ci.md).
 
 ## Architecture (PRD §4)
 
@@ -30,6 +30,8 @@ PRD §8.1 (ephemeral dev VM on push to `dev`) is **out of scope** for this RFC �
                                               |       us_market_metrics          |
                                               |   SE: swe_tickers, swe_metrics,  |
                                               |       swe_market_metrics         |
+                                              |   UK: uk_tickers, uk_metrics,    |
+                                              |       uk_market_metrics          |
                                               +----------------------------------+
 ```
 
@@ -66,7 +68,7 @@ Production deploy is **not** part of this RFC's implementation, but operations d
 ### First-time setup (PRD §10)
 
 1. Neon: run `schema.sql`; verify with `scripts/verify_schema.sql`.
-2. Existing databases: apply relevant `migrate_*.sql` through step 11 ([MIGRATIONS.md](../MIGRATIONS.md)).
+2. Existing databases: apply relevant `migrate_*.sql` through step 11 (and steps 12–13 when available) ([MIGRATIONS.md](../MIGRATIONS.md)).
 3. GCP: attach instance service account (no JSON key on disk) on the existing VM.
 4. VM: `sudo bash scripts/bootstrap-vm.sh` (user, UTC, logs, cron — not app code).
 5. GitHub: secrets + WIF + `production` environment (RFC-009).
@@ -130,9 +132,9 @@ Separate from the **deploy** service account (RFC-009). The instance SA is the r
 |------|---------|
 | Check last cron run | `tail -100 /var/log/fansboda-finance/fetch_sma.log` |
 | Manual weekly run | `sudo -u fansboda bash -c 'cd /opt/fansboda-finance && set -a && . ./.env && set +a && PIPENV_VENV_IN_PROJECT=1 pipenv run python fetch_sma.py'` |
-| Verify data | `SELECT * FROM us_metrics ORDER BY trading_date DESC, ticker LIMIT 10;` (same for `swe_metrics`) |
-| Check retention span | `SELECT MIN(trading_date), MAX(trading_date), COUNT(*) FROM us_metrics;` (same for `swe_metrics`) |
-| Market snapshot | `SELECT * FROM us_market_metrics ORDER BY trading_date DESC LIMIT 10;` (same for `swe_market_metrics`) |
+| Verify data | `SELECT * FROM us_metrics ORDER BY trading_date DESC, ticker LIMIT 10;` (same for `swe_metrics` / `uk_metrics`) |
+| Check retention span | `SELECT MIN(trading_date), MAX(trading_date), COUNT(*) FROM us_metrics;` (same for `swe_metrics` / `uk_metrics`) |
+| Market snapshot | `SELECT * FROM us_market_metrics ORDER BY trading_date DESC LIMIT 10;` (same for `swe_market_metrics` / `uk_market_metrics`) |
 
 ### First-time setup checklist
 
@@ -146,7 +148,8 @@ Separate from the **deploy** service account (RFC-009). The instance SA is the r
 [ ] Seed: pipenv run python seed_tickers.py
 [ ] Optional: migrate_metrics_history.sql + backfill_sma.py (one-off)
 [ ] GitHub: ./scripts/configure-branch-protection.sh
-[ ] Verify: SELECT * FROM us_metrics ORDER BY trading_date DESC LIMIT 10; (same for swe_metrics)
+[ ] Verify: SELECT * FROM us_metrics ORDER BY trading_date DESC LIMIT 10; (same for swe_metrics / uk_metrics)
+[ ] Market: SELECT * FROM us_market_metrics ORDER BY trading_date DESC LIMIT 10; (same for swe_market_metrics / uk_market_metrics)
 ```
 
 ## Acceptance criteria
@@ -155,7 +158,7 @@ Separate from the **deploy** service account (RFC-009). The instance SA is the r
 - [x] Bootstrap does not ship app code or run `pipenv install --deploy` (deploy owns that)
 - [x] Bootstrap cron uses Thursday schedule (`0 11 * * 4`) only when missing
 - [x] Bootstrap cron sources `.env` and sets `PIPENV_VENV_IN_PROJECT=1`
-- [x] Runbook queries target country metrics tables (`us_*` / `swe_*`)
+- [x] Runbook queries target country metrics tables (`us_*` / `swe_*` / `uk_*`)
 - [x] First-time and runbook steps documented
 - [x] Tests in `tests/test_bootstrap_vm.py`
 - [x] Single production VM model documented (PRD §1 cost target)

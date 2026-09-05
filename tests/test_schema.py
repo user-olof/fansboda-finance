@@ -17,9 +17,22 @@ MIGRATIONS = [
     REPO_ROOT / "migrate_add_raw_ratios_and_market.sql",
     REPO_ROOT / "migrate_tickers_market_and_market_metrics.sql",
     REPO_ROOT / "migrate_split_us_swe_tables.sql",
+    REPO_ROOT / "migrate_add_exchange_name.sql",
+    REPO_ROOT / "migrate_add_uk_tables.sql",
 ]
 APPLY_MIGRATIONS_SH = REPO_ROOT / "scripts" / "apply_migrations.sh"
 COUNTRY_TABLES = (
+    "us_tickers",
+    "us_metrics",
+    "us_market_metrics",
+    "swe_tickers",
+    "swe_metrics",
+    "swe_market_metrics",
+    "uk_tickers",
+    "uk_metrics",
+    "uk_market_metrics",
+)
+US_SWE_TABLES = (
     "us_tickers",
     "us_metrics",
     "us_market_metrics",
@@ -47,6 +60,7 @@ def test_schema_enforces_history_unique_constraint() -> None:
     sql = SCHEMA_SQL.read_text(encoding="utf-8")
     assert "us_metrics_ticker_trading_date_key" in sql
     assert "swe_metrics_ticker_trading_date_key" in sql
+    assert "uk_metrics_ticker_trading_date_key" in sql
     assert "UNIQUE (ticker, trading_date)" in sql
 
 
@@ -54,6 +68,7 @@ def test_schema_cascade_delete_from_tickers() -> None:
     sql = SCHEMA_SQL.read_text(encoding="utf-8")
     assert "REFERENCES us_tickers (symbol) ON DELETE CASCADE" in sql
     assert "REFERENCES swe_tickers (symbol) ON DELETE CASCADE" in sql
+    assert "REFERENCES uk_tickers (symbol) ON DELETE CASCADE" in sql
 
 
 def test_schema_numeric_precision() -> None:
@@ -76,8 +91,11 @@ def test_schema_retention_indexes() -> None:
     assert "ON us_metrics (trading_date)" in sql
     assert "idx_swe_metrics_trading_date" in sql
     assert "ON swe_metrics (trading_date)" in sql
+    assert "idx_uk_metrics_trading_date" in sql
+    assert "ON uk_metrics (trading_date)" in sql
     assert "idx_us_market_metrics_trading_date" in sql
     assert "idx_swe_market_metrics_trading_date" in sql
+    assert "idx_uk_market_metrics_trading_date" in sql
 
 
 def test_schema_tickers_updated_at() -> None:
@@ -86,10 +104,10 @@ def test_schema_tickers_updated_at() -> None:
     assert re.search(r"\bupdated_at\s+TIMESTAMPTZ\s+NOT NULL", us_tickers)
 
 
-def test_schema_tickers_sector_industry_market_company() -> None:
+def test_schema_tickers_sector_industry_market_company_exchange_name() -> None:
     sql = SCHEMA_SQL.read_text(encoding="utf-8")
     us_tickers = sql.split("CREATE TABLE IF NOT EXISTS us_metrics", 1)[0]
-    for column in ("sector", "industry", "market", "company"):
+    for column in ("sector", "industry", "market", "company", "exchange_name"):
         assert re.search(rf"\b{column}\s+TEXT", us_tickers)
     assert not re.search(r"\bname\s+TEXT", us_tickers)
 
@@ -108,10 +126,26 @@ def test_schema_metrics_currency_and_raw_ratios() -> None:
 
 def test_schema_market_metrics_primary_key() -> None:
     sql = SCHEMA_SQL.read_text(encoding="utf-8")
-    for table in ("us_market_metrics", "swe_market_metrics"):
+    for table in ("us_market_metrics", "swe_market_metrics", "uk_market_metrics"):
         section = sql.split(f"CREATE TABLE IF NOT EXISTS {table}", 1)[1]
         assert re.search(r"\bmarket\s+TEXT\s+NOT NULL", section)
         assert "PRIMARY KEY (market, trading_date)" in section
+
+
+def test_migrate_add_exchange_name() -> None:
+    sql = (REPO_ROOT / "migrate_add_exchange_name.sql").read_text(encoding="utf-8")
+    assert "ADD COLUMN IF NOT EXISTS exchange_name TEXT" in sql
+    assert "us_tickers" in sql
+    assert "swe_tickers" in sql
+
+
+def test_migrate_add_uk_tables() -> None:
+    sql = (REPO_ROOT / "migrate_add_uk_tables.sql").read_text(encoding="utf-8")
+    for table in ("uk_tickers", "uk_metrics", "uk_market_metrics"):
+        assert f"CREATE TABLE IF NOT EXISTS {table}" in sql
+    assert "uk_market" in sql
+    assert "%.L" in sql
+    assert "exchange_name" in sql
 
 
 def test_migrate_add_raw_ratios_and_market() -> None:
@@ -138,7 +172,7 @@ def test_migrate_tickers_market_and_market_metrics() -> None:
 
 def test_migrate_split_us_swe_tables() -> None:
     sql = (REPO_ROOT / "migrate_split_us_swe_tables.sql").read_text(encoding="utf-8")
-    for table in COUNTRY_TABLES:
+    for table in US_SWE_TABLES:
         assert f"CREATE TABLE IF NOT EXISTS {table}" in sql
     assert "DROP TABLE IF EXISTS metrics CASCADE" in sql
     assert "DROP TABLE IF EXISTS market_metrics CASCADE" in sql
@@ -192,6 +226,12 @@ def test_apply_migrations_script_lists_ci_safe_migrations_in_order() -> None:
     assert script.index("schema.sql") < script.index("LEGACY_MIGRATIONS=")
     assert script.index("migrate_split_us_swe_tables.sql") > script.index(
         "LEGACY_MIGRATIONS="
+    )
+    assert script.index("migrate_add_exchange_name.sql") > script.index(
+        "migrate_split_us_swe_tables.sql"
+    )
+    assert script.index("migrate_add_uk_tables.sql") > script.index(
+        "migrate_add_exchange_name.sql"
     )
     assert "migrate_one_row_per_ticker.sql" not in script.split("LEGACY_MIGRATIONS=", 1)[
         1

@@ -5,72 +5,72 @@
 | **Priority** | P0 |
 | **Status** | Implemented |
 | **Depends on** | — |
+| **Enables** | RFC-002, RFC-006, RFC-007, RFC-008 |
 | **PRD** | §6 |
 | **Feature** | [Core data features](../FEATURES.md#core-data-features) |
 
 ## Summary
 
-Postgres schema for US and Swedish watchlists, SMA history, and cross-sectional aggregates. Data is partitioned by listing country into two parallel table sets (PRD §6):
+Postgres schema for US, Swedish, and UK watchlists, SMA history, and cross-sectional aggregates. Data is partitioned by listing country into three parallel table sets (PRD §6):
 
 | Set | Watchlist | SMA history | Cross-sectional aggregates |
 |-----|-----------|-------------|----------------------------|
 | US stocks | `us_tickers` | `us_metrics` | `us_market_metrics` |
 | Swedish stocks | `swe_tickers` | `swe_metrics` | `swe_market_metrics` |
+| UK stocks | `uk_tickers` | `uk_metrics` | `uk_market_metrics` |
 
-One metrics row per `(ticker, trading_date)` within each set; one market-metrics row per (`trading_date`, listing `market`) within each set. Cascade delete from each watchlist table to its matching metrics table.
+**Country routing (seed / refresh / insert):**
 
-Listing **`market`** (yfinance bucket on `*_tickers`, e.g. `us_market`, `se_market`) is also stored on `*_market_metrics`.
+| Country | Symbol cue | Listing `market` |
+|---------|------------|------------------|
+| Swedish | `.ST` | `se_market` |
+| UK | `.L` | `uk_market` |
+| US | default / other | `us_market` (and other non-SE/UK buckets) |
 
-**Legacy note:** Steps 1–10 in [MIGRATIONS.md](../MIGRATIONS.md) build the single-set tables `tickers` / `metrics` / `market_metrics`. Step 11 (`migrate_split_us_swe_tables.sql`) splits those into the `us_*` / `swe_*` sets below.
+Listing **`market`** (yfinance bucket on `*_tickers`, e.g. `us_market`, `se_market`, `uk_market`) is also stored on `*_market_metrics`. Watchlist tables also store **`exchange_name`** from yfinance `fullExchangeName`.
 
-## Requirements (PRD §6)
+**Legacy note:** Steps 1–10 in [MIGRATIONS.md](../MIGRATIONS.md) build the single-set tables `tickers` / `metrics` / `market_metrics`. Step 11 (`migrate_split_us_swe_tables.sql`) splits those into the `us_*` / `swe_*` sets. Steps 12–13 add `exchange_name` and the UK table set.
 
-### Watchlist tables (`us_tickers` / `swe_tickers`)
+## Schema
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `symbol` | TEXT | Primary key |
-| `company` | TEXT | Company name |
-| `sector` | TEXT | Sector from yfinance (`sectorKey`) |
-| `industry` | TEXT | Industry from yfinance (`industryKey`) |
-| `market` | TEXT | Listing market from yfinance (e.g. `us_market`, `se_market`) |
-| `updated_at` | TIMESTAMPTZ | When the row was written |
-
-### Metrics tables (`us_metrics` / `swe_metrics`)
+### Watchlist tables (`us_tickers` / `swe_tickers` / `uk_tickers`)
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `id` | BIGSERIAL | Primary key |
-| `ticker` | TEXT | FK → matching `*_tickers.symbol` `ON DELETE CASCADE` |
-| `company` | TEXT | Copied from the matching tickers table at fetch time |
-| `trading_date` | DATE | Market session for this snapshot |
-| `updated_at` | TIMESTAMPTZ | When the row was written |
-| `currency` | TEXT | Listing currency code from yfinance |
-| `sma_50` | NUMERIC(18,6) | 50-day SMA |
-| `sma_200` | NUMERIC(18,6) | 200-day SMA |
-| `current_price` | NUMERIC(18,6) | Adjusted close on `trading_date` |
-| `raw_50` | NUMERIC(18,6) | `sma_50 / current_price` |
-| `raw_200` | NUMERIC(18,6) | `sma_200 / current_price` |
+| `symbol` | TEXT PK | Yahoo Finance symbol |
+| `company` | TEXT | Display name |
+| `sector` | TEXT | From yfinance `sectorKey` |
+| `industry` | TEXT | From yfinance `industryKey` |
+| `market` | TEXT | Listing market from yfinance (e.g. `us_market`, `se_market`, `uk_market`) |
+| `exchange_name` | TEXT | Exchange display name from yfinance `fullExchangeName` |
+| `updated_at` | TIMESTAMPTZ | Seed / refresh timestamp |
 
-- Unique constraint on `(ticker, trading_date)`.
-- Index on `*_metrics.trading_date` for retention purge.
-- Deleting a row from `us_tickers` or `swe_tickers` cascades to all of its rows in the matching metrics table.
-
-### Market metrics tables (`us_market_metrics` / `swe_market_metrics`)
+### Metrics tables (`us_metrics` / `swe_metrics` / `uk_metrics`)
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `market` | TEXT | Listing market bucket; matches the set's tickers `market` values |
-| `trading_date` | DATE | Market session for this snapshot |
-| `updated_at` | TIMESTAMPTZ | When the row was written |
-| `raw_mean_50` | NUMERIC(18,6) | Mean of `raw_50` for tickers in this set on this date |
-| `raw_mean_200` | NUMERIC(18,6) | Mean of `raw_200` for tickers in this set on this date |
-| `raw_std_50` | NUMERIC(18,6) | Std dev of `raw_50` in this set on this date |
-| `raw_std_200` | NUMERIC(18,6) | Std dev of `raw_200` in this set on this date |
+| `id` | BIGSERIAL PK | |
+| `ticker` | TEXT FK | → matching `*_tickers.symbol` ON DELETE CASCADE |
+| `company` | TEXT | Copied from tickers at insert time |
+| `trading_date` | DATE | Session date for the snapshot |
+| `updated_at` | TIMESTAMPTZ | Insert time |
+| `currency` | TEXT | From yfinance |
+| `sma_50` / `sma_200` / `current_price` | NUMERIC(18,6) | |
+| `raw_50` / `raw_200` | NUMERIC(18,6) | SMA / price ratios |
 
-- Primary key on `(market, trading_date)`.
-- Aggregates matching `*_metrics` rows for that country set on that date.
-- Used for cross-sectional normalization within a country set (heatmap z-scores / ranks). Populated by RFC-012; purged by RFC-004.
+- One row per `(ticker, trading_date)` within each set (`*_metrics_ticker_trading_date_key`)
+- Append-only: `ON CONFLICT (ticker, trading_date) DO NOTHING`
+- Deleting a row from `us_tickers`, `swe_tickers`, or `uk_tickers` cascades to all of its rows in the matching metrics table.
+
+### Market metrics tables (`us_market_metrics` / `swe_market_metrics` / `uk_market_metrics`)
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `market` | TEXT | Listing market bucket |
+| `trading_date` | DATE | |
+| `updated_at` | TIMESTAMPTZ | |
+| `raw_mean_50` / `raw_mean_200` / `raw_std_50` / `raw_std_200` | NUMERIC(18,6) | Cross-sectional stats |
+| PK | `(market, trading_date)` | |
 
 ## Implementation
 
@@ -78,22 +78,24 @@ Listing **`market`** (yfinance bucket on `*_tickers`, e.g. `us_market`, `se_mark
 
 | Artifact | Status |
 |----------|--------|
-| `schema.sql` | `us_*` / `swe_*` country sets (PRD §6) |
-| `migrate_*.sql` | Steps 1–10: legacy single-set upgrades; step 11 splits to country sets |
-| `migrate_split_us_swe_tables.sql` | Step 11 — country partition — **done** |
+| `schema.sql` | `us_*` / `swe_*` / `uk_*` country sets including `exchange_name` |
+| `migrate_*.sql` | Steps 1–10: legacy single-set upgrades; step 11 splits to US/SWE |
+| `migrate_split_us_swe_tables.sql` | Step 11 — US/SWE country partition — **done** |
+| `migrate_add_exchange_name.sql` | Step 12 — add `exchange_name` to `*_tickers` — **done** |
+| `migrate_add_uk_tables.sql` | Step 13 — create `uk_*` table set — **done** |
 | `project-docs/MIGRATIONS.md` | Migration order and paths by starting state |
-| `scripts/verify_schema.sql` | Asserts both country sets; legacy tables absent |
+| `scripts/verify_schema.sql` | Asserts US/SWE/UK sets and `exchange_name` |
 | `tests/test_schema.py` | CI validation of DDL files |
-| `db/country.py` | Routes rows to US vs SWE by `market` / `.ST` suffix |
-| `db/tickers.py`, `db/metrics.py`, `db/market.py` | Target country-set tables |
+| `db/country.py` | Routes rows to US / SWE / UK by `market` / `.ST` / `.L` |
+| `db/tickers.py`, `db/metrics.py`, `db/market.py` | Target all three country-set tables |
 
-**Schema note:** PRD §6 places `sector`, `industry`, and listing `market` on `*_tickers` (RFC-002, RFC-010), `currency` on `*_metrics` (RFC-003), and per-country-set aggregates in `*_market_metrics` (RFC-012).
+**Schema note:** PRD §6 places `sector`, `industry`, listing `market`, and `exchange_name` on `*_tickers` (RFC-002, RFC-010), `currency` on `*_metrics` (RFC-003), and per-country-set aggregates in `*_market_metrics` (RFC-012).
 
 ### Files
 
 | File | Purpose |
 |------|---------|
-| `schema.sql` | Initial schema for new Neon databases (must create `us_*` / `swe_*` sets) |
+| `schema.sql` | Initial schema for new Neon databases (must create `us_*` / `swe_*` / `uk_*` sets, including `exchange_name`) |
 | `migrate_add_current_price.sql` | Add `current_price` column (legacy `metrics`) |
 | `migrate_one_row_per_ticker.sql` | Legacy collapse (superseded) |
 | `migrate_add_tickers_table.sql` | Add legacy `tickers` table and FK |
@@ -105,10 +107,12 @@ Listing **`market`** (yfinance bucket on `*_tickers`, e.g. `us_market`, `se_mark
 | `migrate_add_metrics_metadata.sql` | **Superseded** — see `migrate_move_metadata_to_tickers.sql` |
 | `migrate_add_raw_ratios_and_market.sql` | Add `raw_50`, `raw_200`, legacy `market` table |
 | `migrate_tickers_market_and_market_metrics.sql` | Add `tickers.market`; rename to `market_metrics` |
-| `migrate_split_us_swe_tables.sql` | Split into `us_*` / `swe_*` sets |
-| `models.py` | `TickerEntry`, `MetricRow`, `MarketRow` |
-| `db/metrics.py` | `insert_metrics` persists `raw_50`, `raw_200` |
-| `db/market.py` | `upsert_market_stats`, `purge_stale_market` |
+| `migrate_split_us_swe_tables.sql` | Split into `us_*` / `swe_*` sets (step 11 — **done**) |
+| `migrate_add_exchange_name.sql` | Step 12 — add `exchange_name` to `*_tickers` |
+| `migrate_add_uk_tables.sql` | Step 13 — create `uk_*` sets |
+| `models.py` | `TickerEntry` (incl. `exchange_name`), `MetricRow`, `MarketRow` |
+| `db/metrics.py` | `insert_metrics` persists `raw_50`, `raw_200` into country metrics |
+| `db/market.py` | `upsert_market_stats`, `purge_stale_market` for all country sets |
 
 ### New database setup
 
@@ -123,8 +127,9 @@ Legacy upgrades: see [MIGRATIONS.md](../MIGRATIONS.md).
 ### Verification
 
 ```sql
-SELECT symbol, company, sector, industry, market FROM us_tickers LIMIT 5;
-SELECT symbol, company, sector, industry, market FROM swe_tickers LIMIT 5;
+SELECT symbol, company, sector, industry, market, exchange_name FROM us_tickers LIMIT 5;
+SELECT symbol, company, sector, industry, market, exchange_name FROM swe_tickers LIMIT 5;
+SELECT symbol, company, sector, industry, market, exchange_name FROM uk_tickers LIMIT 5;
 
 SELECT ticker, trading_date, company, currency,
        sma_50, sma_200, current_price, raw_50, raw_200
@@ -134,11 +139,18 @@ SELECT ticker, trading_date, company, currency,
        sma_50, sma_200, current_price, raw_50, raw_200
 FROM swe_metrics ORDER BY trading_date DESC LIMIT 5;
 
+SELECT ticker, trading_date, company, currency,
+       sma_50, sma_200, current_price, raw_50, raw_200
+FROM uk_metrics ORDER BY trading_date DESC LIMIT 5;
+
 SELECT market, trading_date, raw_mean_50, raw_mean_200, raw_std_50, raw_std_200
 FROM us_market_metrics ORDER BY trading_date DESC, market LIMIT 5;
 
 SELECT market, trading_date, raw_mean_50, raw_mean_200, raw_std_50, raw_std_200
 FROM swe_market_metrics ORDER BY trading_date DESC, market LIMIT 5;
+
+SELECT market, trading_date, raw_mean_50, raw_mean_200, raw_std_50, raw_std_200
+FROM uk_market_metrics ORDER BY trading_date DESC, market LIMIT 5;
 ```
 
 ## Acceptance criteria
@@ -158,12 +170,15 @@ FROM swe_market_metrics ORDER BY trading_date DESC, market LIMIT 5;
 - [x] Legacy `market` → `market_metrics` with PK on `(market, trading_date)` (step 10)
 - [x] `MarketRow` / `db/market.py` upsert and purge helpers
 
-### Pending (PRD §6 country sets)
+### Shipped (PRD §6 US / Swedish / UK sets)
 
-- [x] `schema.sql` creates `us_tickers`, `us_metrics`, `us_market_metrics`, `swe_tickers`, `swe_metrics`, `swe_market_metrics`
+- [x] `schema.sql` creates `us_*`, `swe_*`, and `uk_*` table sets
 - [x] Step 11 migration (`migrate_split_us_swe_tables.sql`) moves legacy rows and drops legacy tables
-- [x] `scripts/verify_schema.sql` asserts both country sets
-- [x] DB access layer targets `us_*` and `swe_*` tables (`db/country.py`, `db/tickers.py`, `db/metrics.py`, `db/market.py`)
+- [x] Step 12 migration (`migrate_add_exchange_name.sql`) adds `exchange_name` on `*_tickers`
+- [x] Step 13 migration (`migrate_add_uk_tables.sql`) creates UK set and moves `.L` / `uk_market` rows from `us_*`
+- [x] `scripts/verify_schema.sql` asserts all three country sets and `exchange_name`
+- [x] DB access layer targets `us_*`, `swe_*`, and `uk_*` tables (`db/country.py`, `db/tickers.py`, `db/metrics.py`, `db/market.py`)
+- [x] `TickerEntry.exchange_name` and upsert rows include `exchange_name`
 
 ## Open questions
 

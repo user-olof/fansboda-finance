@@ -10,7 +10,7 @@
 
 ## Summary
 
-One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **Not** cron-scheduled. SMA price fields, `raw_50` / `raw_200` ratios, and cross-sectional aggregate stats are backfilled from OHLCV into `us_metrics` / `swe_metrics` and `us_market_metrics` / `swe_market_metrics`. `sector`, `industry`, and listing `market` live on `us_tickers` / `swe_tickers` (RFC-002). Currency is resolved per ticker during backfill (`yfinance_client.load_currency_for_tickers`).
+One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **Not** cron-scheduled. SMA price fields, `raw_50` / `raw_200` ratios, and cross-sectional aggregate stats are backfilled from OHLCV into `us_metrics` / `swe_metrics` / `uk_metrics` and `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics`. `sector`, `industry`, listing `market`, and `exchange_name` live on `*_tickers` (RFC-002). Currency is resolved per ticker during backfill (`yfinance_client.load_currency_for_tickers`).
 
 ## Requirements
 
@@ -18,7 +18,7 @@ One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **N
 |----|-------------|
 | FR-13 | Download ~730 days OHLCV per batch (default 25 symbols/batch); retry/backoff; inter-batch delay |
 | FR-14 | Rolling 52-week windows from oldest bar (weeks 0–51, 1–52, …); one snapshot per window |
-| FR-15 | Append into `us_metrics` / `swe_metrics` with `ON CONFLICT (ticker, trading_date) DO NOTHING` |
+| FR-15 | Append into `us_metrics` / `swe_metrics` / `uk_metrics` with `ON CONFLICT (ticker, trading_date) DO NOTHING` |
 | FR-16 | Skip `(ticker, trading_date)` pairs already in the matching country metrics table |
 | FR-17 | Log per-batch generated/new/inserted/skipped counts and final summary |
 | — | Set `raw_50`, `raw_200` on each inserted metrics row (RFC-012) |
@@ -81,7 +81,9 @@ pipenv run python backfill_sma.py
 - [x] Populates `currency` per ticker during backfill (PRD §6)
 - [x] Uses `yfinance_client.py` for batch download and currency resolution
 - [x] Populates `raw_50`, `raw_200` on backfilled metrics rows (RFC-012)
-- [x] Insert into `us_metrics` / `swe_metrics`; upsert `us_market_metrics` / `swe_market_metrics` (RFC-001 step 11, RFC-012)
+- [x] Insert into `us_metrics` / `swe_metrics` / `uk_metrics`; upsert `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics` (RFC-001, RFC-012)
+- [x] Skip-existing and load-watchlist paths include UK country set
+- [x] Tests cover UK backfill routing
 
 ## Open questions
 

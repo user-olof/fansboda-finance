@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Apply schema for Neon (dev-backfill CI and manual upgrades).
 #
-# Fresh / already country-partitioned DBs: schema.sql + step 11 (idempotent).
-# Legacy single-set DBs: run pre-split migrations, then step 11.
+# Fresh / already country-partitioned DBs: schema.sql + steps 11–13 (idempotent).
+# Legacy single-set DBs: run pre-split migrations, then steps 11–13.
 #
 # Skips destructive one-time migrations unsafe to re-run:
 #   - migrate_one_row_per_ticker.sql
@@ -65,4 +65,10 @@ fi
 # Step 11: ensure us_*/swe_* exist; copy from legacy when present; drop legacy.
 run_sql "$REPO_DIR/migrate_split_us_swe_tables.sql"
 
-echo "All migrations applied."
+# Step 12: exchange_name on us_*/swe_* (and uk_* if already present; step 13 creates UK).
+run_sql "$REPO_DIR/migrate_add_exchange_name.sql"
+
+# Step 13: UK table set (uk_tickers / uk_metrics / uk_market_metrics); move .L / uk_market from us_*.
+run_sql "$REPO_DIR/migrate_add_uk_tables.sql"
+
+echo "All migrations applied (us_* / swe_* / uk_*)."

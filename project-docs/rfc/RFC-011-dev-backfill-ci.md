@@ -10,15 +10,17 @@
 
 ## Summary
 
-On push to **`dev`**, GitHub Actions spins up an ephemeral GCP VM (`data-fetcher-dev`), deploys the repo via tarball, runs watchlist seeding and historical backfill against a **Neon dev branch** (`us_*` / `swe_*` tables), verifies the run, and **always** deletes the VM. This validates the full data pipeline without keeping a second 24/7 `e2-micro` (PRD §1 cost target).
+On **manual `workflow_dispatch`** (not on push to `dev`), GitHub Actions spins up an ephemeral GCP VM (`data-fetcher-dev`), deploys the repo via tarball, runs watchlist seeding and historical backfill against a **Neon dev branch** (`us_*` / `swe_*` / `uk_*` tables), verifies the run, and **always** deletes the VM. This validates the full data pipeline without keeping a second 24/7 `e2-micro` (PRD §1 cost target).
 
 Production CI/CD (RFC-007) and production VM ops (RFC-008) are unchanged.
+
+**Note:** Seed/backfill/verify covers all three country sets (PRD §6): `us_*` / `swe_*` / `uk_*`.
 
 ## Requirements (PRD §8.1)
 
 | Step | Requirement |
 |------|-------------|
-| Spin up VM | On push to `dev`, create `data-fetcher-dev` in GCP (tag `dev-backfill`). Firewall must allow GitHub Actions SSH via IAP (`tcp:22` from `35.235.240.0/20`, scoped to that tag). Wait until `gcloud compute ssh --tunnel-through-iap` succeeds. |
+| Spin up VM | Manual `workflow_dispatch` | Create `data-fetcher-dev` in GCP (tag `dev-backfill`). Firewall must allow GitHub Actions SSH via IAP (`tcp:22` from `35.235.240.0/20`, scoped to that tag). Wait until `gcloud compute ssh --tunnel-through-iap` succeeds. |
 | Deploy | After spin-up succeeds, install deps and write `.env` on the dev VM |
 | Data collection | After deploy succeeds, run pipeline scripts; store results in Neon **dev branch** |
 | Verification | After data collection completes without interrupting error, analyze missing data, failed downloads, etc.; print results |
@@ -33,7 +35,7 @@ Production CI/CD (RFC-007) and production VM ops (RFC-008) are unchanged.
 ## Architecture
 
 ```
-push to dev
+workflow_dispatch
     │
     ▼
 ┌─────────────────┐  WIF + IAP (RFC-009)  ┌──────────────────────┐
@@ -48,7 +50,7 @@ push to dev
          │                              ┌──────────────────────┐
          │                              │ Neon Postgres        │
          │                              │ (dev branch)         │
-         │                              │ us_* / swe_* tables  │
+         │                              │ us_* / swe_* / uk_*  │
          │                              └──────────────────────┘
          ▼
    verify logs / DB checks
@@ -67,7 +69,7 @@ push to dev
 |----------|---------|-------|
 | `test.yml` | Push / PR to `main` | `pytest` |
 | `deploy.yml` | Push to `main` | Production VM |
-| `dev-backfill.yml` | Push to `dev` (+ `workflow_dispatch`) | Ephemeral `data-fetcher-dev` VM |
+| `dev-backfill.yml` | Manual `workflow_dispatch` only | Ephemeral `data-fetcher-dev` VM |
 
 ### Target design
 
@@ -77,7 +79,7 @@ Use a single workflow with dependent jobs so each step gates the next:
 
 | Job | Runs when | Action |
 |-----|-----------|--------|
-| `spin-up-vm` | Push to `dev` | `gcloud compute instances create data-fetcher-dev` — Debian 12, `e2-micro`, tag `dev-backfill`; wait until bootstrap marker via `gcloud compute ssh --tunnel-through-iap` |
+| `spin-up-vm` | Manual `workflow_dispatch` | `gcloud compute instances create data-fetcher-dev` — Debian 12, `e2-micro`, tag `dev-backfill`; wait until bootstrap marker via `gcloud compute ssh --tunnel-through-iap` |
 | `deploy` | Spin-up succeeds | SCP tarball to `/opt/fansboda-finance`, ensure `pipenv`, `pipenv install --deploy`, SCP `.env` with `DATABASE_URL` + `APP_ENV=dev`; apply schema via `scripts/apply_migrations.sh` (all SSH/SCP via `--tunnel-through-iap`) |
 | `collect-data` | Deploy succeeds | SSH: `seed_tickers.py`, then `backfill_sma.py` (RFC-002, RFC-005) |
 | `verify` | Data collection succeeds | Parse job logs; SQL checks against country tables (`scripts/verify_dev_backfill.py`); print summary |
@@ -89,9 +91,9 @@ Reuse patterns from RFC-007 (WIF auth, tarball + SCP `.env`, `chown fansboda:fan
 
 On the Neon dev branch:
 
-1. `scripts/apply_migrations.sh` — `schema.sql` + conditional legacy upgrades + step 11 country split.
-2. `pipenv run python seed_tickers.py` — populate `us_tickers` / `swe_tickers` (RFC-002).
-3. `pipenv run python backfill_sma.py` — bootstrap `us_metrics` / `swe_metrics` history (RFC-005).
+1. `scripts/apply_migrations.sh` — `schema.sql` + conditional legacy upgrades + steps 11–13 (`us_*` / `swe_*` split, `exchange_name`, UK tables).
+2. `pipenv run python seed_tickers.py` — populate `us_tickers` / `swe_tickers` / `uk_tickers` (RFC-002).
+3. `pipenv run python backfill_sma.py` — bootstrap `us_metrics` / `swe_metrics` / `uk_metrics` history (RFC-005).
 
 `fetch_sma.py` is optional in this pipeline; backfill already produces historical snapshots.
 
@@ -113,11 +115,11 @@ On the Neon dev branch:
 | `GCP_WORKLOAD_IDENTITY_PROVIDER` | WIF provider (RFC-009) |
 | `GCP_DEPLOY_SERVICE_ACCOUNT` | Deploy SA — needs IAM for instance create/delete + IAP |
 
-Use a GitHub **`DEV`** environment (distinct from `PROD`) with secrets scoped to `dev` branch pushes.
+Use a GitHub **`DEV`** environment (distinct from `PROD`) with secrets scoped to the `DEV` environment (manual `workflow_dispatch`).
 
 #### Deploy authentication (RFC-009)
 
-Same WIF/OIDC path as `deploy.yml` — no `GCP_SA_KEY`. Extend WIF binding to allow the `dev` branch / `DEV` environment in addition to `main` / `PROD`.
+Same WIF/OIDC path as `deploy.yml` — no `GCP_SA_KEY`. Extend WIF binding to allow the `DEV` environment (manual dispatch) in addition to `main` / `PROD`.
 
 #### Firewall (one-time GCP setup)
 
@@ -150,8 +152,8 @@ After `collect-data` succeeds (exit 0):
 
 - Scan stdout/stderr for failed batches, non-zero exit markers, and RFC-005 summary lines (generated / inserted / skipped counts).
 - Connect to Neon dev branch and run sanity queries over country sets:
-  - `SELECT COUNT(*) FROM us_tickers` / `swe_tickers`
-  - `SELECT COUNT(DISTINCT ticker) FROM us_metrics` / `swe_metrics`
+  - `SELECT COUNT(*) FROM us_tickers` / `swe_tickers` / `uk_tickers`
+  - `SELECT COUNT(DISTINCT ticker) FROM us_metrics` / `swe_metrics` / `uk_metrics`
 - Print a human-readable summary in the Actions log (pass / fail).
 
 Fatal script errors fail the workflow before verification; verification catches partial data quality issues.
@@ -160,10 +162,10 @@ Fatal script errors fail the workflow before verification; verification catches 
 
 | File | Action |
 |------|--------|
-| `.github/workflows/dev-backfill.yml` | Ephemeral VM pipeline on push to `dev` |
+| `.github/workflows/dev-backfill.yml` | Ephemeral VM pipeline via manual `workflow_dispatch` only |
 | `scripts/bootstrap-dev-vm.sh` | GCE startup bootstrap (no cron) |
-| `scripts/apply_migrations.sh` | `schema.sql` + legacy-if-needed + step 11 |
-| `scripts/verify_dev_backfill.py` | Log + country-table DB verification |
+| `scripts/apply_migrations.sh` | `schema.sql` + legacy-if-needed + steps 11–13 (`exchange_name`, UK tables) |
+| `scripts/verify_dev_backfill.py` | Log + country-table DB verification (`us_*` / `swe_*` / `uk_*`) |
 | `tests/test_workflows.py` | Dev workflow assertions |
 | `tests/test_bootstrap_dev_vm.py` | Bootstrap script assertions |
 | `tests/test_verify_dev_backfill.py` | Verification script assertions |
@@ -172,8 +174,8 @@ Fatal script errors fail the workflow before verification; verification catches 
 
 | RFC | Reuse |
 |-----|-------|
-| RFC-002 | `seed_tickers.py` → `us_tickers` / `swe_tickers` |
-| RFC-005 | `backfill_sma.py` → `us_metrics` / `swe_metrics` |
+| RFC-002 | `seed_tickers.py` → `us_tickers` / `swe_tickers` / `uk_tickers` |
+| RFC-005 | `backfill_sma.py` → `us_metrics` / `swe_metrics` / `uk_metrics` |
 | RFC-006 | `DevConfig`, `get_config()` |
 | RFC-007 | Workflow structure, tarball + `.env` SCP, `pipenv install --deploy` |
 | RFC-009 | WIF auth; IAP SSH/SCP |
@@ -181,12 +183,12 @@ Fatal script errors fail the workflow before verification; verification catches 
 
 ## Acceptance criteria
 
-- [x] Workflow triggers on push to `dev` only (plus manual `workflow_dispatch`)
+- [x] Workflow triggers via manual `workflow_dispatch` only (not on push to `dev`)
 - [x] Creates ephemeral VM named `data-fetcher-dev`
 - [x] Deploys code via tarball and writes `.env` with `APP_ENV=dev`
 - [x] Applies country schema via `apply_migrations.sh` (fresh-safe)
 - [x] Runs `seed_tickers.py` and `backfill_sma.py` on the dev VM
-- [x] Verification job reports data quality summary against `us_*` / `swe_*`
+- [x] Verification job reports data quality summary against `us_*` / `swe_*` / `uk_*`
 - [x] Deletes VM in a final job even when earlier jobs fail
 - [x] Uses WIF/OIDC — no `GCP_SA_KEY` (RFC-009)
 - [x] Does not touch Production VM or prod `DATABASE_URL`
@@ -208,4 +210,3 @@ Fatal script errors fail the workflow before verification; verification catches 
 
 - **Verification thresholds:** what counts as failure — any failed batch, or &lt; N tickers with metrics?
 - **Separate deploy SA for dev** vs. extend production deploy SA IAM?
-- **Push to `dev` vs. PR to `dev`:** PRD says push; should PRs run a dry-run without VM create?

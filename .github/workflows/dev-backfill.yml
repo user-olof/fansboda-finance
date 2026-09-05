@@ -2,8 +2,6 @@ name: Dev Backfill
 
 
 on:
-  push:
-    branches: [dev]
   workflow_dispatch:
 
 permissions:

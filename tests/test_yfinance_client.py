@@ -68,6 +68,7 @@ def test_resolve_watchlist_fields_uses_single_yfinance_lookup() -> None:
         "sectorKey": "technology",
         "industryKey": "consumer-electronics",
         "market": "us_market",
+        "fullExchangeName": "NasdaqGS",
     }
 
     with patch("yfinance_client.yf.Ticker", return_value=mock_ticker) as mock_ctor:
@@ -76,6 +77,7 @@ def test_resolve_watchlist_fields_uses_single_yfinance_lookup() -> None:
             "technology",
             "consumer-electronics",
             "us_market",
+            "NasdaqGS",
         )
 
     mock_ctor.assert_called_once_with("AAPL")
@@ -95,6 +97,7 @@ def test_resolve_watchlist_fields_infers_us_market_when_missing(caplog) -> None:
             "technology",
             "software",
             "us_market",
+            None,
         )
 
     assert "No listing market found for UNKNOWN; inferring us_market" in caplog.text
@@ -114,9 +117,50 @@ def test_resolve_watchlist_fields_infers_se_market_for_st_suffix(caplog) -> None
             "industrials",
             "machinery",
             "se_market",
+            None,
         )
 
     assert "No listing market found for AAA.ST; inferring se_market" in caplog.text
+
+
+def test_resolve_watchlist_fields_infers_uk_market_for_l_suffix(caplog) -> None:
+    mock_ticker = MagicMock()
+    mock_ticker.info = {
+        "longName": "Vodafone Group",
+        "sectorKey": "communication-services",
+        "industryKey": "telecom",
+        "fullExchangeName": "LSE",
+    }
+
+    with patch("yfinance_client.yf.Ticker", return_value=mock_ticker):
+        assert resolve_watchlist_fields("VOD.L") == (
+            "Vodafone Group",
+            "communication-services",
+            "telecom",
+            "uk_market",
+            "LSE",
+        )
+
+    assert "No listing market found for VOD.L; inferring uk_market" in caplog.text
+
+
+def test_resolve_watchlist_fields_exchange_name_none_when_missing() -> None:
+    mock_ticker = MagicMock()
+    mock_ticker.info = {
+        "longName": "Apple Inc.",
+        "sectorKey": "technology",
+        "industryKey": "consumer-electronics",
+        "market": "us_market",
+    }
+
+    with patch("yfinance_client.yf.Ticker", return_value=mock_ticker):
+        assert resolve_watchlist_fields("AAPL") == (
+            "Apple Inc.",
+            "technology",
+            "consumer-electronics",
+            "us_market",
+            None,
+        )
 
 
 def test_resolve_currency_uses_yfinance_info() -> None:

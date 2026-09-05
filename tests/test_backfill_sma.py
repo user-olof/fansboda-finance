@@ -1,6 +1,6 @@
 from datetime import date
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
@@ -13,6 +13,8 @@ from backfill_sma import (
     week_index_series,
 )
 from config import BaseConfig
+from db.country import CountrySet
+from db.metrics import INSERT_METRICS_SQL, load_existing_metric_keys
 from fetch_sma import compute_raw_ratios, upsert_market_for_trading_dates
 from models import MetricRow, TickerEntry
 
@@ -310,3 +312,102 @@ def test_main_returns_failure_when_nothing_generated() -> None:
                             return_value=[],
                         ):
                             assert main() == 1
+
+
+def test_load_existing_metric_keys_queries_uk_metrics() -> None:
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = [
+        ("VOD.L", date(2025, 1, 3)),
+    ]
+    mock_conn = MagicMock()
+    mock_conn.__enter__.return_value = mock_conn
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    with patch("db.metrics.psycopg2.connect", return_value=mock_conn):
+        keys = load_existing_metric_keys("postgresql://example", ["VOD.L"])
+
+    assert keys == {("VOD.L", date(2025, 1, 3))}
+    sql = mock_cursor.execute.call_args[0][0]
+    assert "FROM us_metrics" in sql
+    assert "FROM swe_metrics" in sql
+    assert "FROM uk_metrics" in sql
+    assert mock_cursor.execute.call_args[0][1] == (["VOD.L"], ["VOD.L"], ["VOD.L"])
+
+
+def test_insert_metrics_sql_targets_uk_metrics() -> None:
+    assert "INSERT INTO uk_metrics" in INSERT_METRICS_SQL[CountrySet.UK]
+    assert "ON CONFLICT (ticker, trading_date) DO NOTHING" in INSERT_METRICS_SQL[
+        CountrySet.UK
+    ]
+
+
+def test_main_backfill_routes_uk_ticker() -> None:
+    metric_row = MetricRow(
+        ticker="VOD.L",
+        company="Vodafone",
+        trading_date=date(2025, 6, 6),
+        sma_50=Decimal("1"),
+        sma_200=Decimal("2"),
+        current_price=Decimal("3"),
+        currency="GBP",
+        raw_50=Decimal("0.333333"),
+        raw_200=Decimal("0.666667"),
+    )
+
+    with patch("backfill_sma.get_config", return_value=_mock_config()):
+        with patch(
+            "backfill_sma.load_tickers_from_db",
+            return_value=[
+                TickerEntry(
+                    symbol="VOD.L",
+                    company="Vodafone",
+                    market="uk_market",
+                    exchange_name="LSE",
+                )
+            ],
+        ):
+            with patch("backfill_sma.load_existing_metric_keys", return_value=set()) as mock_existing:
+                with patch(
+                    "backfill_sma.load_currency_for_tickers",
+                    return_value={"VOD.L": "GBP"},
+                ):
+                    with patch("backfill_sma.download_batch"):
+                        with patch(
+                            "backfill_sma.metric_rows_from_backfill_batch",
+                            return_value=[metric_row],
+                        ):
+                            with patch(
+                                "backfill_sma.insert_metrics", return_value=1
+                            ) as mock_insert:
+                                with patch(
+                                    "backfill_sma.upsert_market_for_trading_dates"
+                                ) as mock_market:
+                                    assert main() == 0
+
+    mock_existing.assert_called_once_with("postgresql://example", ["VOD.L"])
+    mock_insert.assert_called_once_with("postgresql://example", [metric_row])
+    mock_market.assert_called_once_with(
+        "postgresql://example",
+        {date(2025, 6, 6)},
+    )
+    assert mock_insert.call_args[0][1][0].ticker == "VOD.L"
+    assert mock_insert.call_args[0][1][0].currency == "GBP"
+
+
+def test_upsert_market_for_trading_dates_includes_uk_market() -> None:
+    with patch(
+        "fetch_sma.load_raw_ratios_by_market_for_date",
+        return_value={
+            "uk_market": ([Decimal("0.7")], [Decimal("0.6")]),
+            "us_market": ([Decimal("0.6")], [Decimal("0.5")]),
+        },
+    ):
+        with patch("fetch_sma.upsert_market_stats") as mock_upsert:
+            upsert_market_for_trading_dates(
+                "postgresql://example",
+                {date(2025, 6, 6)},
+            )
+
+    assert mock_upsert.call_count == 2
+    markets = {call.args[1].market for call in mock_upsert.call_args_list}
+    assert markets == {"uk_market", "us_market"}

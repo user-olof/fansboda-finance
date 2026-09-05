@@ -10,7 +10,7 @@
 
 ## Summary
 
-Replace scattered `os.getenv` / `os.environ` reads with `config.py` exposing `DevConfig`, `ProdConfig`, and `get_config()`. Scripts read tunables from the config object at startup. Country-partitioned tables (PRD §6) do not add new env vars — retention still uses `metrics_retention_days` for all `us_*` / `swe_*` history tables.
+Replace scattered `os.getenv` / `os.environ` reads with `config.py` exposing `DevConfig`, `ProdConfig`, and `get_config()`. Scripts read tunables from the config object at startup. Country-partitioned tables (PRD §6) do not add new env vars — retention still uses `metrics_retention_days` for all `us_*` / `swe_*` / `uk_*` history and market-metrics tables.
 
 ## Requirements
 
@@ -34,7 +34,7 @@ Replace scattered `os.getenv` / `os.environ` reads with `config.py` exposing `De
 | `backfill_market.py` | Uses `get_config()` in `main()` |
 | `scripts/truncate_dev_tables.py` | Uses `require_non_production()` + `get_config()` |
 | `tests/test_config.py` | Defaults, overrides, `APP_ENV` selection |
-| `.github/workflows/deploy.yml` | Writes `APP_ENV=production` to VM `.env` |
+| `.github/workflows/deploy.yml` | Writes VM `.env` (`DATABASE_URL` + `APP_ENV`; temporary `APP_ENV=dev` while validating) |
 
 ### Settings (PRD §5.5)
 
@@ -47,7 +47,7 @@ Replace scattered `os.getenv` / `os.environ` reads with `config.py` exposing `De
 | `yf_max_retries` | 3 | 3 | `YF_MAX_RETRIES` | Max retries per batch |
 | `yf_retry_base_seconds` | 5.0 | 5.0 | `YF_RETRY_BASE_SECONDS` | Backoff base |
 | `yf_name_delay_seconds` | 0.25 | 0.25 | `YF_NAME_DELAY_SECONDS` | Seed/refresh name lookup delay |
-| `metrics_retention_days` | 365 | 365 | `METRICS_RETENTION_DAYS` | Purge cutoff for `us_metrics` / `swe_metrics` / `*_market_metrics` |
+| `metrics_retention_days` | 365 | 365 | `METRICS_RETENTION_DAYS` | Purge cutoff for `us_metrics` / `swe_metrics` / `uk_metrics` / matching `*_market_metrics` |
 | `backfill_history_days` | 730 | 730 | `BACKFILL_HISTORY_DAYS` | Backfill OHLCV window |
 | `backfill_window_weeks` | 52 | 52 | `BACKFILL_WINDOW_WEEKS` | Rolling SMA window length |
 | `backfill_batch_size` | 25 | 25 | `BACKFILL_BATCH_SIZE` | Backfill batch size |
@@ -75,8 +75,10 @@ def get_config() -> BaseConfig:
 
 ```
 DATABASE_URL=postgresql://...
-APP_ENV=production
+APP_ENV=dev
 ```
+
+**Temporary (VM validation):** deploy currently writes `APP_ENV=dev` (not production cutover). Switch to `APP_ENV=production` when ready (RFC-007). No UK-specific env vars are required — country routing is code/schema, not config.
 
 ## Acceptance criteria
 
@@ -84,10 +86,12 @@ APP_ENV=production
 - [x] `get_config()` selects by `APP_ENV`
 - [x] Job scripts (`fetch_sma`, `seed_tickers`, `refresh_tickers`, `backfill_sma`, `backfill_market`) use config object
 - [x] No direct `os.getenv` / `os.environ` in those scripts (env reads live in `config.py`)
-- [x] `metrics_retention_days` applies to country-partitioned history tables (RFC-004)
-- [x] Deploy writes `APP_ENV=production` on VM
+- [x] `metrics_retention_days` applies to all country-partitioned history/market tables (`us_*` / `swe_*` / `uk_*`; RFC-004)
+- [x] Deploy writes `APP_ENV` on VM (temporary `APP_ENV=dev` during validation; production cutover tracked in RFC-007)
 - [x] Unit tests in `tests/test_config.py`
+- [x] No UK-specific config attributes needed (country sets share the same tunables)
 
 ## Open questions
 
 - `ProdConfig` could use more conservative batch delays in production — PRD permits; currently identical defaults.
+- Production cutover: flip deploy `.env` from `APP_ENV=dev` to `APP_ENV=production` when VM validation is complete (RFC-007).

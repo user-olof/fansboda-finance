@@ -16,10 +16,13 @@ def test_truncate_sql_targets_expected_tables() -> None:
     assert "TRUNCATE TABLE" in sql
     assert "us_market_metrics" in sql
     assert "swe_market_metrics" in sql
+    assert "uk_market_metrics" in sql
     assert "us_metrics" in sql
     assert "swe_metrics" in sql
+    assert "uk_metrics" in sql
     assert "us_tickers" in sql
     assert "swe_tickers" in sql
+    assert "uk_tickers" in sql
     assert "RESTART IDENTITY" in sql
 
 

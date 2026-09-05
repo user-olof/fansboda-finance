@@ -1,3 +1,5 @@
+# CI tests (RFC-007). Suite covers three country sets (us_*/swe_*/uk_*)
+# and migration steps through 12–13 (exchange_name, UK tables).
 name: Test
 
 on:

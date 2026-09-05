@@ -1,48 +1,53 @@
 -- Verify fansboda-finance data model (RFC-001 country sets).
 -- Expect one row per check; empty result or ERROR means schema drift.
 
--- us_tickers / swe_tickers columns
+-- us_tickers / swe_tickers / uk_tickers columns
 SELECT table_name, column_name, data_type
 FROM information_schema.columns
 WHERE table_schema = 'public'
-  AND table_name IN ('us_tickers', 'swe_tickers')
+  AND table_name IN ('us_tickers', 'swe_tickers', 'uk_tickers')
 ORDER BY table_name, ordinal_position;
 
 SELECT table_name, column_name
 FROM information_schema.columns
 WHERE table_schema = 'public'
-  AND table_name IN ('us_tickers', 'swe_tickers')
-  AND column_name IN ('sector', 'industry', 'company', 'market', 'updated_at')
+  AND table_name IN ('us_tickers', 'swe_tickers', 'uk_tickers')
+  AND column_name IN (
+    'sector', 'industry', 'company', 'market', 'exchange_name', 'updated_at'
+  )
 ORDER BY table_name, column_name;
--- expect 10 rows (5 columns × 2 tables)
+-- expect 18 rows (6 columns × 3 tables)
 
--- us_metrics / swe_metrics columns and numeric precision
+-- us_metrics / swe_metrics / uk_metrics columns and numeric precision
 SELECT table_name, column_name, data_type, numeric_precision, numeric_scale
 FROM information_schema.columns
 WHERE table_schema = 'public'
-  AND table_name IN ('us_metrics', 'swe_metrics')
+  AND table_name IN ('us_metrics', 'swe_metrics', 'uk_metrics')
 ORDER BY table_name, ordinal_position;
 
 SELECT table_name, column_name
 FROM information_schema.columns
 WHERE table_schema = 'public'
-  AND table_name IN ('us_metrics', 'swe_metrics')
+  AND table_name IN ('us_metrics', 'swe_metrics', 'uk_metrics')
   AND column_name IN ('currency', 'company', 'raw_50', 'raw_200')
 ORDER BY table_name, column_name;
--- expect 8 rows
+-- expect 12 rows
 
--- us_market_metrics / swe_market_metrics
+-- us_market_metrics / swe_market_metrics / uk_market_metrics
 SELECT table_name, column_name, data_type, numeric_precision, numeric_scale
 FROM information_schema.columns
 WHERE table_schema = 'public'
-  AND table_name IN ('us_market_metrics', 'swe_market_metrics')
+  AND table_name IN (
+    'us_market_metrics', 'swe_market_metrics', 'uk_market_metrics'
+  )
 ORDER BY table_name, ordinal_position;
 
 SELECT c.conrelid::regclass AS table_name, c.conname
 FROM pg_constraint c
 WHERE c.conrelid IN (
     'public.us_market_metrics'::regclass,
-    'public.swe_market_metrics'::regclass
+    'public.swe_market_metrics'::regclass,
+    'public.uk_market_metrics'::regclass
   )
   AND c.contype = 'p'
 ORDER BY 1;
@@ -52,7 +57,8 @@ SELECT c.conrelid::regclass AS table_name, c.conname
 FROM pg_constraint c
 WHERE c.conrelid IN (
     'public.us_metrics'::regclass,
-    'public.swe_metrics'::regclass
+    'public.swe_metrics'::regclass,
+    'public.uk_metrics'::regclass
   )
   AND c.contype = 'u'
   AND c.conname LIKE '%_ticker_trading_date_key'
@@ -63,7 +69,8 @@ SELECT c.conrelid::regclass AS table_name, c.conname, c.confdeltype
 FROM pg_constraint c
 WHERE c.conrelid IN (
     'public.us_metrics'::regclass,
-    'public.swe_metrics'::regclass
+    'public.swe_metrics'::regclass,
+    'public.uk_metrics'::regclass
   )
   AND c.contype = 'f'
 ORDER BY 1;
@@ -76,8 +83,10 @@ WHERE schemaname = 'public'
   AND indexname IN (
     'idx_us_metrics_trading_date',
     'idx_swe_metrics_trading_date',
+    'idx_uk_metrics_trading_date',
     'idx_us_market_metrics_trading_date',
-    'idx_swe_market_metrics_trading_date'
+    'idx_swe_market_metrics_trading_date',
+    'idx_uk_market_metrics_trading_date'
   )
 ORDER BY tablename, indexname;
 

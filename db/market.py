@@ -37,11 +37,25 @@ ON CONFLICT (market, trading_date) DO UPDATE SET
     raw_std_50 = EXCLUDED.raw_std_50,
     raw_std_200 = EXCLUDED.raw_std_200
 """,
+    CountrySet.UK: """
+INSERT INTO uk_market_metrics (
+    market, trading_date, updated_at,
+    raw_mean_50, raw_mean_200, raw_std_50, raw_std_200
+)
+VALUES (%s, %s, %s, %s, %s, %s, %s)
+ON CONFLICT (market, trading_date) DO UPDATE SET
+    updated_at = EXCLUDED.updated_at,
+    raw_mean_50 = EXCLUDED.raw_mean_50,
+    raw_mean_200 = EXCLUDED.raw_mean_200,
+    raw_std_50 = EXCLUDED.raw_std_50,
+    raw_std_200 = EXCLUDED.raw_std_200
+""",
 }
 
 DELETE_STALE_MARKET_SQL = (
     "DELETE FROM us_market_metrics WHERE trading_date < %s",
     "DELETE FROM swe_market_metrics WHERE trading_date < %s",
+    "DELETE FROM uk_market_metrics WHERE trading_date < %s",
 )
 
 
@@ -70,7 +84,7 @@ def upsert_market_stats(database_url: str, row: MarketRow) -> int:
 
 
 def purge_stale_market(database_url: str, retention_days: int) -> int:
-    """Delete stale rows from ``us_market_metrics`` and ``swe_market_metrics`` (RFC-004)."""
+    """Delete stale rows from country ``*_market_metrics`` tables (RFC-004)."""
     cutoff = retention_cutoff(retention_days)
     deleted = 0
     with psycopg2.connect(database_url) as conn:

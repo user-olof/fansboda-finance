@@ -33,6 +33,7 @@ def test_load_distinct_trading_dates_returns_sorted_dates() -> None:
     assert "SELECT DISTINCT trading_date" in sql
     assert "FROM us_metrics" in sql
     assert "FROM swe_metrics" in sql
+    assert "FROM uk_metrics" in sql
 
 
 def test_upsert_market_for_trading_dates_loads_ratios_and_upserts() -> None:

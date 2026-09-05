@@ -78,12 +78,14 @@ def test_verify_database_passes_without_market_rows() -> None:
 
 
 def test_query_database_targets_country_tables() -> None:
-    """RFC-009 / RFC-001: verification SQL must use us_* / swe_* (not legacy)."""
+    """RFC-009 / RFC-001: verification SQL must use us_*/swe_*/uk_* (not legacy)."""
     content = VERIFY_SCRIPT.read_text(encoding="utf-8")
     assert "FROM us_tickers" in content
     assert "FROM swe_tickers" in content
+    assert "FROM uk_tickers" in content
     assert "FROM us_metrics" in content
     assert "FROM swe_metrics" in content
+    assert "FROM uk_metrics" in content
     assert "FROM tickers" not in content
     assert "FROM metrics" not in content
     assert query_database.__doc__ is not None

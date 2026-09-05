@@ -16,9 +16,9 @@ __all__ = [
 def purge_stale_data(database_url: str, retention_days: int) -> tuple[int, int]:
     """Delete stale rows from all country history and aggregate tables.
 
-    Purges ``us_metrics``, ``swe_metrics``, ``us_market_metrics``, and
-    ``swe_market_metrics`` where ``trading_date`` is older than the retention
-    window (UTC cutoff).
+    Purges ``us_metrics``, ``swe_metrics``, ``uk_metrics``, ``us_market_metrics``,
+    ``swe_market_metrics``, and ``uk_market_metrics`` where ``trading_date`` is
+    older than the retention window (UTC cutoff).
 
     Returns ``(metrics_deleted, market_metrics_deleted)``.
     """

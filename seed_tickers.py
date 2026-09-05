@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ad-hoc script to seed us_tickers / swe_tickers from a symbol file (RFC-002)."""
+"""Ad-hoc script to seed country tickers tables from a symbol file (RFC-002)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 from config import DEFAULT_YF_NAME_DELAY_SECONDS, get_config
 from db.country import infer_listing_market
-from db.tickers import upsert_tickers
+from db.tickers import TickerUpsertRow, upsert_tickers
 from symbols import load_tickers
 from yfinance_client import resolve_watchlist_fields
 
@@ -27,22 +27,28 @@ def resolve_and_upsert_symbols(
     *,
     name_delay: float = DEFAULT_YF_NAME_DELAY_SECONDS,
 ) -> int:
-    """Resolve yfinance metadata and upsert into us_tickers / swe_tickers."""
-    rows: list[tuple[str, str | None, str | None, str | None, str | None]] = []
+    """Resolve yfinance metadata and upsert into country tickers tables."""
+    rows: list[TickerUpsertRow] = []
 
     for i, symbol in enumerate(symbols):
         if i > 0:
             time.sleep(name_delay)
         try:
-            company, sector, industry, market = resolve_watchlist_fields(symbol)
-            rows.append((symbol, company, sector, industry, market))
+            company, sector, industry, market, exchange_name = (
+                resolve_watchlist_fields(symbol)
+            )
+            rows.append(
+                (symbol, company, sector, industry, market, exchange_name)
+            )
             logger.info(
-                "Resolved %s: company=%s sector=%s industry=%s market=%s",
+                "Resolved %s: company=%s sector=%s industry=%s market=%s "
+                "exchange_name=%s",
                 symbol,
                 company,
                 sector,
                 industry,
                 market,
+                exchange_name,
             )
         except Exception:
             logger.exception("Failed to resolve metadata for %s", symbol)
@@ -53,11 +59,11 @@ def resolve_and_upsert_symbols(
                     None,
                     None,
                     infer_listing_market(symbol=symbol),
+                    None,
                 )
             )
 
     return upsert_tickers(database_url, rows)
-
 
 def seed_tickers_from_file(
     database_url: str,

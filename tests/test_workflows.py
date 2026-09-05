@@ -116,11 +116,13 @@ def test_deploy_workflow_uses_iap_tunnel_for_ssh_and_scp() -> None:
     assert remote_commands == 4
 
 
-def test_dev_backfill_workflow_runs_on_dev_push_only() -> None:
+def test_dev_backfill_workflow_is_manual_only() -> None:
+    """PRD §8.1: run only via workflow_dispatch — not on push to dev."""
     content = DEV_BACKFILL_YML.read_text(encoding="utf-8")
-    assert "branches: [dev]" in content
+    assert "workflow_dispatch:" in content
+    assert "branches: [dev]" not in content
     assert "environment: DEV" in content
-    assert "branches: [main]" not in content
+    assert "on:\n  push:" not in content
 
 
 def test_dev_backfill_workflow_creates_ephemeral_vm() -> None:

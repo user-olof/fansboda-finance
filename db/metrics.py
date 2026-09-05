@@ -29,11 +29,20 @@ INSERT INTO swe_metrics (
 VALUES %s
 ON CONFLICT (ticker, trading_date) DO NOTHING
 """,
+    CountrySet.UK: """
+INSERT INTO uk_metrics (
+    ticker, company, trading_date, updated_at,
+    currency, sma_50, sma_200, current_price, raw_50, raw_200
+)
+VALUES %s
+ON CONFLICT (ticker, trading_date) DO NOTHING
+""",
 }
 
 MAX_TRADING_DATE_SQL = {
     CountrySet.US: "SELECT MAX(trading_date) FROM us_metrics",
     CountrySet.SWE: "SELECT MAX(trading_date) FROM swe_metrics",
+    CountrySet.UK: "SELECT MAX(trading_date) FROM uk_metrics",
 }
 
 FRESH_TICKERS_SQL = {
@@ -57,17 +66,30 @@ FROM (
 ) lt
 WHERE lt.latest_trading_date = (SELECT MAX(trading_date) FROM swe_metrics)
 """,
+    CountrySet.UK: """
+SELECT lt.ticker
+FROM (
+    SELECT ticker, MAX(trading_date) AS latest_trading_date
+    FROM uk_metrics
+    WHERE ticker = ANY(%s)
+    GROUP BY ticker
+) lt
+WHERE lt.latest_trading_date = (SELECT MAX(trading_date) FROM uk_metrics)
+""",
 }
 
 EXISTING_METRICS_SQL = """
 SELECT ticker, trading_date FROM us_metrics WHERE ticker = ANY(%s)
 UNION ALL
 SELECT ticker, trading_date FROM swe_metrics WHERE ticker = ANY(%s)
+UNION ALL
+SELECT ticker, trading_date FROM uk_metrics WHERE ticker = ANY(%s)
 """
 
 DELETE_STALE_SQL = (
     "DELETE FROM us_metrics WHERE trading_date < %s",
     "DELETE FROM swe_metrics WHERE trading_date < %s",
+    "DELETE FROM uk_metrics WHERE trading_date < %s",
 )
 
 LOAD_RAW_RATIOS_BY_MARKET_FOR_DATE_SQL = """
@@ -80,6 +102,11 @@ SELECT t.market, m.raw_50, m.raw_200
 FROM swe_metrics m
 JOIN swe_tickers t ON t.symbol = m.ticker
 WHERE m.trading_date = %s
+UNION ALL
+SELECT t.market, m.raw_50, m.raw_200
+FROM uk_metrics m
+JOIN uk_tickers t ON t.symbol = m.ticker
+WHERE m.trading_date = %s
 """
 
 LOAD_DISTINCT_TRADING_DATES_SQL = """
@@ -87,6 +114,8 @@ SELECT DISTINCT trading_date FROM (
     SELECT trading_date FROM us_metrics
     UNION ALL
     SELECT trading_date FROM swe_metrics
+    UNION ALL
+    SELECT trading_date FROM uk_metrics
 ) dates
 ORDER BY trading_date
 """
@@ -117,7 +146,7 @@ def _metric_values(rows: list[MetricRow], *, updated_at: datetime) -> list[tuple
 
 
 def insert_metrics(database_url: str, rows: list[MetricRow]) -> int:
-    """Append metric rows into us_metrics / swe_metrics. Returns rows inserted."""
+    """Append metric rows into country metrics tables. Returns rows inserted."""
     if not rows:
         return 0
 
@@ -150,7 +179,7 @@ def load_existing_metric_keys(
 
     with psycopg2.connect(database_url) as conn:
         with conn.cursor() as cur:
-            cur.execute(EXISTING_METRICS_SQL, (tickers, tickers))
+            cur.execute(EXISTING_METRICS_SQL, (tickers, tickers, tickers))
             return {(row[0], row[1]) for row in cur.fetchall()}
 
 
@@ -160,8 +189,8 @@ def filter_stale_tickers(
     """Return tickers needing fetch (PRD FR-2 / RFC-003).
 
     Freshness is evaluated **per country set**: a ticker is fresh when its latest
-    ``trading_date`` in ``us_metrics`` or ``swe_metrics`` equals that table's
-    ``MAX(trading_date)``. US and Swedish calendars are compared separately.
+    ``trading_date`` in the matching ``*_metrics`` table equals that table's
+    ``MAX(trading_date)``. US, Swedish, and UK calendars are compared separately.
     """
     by_country: dict[CountrySet, list[str]] = defaultdict(list)
     for ticker in tickers:
@@ -197,7 +226,7 @@ def load_raw_ratios_by_market_for_date(
         with conn.cursor() as cur:
             cur.execute(
                 LOAD_RAW_RATIOS_BY_MARKET_FOR_DATE_SQL,
-                (trading_date, trading_date),
+                (trading_date, trading_date, trading_date),
             )
             rows = cur.fetchall()
 
@@ -221,7 +250,7 @@ def load_distinct_trading_dates(database_url: str) -> list[date]:
 
 
 def purge_stale_metrics(database_url: str, retention_days: int) -> int:
-    """Delete stale rows from ``us_metrics`` and ``swe_metrics`` (RFC-004)."""
+    """Delete stale rows from country ``*_metrics`` tables (RFC-004)."""
     cutoff = retention_cutoff(retention_days)
     deleted = 0
     with psycopg2.connect(database_url) as conn:

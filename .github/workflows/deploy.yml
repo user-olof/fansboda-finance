@@ -1,3 +1,5 @@
+# Production deploy (RFC-007). Schema/migrations for us_*/swe_*/uk_*
+# (MIGRATIONS.md through steps 12–13) are applied manually — not here.
 name: Deploy
 
 on:

@@ -27,8 +27,9 @@ from models import MarketRow, MetricRow, TickerEntry
 def test_load_tickers_from_db() -> None:
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = [
-        ("AAA.ST", "Company A", "Industrials", "Machinery", "se_market"),
-        ("BBB.ST", None, None, None, None),
+        ("AAA.ST", "Company A", "Industrials", "Machinery", "se_market", "STO"),
+        ("BBB.ST", None, None, None, None, None),
+        ("VOD.L", "Vodafone", "communication-services", "telecom", "uk_market", "LSE"),
     ]
 
     mock_conn = MagicMock()
@@ -45,9 +46,22 @@ def test_load_tickers_from_db() -> None:
             sector="Industrials",
             industry="Machinery",
             market="se_market",
+            exchange_name="STO",
         ),
         TickerEntry(symbol="BBB.ST", company=None),
+        TickerEntry(
+            symbol="VOD.L",
+            company="Vodafone",
+            sector="communication-services",
+            industry="telecom",
+            market="uk_market",
+            exchange_name="LSE",
+        ),
     ]
+    sql = mock_cursor.execute.call_args[0][0]
+    assert "FROM uk_tickers" in sql
+    assert "FROM us_tickers" in sql
+    assert "FROM swe_tickers" in sql
 
 
 def test_load_tickers_from_db_raises_when_empty() -> None:
@@ -59,7 +73,10 @@ def test_load_tickers_from_db_raises_when_empty() -> None:
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
     with patch("db.tickers.psycopg2.connect", return_value=mock_conn):
-        with pytest.raises(ValueError, match="No tickers found in us_tickers or swe_tickers"):
+        with pytest.raises(
+            ValueError,
+            match="No tickers found in us_tickers, swe_tickers, or uk_tickers",
+        ):
             load_tickers_from_db("postgresql://example")
 
 
@@ -110,6 +127,7 @@ def test_load_raw_ratios_by_market_for_date_groups_by_tickers_market() -> None:
         ("us_market", Decimal("0.5"), Decimal("0.4")),
         ("us_market", Decimal("0.7"), None),
         ("se_market", Decimal("0.6"), Decimal("0.5")),
+        ("uk_market", Decimal("0.8"), Decimal("0.7")),
         (None, Decimal("0.9"), Decimal("0.8")),
     ]
     mock_conn = MagicMock()
@@ -125,10 +143,16 @@ def test_load_raw_ratios_by_market_for_date_groups_by_tickers_market() -> None:
     sql = mock_cursor.execute.call_args[0][0]
     assert "JOIN us_tickers t ON t.symbol = m.ticker" in sql
     assert "JOIN swe_tickers t ON t.symbol = m.ticker" in sql
-    assert mock_cursor.execute.call_args[0][1] == (date(2026, 6, 6), date(2026, 6, 6))
+    assert "JOIN uk_tickers t ON t.symbol = m.ticker" in sql
+    assert mock_cursor.execute.call_args[0][1] == (
+        date(2026, 6, 6),
+        date(2026, 6, 6),
+        date(2026, 6, 6),
+    )
     assert grouped == {
         "us_market": ([Decimal("0.5"), Decimal("0.7")], [Decimal("0.4")]),
         "se_market": ([Decimal("0.6")], [Decimal("0.5")]),
+        "uk_market": ([Decimal("0.8")], [Decimal("0.7")]),
         None: ([Decimal("0.9")], [Decimal("0.8")]),
     }
 
@@ -140,6 +164,7 @@ def test_upsert_market_for_trading_dates_upserts_per_listing_market() -> None:
         return_value={
             "us_market": ([Decimal("1"), Decimal("3")], [Decimal("0.5"), Decimal("0.7")]),
             "se_market": ([Decimal("0.6")], [Decimal("0.5")]),
+            "uk_market": ([Decimal("0.8")], [Decimal("0.7")]),
         },
     ):
         with patch("fetch_sma.upsert_market_stats") as mock_upsert:
@@ -148,17 +173,21 @@ def test_upsert_market_for_trading_dates_upserts_per_listing_market() -> None:
                 {trading_date},
             )
 
-    assert mock_upsert.call_count == 2
+    assert mock_upsert.call_count == 3
     rows_by_market = {
         call.args[1].market: call.args[1]
         for call in mock_upsert.call_args_list
     }
     us_row = rows_by_market["us_market"]
     se_row = rows_by_market["se_market"]
+    uk_row = rows_by_market["uk_market"]
     assert us_row.trading_date == trading_date
     assert us_row.raw_mean_50 == Decimal("2")
     assert se_row.market == "se_market"
     assert se_row.raw_mean_50 == Decimal("0.6")
+    assert uk_row.market == "uk_market"
+    assert uk_row.raw_mean_50 == Decimal("0.8")
+    assert uk_row.raw_mean_200 == Decimal("0.7")
 
 
 def test_upsert_market_for_trading_dates_skips_null_market_bucket() -> None:
@@ -377,6 +406,40 @@ def test_filter_stale_tickers_evaluates_us_and_swe_separately() -> None:
     assert any("FROM swe_metrics" in sql for sql in sqls)
 
 
+def test_filter_stale_tickers_evaluates_uk_separately() -> None:
+    """UK freshness uses uk_metrics max independently of US/SWE (RFC-003)."""
+    mock_cursor = MagicMock()
+    # First-seen order: US, SWE, UK.
+    mock_cursor.fetchone.side_effect = [
+        (date(2026, 6, 6),),  # us max
+        (date(2026, 6, 5),),  # swe max
+        (date(2026, 6, 4),),  # uk max
+    ]
+    mock_cursor.fetchall.side_effect = [
+        [("AAPL",)],  # fresh US
+        [("VOLV-B.ST",)],  # fresh SWE
+        [("VOD.L",)],  # fresh UK
+    ]
+
+    mock_conn = MagicMock()
+    mock_conn.__enter__.return_value = mock_conn
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    with patch("db.metrics.psycopg2.connect", return_value=mock_conn):
+        stale, skipped, max_date = filter_stale_tickers(
+            "postgresql://example",
+            ["AAPL", "MSFT", "VOLV-B.ST", "ERIC-B.ST", "VOD.L", "BP.L"],
+        )
+
+    assert stale == ["MSFT", "ERIC-B.ST", "BP.L"]
+    assert skipped == 3
+    assert max_date == date(2026, 6, 6)
+    sqls = [call.args[0] for call in mock_cursor.execute.call_args_list]
+    assert any("FROM us_metrics" in sql for sql in sqls)
+    assert any("FROM swe_metrics" in sql for sql in sqls)
+    assert any("FROM uk_metrics" in sql for sql in sqls)
+
+
 def test_insert_metrics_executes_values() -> None:
     mock_cursor = MagicMock()
     mock_cursor.rowcount = 1
@@ -413,3 +476,41 @@ def test_insert_metrics_executes_values() -> None:
     values = mock_execute.call_args[0][2]
     assert values[0][1] == "Alpha"  # company
     assert values[0][4] is None  # currency
+
+
+def test_insert_metrics_routes_uk_ticker_to_uk_metrics() -> None:
+    mock_cursor = MagicMock()
+    mock_cursor.rowcount = 1
+    mock_conn = MagicMock()
+    mock_conn.__enter__.return_value = mock_conn
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    rows = [
+        MetricRow(
+            ticker="VOD.L",
+            company="Vodafone",
+            trading_date=date(2026, 6, 6),
+            sma_50=Decimal("1"),
+            sma_200=Decimal("2"),
+            current_price=Decimal("3"),
+            currency="GBp",
+            raw_50=Decimal("0.333333"),
+            raw_200=Decimal("0.666667"),
+        )
+    ]
+
+    with patch("db.metrics.psycopg2.connect", return_value=mock_conn):
+        with patch("db.metrics.execute_values") as mock_execute:
+            inserted = insert_metrics("postgresql://example", rows)
+
+    mock_execute.assert_called_once()
+    assert inserted == 1
+    sql = mock_execute.call_args[0][1]
+    assert "INSERT INTO uk_metrics" in sql
+    assert "INSERT INTO us_metrics" not in sql
+    assert "INSERT INTO swe_metrics" not in sql
+    assert "ON CONFLICT (ticker, trading_date) DO NOTHING" in sql
+    values = mock_execute.call_args[0][2]
+    assert values[0][0] == "VOD.L"
+    assert values[0][1] == "Vodafone"
+    assert values[0][4] == "GBp"

@@ -66,6 +66,13 @@ def test_bootstrap_does_not_write_env_file() -> None:
     assert "deploy (push to main)" in content
 
 
+def test_bootstrap_mentions_uk_and_market_metrics_verify() -> None:
+    content = BOOTSTRAP_SH.read_text(encoding="utf-8")
+    assert "uk_metrics" in content
+    assert "uk_market_metrics" in content
+    assert "exchange_name" in content
+
+
 def test_bootstrap_does_not_install_app_deps() -> None:
     """OS packages may be preinstalled; Pipfile deps come from deploy (RFC-008)."""
     content = BOOTSTRAP_SH.read_text(encoding="utf-8")

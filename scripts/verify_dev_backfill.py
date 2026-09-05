@@ -81,6 +81,7 @@ def query_database(database_url: str) -> dict[str, int]:
                 SELECT
                   (SELECT COUNT(*) FROM us_tickers)
                   + (SELECT COUNT(*) FROM swe_tickers)
+                  + (SELECT COUNT(*) FROM uk_tickers)
                 """
             )
             ticker_count = int(cur.fetchone()[0])
@@ -90,6 +91,8 @@ def query_database(database_url: str) -> dict[str, int]:
                     SELECT ticker FROM us_metrics
                     UNION
                     SELECT ticker FROM swe_metrics
+                    UNION
+                    SELECT ticker FROM uk_metrics
                 ) t
                 """
             )
@@ -99,6 +102,7 @@ def query_database(database_url: str) -> dict[str, int]:
                 SELECT
                   (SELECT COUNT(*) FROM us_metrics)
                   + (SELECT COUNT(*) FROM swe_metrics)
+                  + (SELECT COUNT(*) FROM uk_metrics)
                 """
             )
             metrics_row_count = int(cur.fetchone()[0])

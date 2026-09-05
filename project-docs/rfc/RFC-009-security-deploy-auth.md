@@ -21,7 +21,7 @@ No credentials in repo. Production secrets in GitHub. Deploy authenticates via G
 - VM: attached service account via metadata server (no key on disk)
 - Cron runs as `fansboda`, not root
 - Parameterized SQL in `db/` modules; no SQL in job scripts
-- Country-set tables only (`us_*` / `swe_*`) — no legacy single-set SQL in live paths
+- Country-set tables only (`us_*` / `swe_*` / `uk_*`) — no legacy single-set SQL in live paths
 
 ## Implementation
 
@@ -97,7 +97,9 @@ Written by deploy with `set +x` (avoid log leakage), then `install -o fansboda -
 | File | Validates |
 |------|-----------|
 | `tests/test_workflows.py` | WIF, OIDC `id-token`, no JSON key, IAP on SSH/SCP |
-| `tests/test_sql_security.py` | No SQL in job scripts; `.gitignore` secrets; deploy `set +x` + `.env` mode 600 |
+| `tests/test_sql_security.py` | No SQL in job scripts; live `db/` paths use `us_*`/`swe_*`/`uk_*` only; `.gitignore` secrets; deploy `set +x` + `.env` mode 600 |
+| `tests/test_verify_dev_backfill.py` | Verify SQL queries country-set tables (incl. `uk_*`) |
+| `tests/test_truncate_dev_tables.py` | Truncate targets `us_*`/`swe_*`/`uk_*` only |
 
 ## Acceptance criteria
 
@@ -109,7 +111,7 @@ Written by deploy with `set +x` (avoid log leakage), then `install -o fansboda -
 - [x] Cron user is `fansboda`
 - [x] SQL centralized in `db/` with parameterized queries only
 - [x] Job scripts contain no SQL strings
-- [x] Live DB paths target country-set tables (`us_*` / `swe_*`)
+- [x] Live DB paths target country-set tables (`us_*` / `swe_*` / `uk_*`)
 
 ## Open questions
 

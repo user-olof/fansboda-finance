@@ -14,6 +14,7 @@ class TickerEntry:
     sector: str | None = None
     industry: str | None = None
     market: str | None = None
+    exchange_name: str | None = None
 
 
 @dataclass(frozen=True)

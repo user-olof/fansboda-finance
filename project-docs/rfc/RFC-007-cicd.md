@@ -42,7 +42,7 @@ Deploy ships a **tarball** from the runner checkout (not `git pull` on the VM), 
 4. `gcloud compute ssh --tunnel-through-iap` — unpack to `/opt/fansboda-finance`, ensure `fansboda` user + `pipenv`, run `PIPENV_VENV_IN_PROJECT=1 pipenv install --deploy` as `fansboda`
 5. Write `.env` with `DATABASE_URL` and `APP_ENV=dev` (temporary VM validation; cut over to `APP_ENV=production` later) via SCP + `install -o fansboda -g fansboda -m 600`
 
-Schema upgrades (including country-table step 11) are applied manually per [MIGRATIONS.md](../MIGRATIONS.md) — not in this workflow.
+Schema upgrades (including country-table steps 11–13) are applied manually per [MIGRATIONS.md](../MIGRATIONS.md) — not in this workflow.
 
 ### GitHub secrets
 
@@ -74,7 +74,7 @@ CHECK_CONTEXT="Test / test" ./scripts/configure-branch-protection.sh
 | File | Validates |
 |------|-----------|
 | `tests/test_workflows.py` | Triggers, WIF, IAP, tarball deploy, temporary `APP_ENV=dev`, no JSON key |
-| `tests/test_*.py` | Full suite run in CI |
+| `tests/test_*.py` | Full suite in CI — includes `us_*` / `swe_*` / `uk_*` schema, routing, and migration steps 12–13 |
 
 ## Acceptance criteria
 
@@ -91,4 +91,4 @@ CHECK_CONTEXT="Test / test" ./scripts/configure-branch-protection.sh
 ## Open questions
 
 - Branch protection is a one-time GitHub admin action — not enforced by repo code.
-- Dev backfill CI on push to `dev` is specified in [RFC-011](./RFC-011-dev-backfill-ci.md) (PRD §8.1).
+- Dev backfill CI is manual `workflow_dispatch` only — see [RFC-011](./RFC-011-dev-backfill-ci.md) (PRD §8.1).

@@ -10,7 +10,9 @@
 
 ## Summary
 
-After each weekly `fetch_sma.py` run, delete rows from `us_metrics` / `swe_metrics` and `us_market_metrics` / `swe_market_metrics` where `trading_date` is older than the configured retention window (default 365 days).
+After each weekly `fetch_sma.py` run, delete rows from `us_metrics` / `swe_metrics` / `uk_metrics` and `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics` where `trading_date` is older than the configured retention window (default 365 days).
+
+UK purge is included via the same `DELETE_STALE_*` lists in `db/metrics.py` and `db/market.py` (country sets from RFC-001); `db/retention.purge_stale_data` orchestrates all six tables.
 
 ## Requirements
 
@@ -19,7 +21,7 @@ After each weekly `fetch_sma.py` run, delete rows from `us_metrics` / `swe_metri
 | FR-7 | Purge rows with `trading_date` older than one year after inserts |
 | — | Purge runs even when all tickers are already fresh (nothing to fetch) |
 | — | Purge count included in job summary logs |
-| — | Parameterized SQL in `db/metrics.py` and `db/market.py` for all four country history/aggregate tables |
+| — | Parameterized SQL in `db/metrics.py` and `db/market.py` for all country history/aggregate tables |
 | — | Cutoff uses UTC date |
 | — | Purge aggregate rows with `trading_date` &lt; cutoff alongside metrics |
 
@@ -45,13 +47,15 @@ def purge_stale_market(database_url: str, retention_days: int) -> int
 def purge_stale_data(database_url: str, retention_days: int) -> tuple[int, int]
 ```
 
-SQL:
+SQL (all three country sets):
 
 ```sql
 DELETE FROM us_metrics WHERE trading_date < %s;
 DELETE FROM swe_metrics WHERE trading_date < %s;
+DELETE FROM uk_metrics WHERE trading_date < %s;
 DELETE FROM us_market_metrics WHERE trading_date < %s;
 DELETE FROM swe_market_metrics WHERE trading_date < %s;
+DELETE FROM uk_market_metrics WHERE trading_date < %s;
 ```
 
 Indexes on each `*_metrics.trading_date` and `*_market_metrics.trading_date` (RFC-001) support efficient deletes. Each `*_market_metrics` table uses `(market, trading_date)` as primary key.
@@ -64,13 +68,13 @@ Indexes on each `*_metrics.trading_date` and `*_market_metrics.trading_date` (RF
 
 ## Acceptance criteria
 
-- [x] `purge_stale_metrics` deletes from `us_metrics` and `swe_metrics` where `trading_date` &lt; today − retention_days (UTC)
-- [x] `purge_stale_market` deletes from `us_market_metrics` and `swe_market_metrics` with the same cutoff
+- [x] `purge_stale_metrics` deletes from `us_metrics`, `swe_metrics`, and `uk_metrics` where `trading_date` &lt; today − retention_days (UTC)
+- [x] `purge_stale_market` deletes from `us_market_metrics`, `swe_market_metrics`, and `uk_market_metrics` with the same cutoff
+- [x] `purge_stale_data` covers all six country history/aggregate tables
 - [x] Called at end of every `fetch_sma.py` run (including all-fresh path)
 - [x] Purge count logged in summary
 - [x] Parameterized SQL in `db/metrics.py` and `db/market.py`
-- [x] `purge_stale_data` in `db/retention.py` purges all four country tables
-- [x] Unit tests in `tests/test_retention.py`
+- [x] Unit tests in `tests/test_retention.py` assert UK purge alongside US/SWE
 
 ## Open questions
 
