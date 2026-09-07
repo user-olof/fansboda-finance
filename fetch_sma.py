@@ -18,6 +18,7 @@ from decimal import Decimal
 import pandas as pd
 
 from config import get_config
+from db.country import CountrySet, country_set_for
 from db.market import upsert_market_stats
 from db.metrics import (
     filter_stale_tickers,
@@ -214,8 +215,14 @@ def metric_rows_from_batch(
 def upsert_market_for_trading_dates(
     database_url: str,
     trading_dates: set[date],
+    *,
+    country: CountrySet | None = None,
 ) -> None:
-    """Recompute and upsert us_/swe_/uk_market_metrics for each date."""
+    """Recompute and upsert us_/swe_/uk_market_metrics for each date.
+
+    When ``country`` is set, only upsert aggregates for listing markets that
+    route to that country set (FR-18).
+    """
     for trading_date in sorted(trading_dates):
         by_market = load_raw_ratios_by_market_for_date(database_url, trading_date)
         if not by_market:
@@ -231,6 +238,9 @@ def upsert_market_for_trading_dates(
                     "Skipping market stats for tickers without listing market on %s",
                     trading_date,
                 )
+                continue
+
+            if country is not None and country_set_for(market=market) is not country:
                 continue
 
             market_row = aggregate_market_stats(

@@ -73,6 +73,14 @@ def test_bootstrap_mentions_uk_and_market_metrics_verify() -> None:
     assert "exchange_name" in content
 
 
+def test_bootstrap_mentions_per_country_seed_and_backfill() -> None:
+    content = BOOTSTRAP_SH.read_text(encoding="utf-8")
+    assert "seed_tickers.py --country us" in content
+    assert "backfill_sma.py --country us" in content
+    assert "or swe / uk" in content
+    assert "do not re-run a completed set" in content
+
+
 def test_bootstrap_does_not_install_app_deps() -> None:
     """OS packages may be preinstalled; Pipfile deps come from deploy (RFC-008)."""
     content = BOOTSTRAP_SH.read_text(encoding="utf-8")

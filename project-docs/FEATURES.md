@@ -9,13 +9,13 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 | Weekly SMA pipeline | Thursday job fetches prices, computes SMA-50/200, appends history |
 | Normalized SMA ratios | Per-ticker `raw_50` / `raw_200` (SMA ÷ price) for cross-sectional comparison |
 | Market aggregates | Per-`(market, trading_date)` mean and std of `raw_50` / `raw_200` in `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics` |
-| Historical backfill | Bootstrap of rolling weekly SMA snapshots (~2 years of data) |
-| Watchlist seeding | Load symbols from file, resolve company metadata, upsert into Postgres |
+| Historical backfill | Bootstrap of rolling weekly SMA snapshots (~2 years), **scoped per country set** (`--country us|swe|uk`) so adding a market later does not re-process others |
+| Watchlist seeding | Load symbols from file, resolve company metadata, upsert into Postgres (optional `--country`) |
 | Rolling retention | Keeps ~1 year of `*_metrics` and `*_market_metrics` history; older rows purged after each weekly run |
 | Centralized configuration | `DevConfig` / `ProdConfig` in `config.py`; selected via `APP_ENV` |
 | Zero-cost ops | **One** GCP `e2-micro` (Always Free) + Neon Postgres free tier |
 | CI/CD — production | `pytest` on PR to `main`; deploy to long-lived Production VM on push to `main` |
-| CI/CD — dev backfill | Ephemeral `data-fetcher-dev` via **manual** `workflow_dispatch` only; IAP SSH + seed/backfill/verify (PRD §8.1, [RFC-011](./rfc/RFC-011-dev-backfill-ci.md)) |
+| CI/CD — dev backfill | Ephemeral `data-fetcher-dev` via **manual** `workflow_dispatch` with required `country` input; IAP SSH + scoped seed/backfill/verify (PRD §8.1, [RFC-011](./rfc/RFC-011-dev-backfill-ci.md)) |
 
 ---
 
@@ -23,7 +23,7 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 
 - **Primary user:** project owner with personal watchlists of US, Swedish (`.ST`), and UK (`.L`) symbols.
 - **Primary use case:** query `us_metrics` / `swe_metrics` / `uk_metrics` to compare `current_price`, `sma_50`, and `sma_200` — including trends over retained history (golden-cross / death-cross style signals). Use `raw_50`, `raw_200`, and `*_market_metrics` to rank tickers relative to peers in the same country set on each `trading_date` (cross-sectional normalization for heatmaps; sector views via `*_tickers.sector`).
-- **Watchlist management:** add or remove symbols via SQL on `us_tickers` / `swe_tickers` / `uk_tickers` or by running `seed_tickers.py`.
+- **Watchlist management:** add or remove symbols via SQL on `us_tickers` / `swe_tickers` / `uk_tickers`, or by running `seed_tickers.py` (optionally `--country us|swe|uk` to touch only one set).
 
 ---
 
@@ -121,7 +121,14 @@ Manual / ad-hoc script for initial and ongoing watchlist setup (FR-9 – FR-11).
 | Resolve sector / industry / market | Fetches `sectorKey`, `industryKey`, and listing `market` from yfinance (same rate-limit pattern as company lookups) |
 | Resolve exchange name | Fetches `fullExchangeName` from yfinance into `exchange_name` |
 | Upsert | Insert or update `(symbol, company, sector, industry, market, exchange_name)` into `us_tickers`, `swe_tickers`, or `uk_tickers` on conflict by `symbol`; sets `updated_at` |
+| Country scope | Optional `--country us|swe|uk` — only resolve/upsert symbols that route to that set (PRD FR-11; used by per-country `dev-backfill`) |
 | Rate limiting | Configurable delay between yfinance lookups (default 0.25s) |
+
+```bash
+pipenv run python seed_tickers.py --country us
+```
+
+**Status:** Shipped — US/SWE/UK upsert routing, `exchange_name`, and optional `--country` filter ([RFC-002](./rfc/RFC-002-watchlist-seeding.md)).
 
 ### Watchlist metadata refresh (`refresh_tickers.py`)
 
@@ -134,24 +141,38 @@ Ad-hoc script to refresh watchlist metadata without a full re-seed (FR-12, RFC-0
 | Symbol selection | Default: union of tickers file and DB; `--from-db` for all DB symbols; `--symbols AAPL,MSFT.ST,VOD.L` for a subset |
 | Reuse | Same yfinance resolution and rate limiting as `seed_tickers.py` via `resolve_and_upsert_symbols` |
 
+```bash
+pipenv run python refresh_tickers.py --from-db
+pipenv run python refresh_tickers.py --symbols AAPL,MSFT.ST,VOD.L
+```
+
+**Status:** Shipped — US/SWE/UK load/upsert, `exchange_name` from `fullExchangeName`, `--from-db` / `--symbols` ([RFC-010](./rfc/RFC-010-metadata-refresh.md)). No `--country` on refresh (optional in RFC-010; not required by FR-12).
+
 ### Historical backfill (`backfill_sma.py`)
 
-Bootstrap script for SMA history — **not** part of the weekly cron (FR-13 – FR-17). Used manually or via the manual dev-backfill workflow (PRD §8.1).
+Bootstrap script for SMA history — **not** part of the weekly cron (FR-13 – FR-18). Used manually or via the manual per-country `dev-backfill` workflow (PRD §8.1).
 
 | Capability | Detail |
 |------------|--------|
 | Batch download | ~730 days daily OHLCV (default 25 symbols/batch) with retry and inter-batch delay |
 | Rolling 52-week windows | Week 0 anchored at oldest bar; windows 0–51, 1–52, 2–53, … |
 | SMA snapshots | One metric row per window at the last trading day in the window |
-| Raw ratios | Populates `raw_50` and `raw_200` on each inserted `us_metrics` / `swe_metrics` / `uk_metrics` row |
-| Market stats | Upserts `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics` rows for all backfilled `trading_date` values |
+| Raw ratios | Populates `raw_50` and `raw_200` on each inserted country `*_metrics` row |
+| Market stats | Upserts matching `*_market_metrics` rows for backfilled `trading_date` values |
 | Currency | Resolves listing `currency` per ticker (same rate-limit pattern as weekly fetch) |
-| Skip existing | Skips `(ticker, trading_date)` pairs already in `us_metrics` / `swe_metrics` / `uk_metrics` |
+| Skip existing | Skips `(ticker, trading_date)` pairs already in the matching country metrics table |
 | Resume-safe | `ON CONFLICT DO NOTHING`; interrupted runs can continue without duplicates |
+| Country scope | **Required** `--country us|swe|uk` — only that set's tickers are loaded and only that set's tables are written (FR-18). Adding UK later must not re-download or re-touch US/SWE. |
 
-**Fresh database:** `schema.sql` → `seed_tickers.py` → `backfill_sma.py`
+```bash
+pipenv run python backfill_sma.py --country us
+```
+
+**Fresh database:** `schema.sql` → `seed_tickers.py --country us` → `backfill_sma.py --country us` (repeat for `swe` / `uk` when those watchlists are ready). Prefer separate per-country runs over one all-country backfill.
 
 **Legacy database:** apply `migrate_*.sql` as needed; `migrate_metrics_history.sql` before backfill when upgrading from one-row-per-ticker layout.
+
+**Status:** Shipped — required `--country us|swe|uk` scopes watchlist load and writes ([RFC-005](./rfc/RFC-005-historical-backfill.md)).
 
 ---
 
@@ -221,7 +242,7 @@ Bootstrap installs an enhanced line that also sources `.env` and sets `PIPENV_VE
 | `test.yml` | Push / PR to `main` | `pipenv run pytest` (covers `us_*` / `swe_*` / `uk_*` schema and routing) |
 | `deploy.yml` | Push to `main` | SCP tarball to Production VM, `pipenv install --deploy`, write `.env` (temporary `APP_ENV=dev` while validating) |
 
-- GitHub **`production`** environment.
+- GitHub **`PROD`** environment.
 - Branch protection on `main` should require tests (`scripts/configure-branch-protection.sh`).
 - Deploy auth: **OIDC JWT + WIF** — no `GCP_SA_KEY`.
 - VM `.env`: `DATABASE_URL`, temporary `APP_ENV=dev` while validating (cut over to `APP_ENV=production` later); `chown fansboda:fansboda`, mode `600`.
@@ -229,19 +250,23 @@ Bootstrap installs an enhanced line that also sources `.env` and sets `PIPENV_VE
 
 **GitHub secrets:** `DATABASE_URL`, `GCP_PROJECT_ID`, `GCP_ZONE`, `GCP_INSTANCE_NAME`, `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_DEPLOY_SERVICE_ACCOUNT`.
 
-### CI/CD — dev backfill (PRD §8.1)
+### CI/CD — dev backfill (PRD §8.1, implemented)
 
-On **manual `workflow_dispatch`** (not on push to `dev`), `.github/workflows/dev-backfill.yml` runs a sequential pipeline:
+On **manual `workflow_dispatch`** (not on push to `dev`), `.github/workflows/dev-backfill.yml` runs a sequential pipeline for **one country set** per dispatch:
 
 | Step | Runs when | Action |
 |------|-----------|--------|
-| Spin up VM | Manual `workflow_dispatch` | Create ephemeral `data-fetcher-dev` in GCP (tag `dev-backfill`). Firewall must allow GitHub Actions SSH access — IAP ingress `tcp:22` from `35.235.240.0/20` scoped to that tag. Wait until SSH via `--tunnel-through-iap` succeeds. |
-| Deploy | Spin up VM succeeds | SCP tarball to dev VM, ensure `pipenv`, `pipenv install --deploy`; write `.env` with Neon **dev branch** URL; run `scripts/apply_migrations.sh` |
-| Data collection | Deploy succeeds | Run `seed_tickers.py` and `backfill_sma.py`; store results in the country-set tables on the dev database |
-| Verification | Data collection completes without error | Analyze log for missing data, failed downloads, etc.; run DB sanity checks on `us_*` / `swe_*` / `uk_*` (`scripts/verify_dev_backfill.py`) and print results |
+| Spin up VM | Manual `workflow_dispatch` with required `country` (`us` \| `swe` \| `uk`) | Create ephemeral `data-fetcher-dev` in GCP (tag `dev-backfill`). Firewall must allow GitHub Actions SSH access — IAP ingress `tcp:22` from `35.235.240.0/20` scoped to that tag. Wait until SSH via `--tunnel-through-iap` succeeds. |
+| Deploy | Spin up VM succeeds | SCP tarball to dev VM, ensure `pipenv`, `pipenv install --deploy`; write `.env` with Neon **dev branch** URL; run `scripts/apply_migrations.sh` (full schema; data collection remains scoped) |
+| Data collection | Deploy succeeds | Run `seed_tickers.py --country <country>` and `backfill_sma.py --country <country>` only for that set |
+| Verification | Data collection completes without error | Analyze log for missing data, failed downloads, etc.; run DB sanity checks for the **selected** country set (`scripts/verify_dev_backfill.py`) and print results |
 | Delete VM | Always after pipeline jobs finish | Tear down `data-fetcher-dev` (including on failure) |
 
 Uses GitHub **`DEV`** environment and `DATABASE_URL` secret (dev branch). Deploy SA needs `roles/iap.tunnelResourceAccessor` (and `compute.osLogin` when OS Login is enabled) for IAP SSH. Ephemeral VM avoids paying for two 24/7 e2-micro instances. See [RFC-011](./rfc/RFC-011-dev-backfill-ci.md).
+
+**Why scoped:** Adding UK (or SWE) later must not re-seed/re-backfill an already-complete US set in the shared Neon database — avoids re-touching production/dev history and wasting yfinance quota.
+
+**Status:** Shipped — required `country` input; scoped seed/backfill/verify ([RFC-011](./rfc/RFC-011-dev-backfill-ci.md)).
 
 ### Production first-time setup
 
@@ -250,8 +275,8 @@ Uses GitHub **`DEV`** environment and `DATABASE_URL` secret (dev branch). Deploy
 3. Run `scripts/bootstrap-vm.sh` on the VM (sudo) — user, UTC, logs, cron (code via deploy).
 4. Configure GitHub secrets + WIF (PRD §8).
 5. Push to `main` — deploy unpacks tarball, installs deps, writes `.env` on VM.
-6. `pipenv run python seed_tickers.py`.
-7. Optionally `pipenv run python backfill_sma.py` once.
+6. `pipenv run python seed_tickers.py --country us` (and `--country swe` / `--country uk` when those watchlists are ready).
+7. Optionally `pipenv run python backfill_sma.py --country us` (repeat per country set; do not re-run an already-complete set when adding another).
 8. Enable branch protection.
 
 ### Operational runbook
@@ -260,6 +285,9 @@ Uses GitHub **`DEV`** environment and `DATABASE_URL` secret (dev branch). Deploy
 |------|---------|
 | Check last cron run | `tail -100 /var/log/fansboda-finance/fetch_sma.log` |
 | Manual weekly run | `sudo -u fansboda bash -c 'cd /opt/fansboda-finance && set -a && . ./.env && set +a && PIPENV_VENV_IN_PROJECT=1 pipenv run python fetch_sma.py'` |
+| Seed one country set | `pipenv run python seed_tickers.py --country us` (or `swe` / `uk`) |
+| Backfill one country set | `pipenv run python backfill_sma.py --country us` (or `swe` / `uk`; do not re-run a completed set when adding another) |
+| Dev backfill CI | Manual `workflow_dispatch` on `dev-backfill.yml` with `country=us\|swe\|uk` |
 | Verify data | `SELECT * FROM us_metrics ORDER BY trading_date DESC, ticker LIMIT 10;` (same for `swe_metrics` / `uk_metrics`) |
 | Check retention | `SELECT MIN(trading_date), MAX(trading_date), COUNT(*) FROM us_metrics;` (same for `swe_metrics` / `uk_metrics`) |
 | Market snapshot | `SELECT * FROM us_market_metrics ORDER BY trading_date DESC, market LIMIT 10;` (same for `swe_market_metrics` / `uk_market_metrics`) |
@@ -286,7 +314,7 @@ Deploy SA IAM roles: `compute.instanceAdmin.v1`, `iam.serviceAccountUser`, `comp
 |----------|----------|
 | Cost | ~$0/month — one Always Free `e2-micro` + Neon free tier |
 | Reliability | Failed batches logged and counted; run continues with successful results |
-| Idempotency | Re-running weekly job or backfill does not create duplicate rows |
+| Idempotency | Re-running weekly job or a **scoped** backfill does not create duplicate rows; per-country runs avoid re-touching other sets |
 | Maintainability | Pure logic separated from I/O; unit tests with mocks for DB and yfinance |
 
 **Dependencies:** Python 3.11+; `yfinance`, `pandas`, `psycopg2-binary`, `python-dotenv` via Pipenv.

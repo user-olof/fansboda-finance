@@ -119,7 +119,8 @@ Listing **`market`** (yfinance bucket on `*_tickers`, e.g. `us_market`, `se_mark
 ```bash
 psql "$DATABASE_URL" -f schema.sql
 psql "$DATABASE_URL" -f scripts/verify_schema.sql
-pipenv run python seed_tickers.py
+pipenv run python seed_tickers.py --country us
+# then backfill_sma.py --country us; repeat --country swe|uk when ready
 ```
 
 Legacy upgrades: see [MIGRATIONS.md](../MIGRATIONS.md).

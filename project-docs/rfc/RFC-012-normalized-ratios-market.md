@@ -87,7 +87,7 @@ Consumers may derive z-scores, e.g. `(raw_50 - raw_mean_50) / raw_std_50`, or pe
 1. For each processed `trading_date`, load `raw_50` / `raw_200` from `*_metrics` joined to the matching tickers table, grouped by listing `market`.
 2. Compute mean/std per market bucket → `upsert_market_stats` into `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics`.
 
-**`backfill_sma.py`** — compute `raw_50` / `raw_200` on each generated row; after all batches, upsert `*_market_metrics` for every `trading_date` in the run.
+**`backfill_sma.py`** — compute `raw_50` / `raw_200` on each generated row; after all batches, upsert `*_market_metrics` for every `trading_date` in the run. With FR-18 (`--country`), `upsert_market_for_trading_dates(..., country=)` limits upserts to the selected country set so a UK backfill does not re-upsert US/SWE aggregates.
 
 **`backfill_market.py`** — one-off manual script to recompute all `*_market_metrics` rows from distinct `*_metrics.trading_date` values.
 
@@ -121,7 +121,7 @@ Purge `*_market_metrics` rows where `trading_date` is older than `metrics_retent
 
 ## Resolved decisions
 
-- **Backfill aggregate history:** `backfill_sma.py` upserts per run; `backfill_market.py` recomputes all dates from metrics.
+- **Backfill aggregate history:** `backfill_sma.py --country <set>` upserts aggregates for that set's dates; `backfill_market.py` can recompute all dates from metrics when needed.
 - **Std dev:** population std dev (`statistics.pstdev`) within each listing-`market` bucket.
 - **Per-sector market stats:** defer to consumer queries joining `*_tickers.sector` — not separate tables in v1.
 

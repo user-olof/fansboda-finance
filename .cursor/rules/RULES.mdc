@@ -13,8 +13,8 @@ Lightweight weekly pipeline: yfinance → SMA-50/200 + close → Neon Postgres. 
 
 - No UI, API, auth layer, portfolio tracking, or extra indicators (EMA, RSI, MACD).
 - No intraday/real-time data; weekly Thursday job only.
-- `backfill_sma.py` is a **one-off manual** bootstrap — never cron-schedule it on production.
-- Planned but not built: metadata refresh (`RFC-010`), dashboard, gap detection — see PRD §11.
+- `backfill_sma.py` is a **one-off manual** bootstrap — never cron-schedule it on production; run **per country set** (`--country us|swe|uk`, PRD FR-18).
+- Planned but not built: country-scoped `dev-backfill` input, dashboard, gap detection — see PRD §8.1 / §11.
 
 ## Repo layout
 
@@ -38,8 +38,8 @@ Dependencies: **Pipenv only** (`Pipfile` / `Pipfile.lock`). No `requirements.txt
 | Script | Role |
 |--------|------|
 | `fetch_sma.py` | Weekly job: load watchlist from DB, skip fresh tickers, batch-download ~300d OHLCV, compute SMAs, append metrics, purge rows older than retention |
-| `seed_tickers.py` | Load symbols from file, resolve names via yfinance, upsert `us_tickers` / `swe_tickers` / `uk_tickers` |
-| `backfill_sma.py` | One-off: ~730d history, rolling 52-week SMA windows, append to `us_metrics` / `swe_metrics` / `uk_metrics`, upsert `*_market_metrics` |
+| `seed_tickers.py` | Load symbols from file, resolve names via yfinance, upsert `us_tickers` / `swe_tickers` / `uk_tickers` (optional `--country us|swe|uk`) |
+| `backfill_sma.py` | One-off per country set (`--country us|swe|uk`): ~730d history, rolling 52-week SMA windows, append to matching `*_metrics`, upsert `*_market_metrics` |
 | `backfill_market.py` | One-off: recompute all `*_market_metrics` rows from stored `*_metrics` |
 
 | Utility | Role |
@@ -63,7 +63,7 @@ Reuse shared logic (`download_batch`, `compute_smas`, `metric_row_from_history`,
 - Retention: delete from `*_metrics` / `*_market_metrics` where `trading_date` < cutoff (default 365 days)
 - Schema changes go in `schema.sql` or `migrate_*.sql` — not ad-hoc in Python
 
-**Fresh DB:** `schema.sql` → `seed_tickers.py` → optional `backfill_sma.py`. **Legacy DB:** apply `migrate_*.sql` per `MIGRATIONS.md` (through step 13).
+**Fresh DB:** `schema.sql` → `seed_tickers.py --country us` → optional `backfill_sma.py --country us` (repeat `swe` / `uk` when ready). **Legacy DB:** apply `migrate_*.sql` per `MIGRATIONS.md` (through step 13).
 
 ## Configuration
 

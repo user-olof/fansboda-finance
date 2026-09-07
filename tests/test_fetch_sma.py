@@ -80,6 +80,27 @@ def test_load_tickers_from_db_raises_when_empty() -> None:
             load_tickers_from_db("postgresql://example")
 
 
+def test_load_tickers_from_db_scopes_to_country() -> None:
+    from db.country import CountrySet
+
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = [
+        ("VOD.L", "Vodafone", None, None, "uk_market", "LSE"),
+    ]
+    mock_conn = MagicMock()
+    mock_conn.__enter__.return_value = mock_conn
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    with patch("db.tickers.psycopg2.connect", return_value=mock_conn):
+        entries = load_tickers_from_db("postgresql://example", country=CountrySet.UK)
+
+    assert [e.symbol for e in entries] == ["VOD.L"]
+    sql = mock_cursor.execute.call_args[0][0]
+    assert "FROM uk_tickers" in sql
+    assert "FROM us_tickers" not in sql
+    assert "FROM swe_tickers" not in sql
+
+
 def test_compute_raw_ratios_divides_sma_by_price() -> None:
     raw_50, raw_200 = compute_raw_ratios(
         Decimal("100"),

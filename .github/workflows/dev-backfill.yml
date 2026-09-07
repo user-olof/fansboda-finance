@@ -3,6 +3,15 @@ name: Dev Backfill
 
 on:
   workflow_dispatch:
+    inputs:
+      country:
+        description: Country set to seed and backfill (us, swe, or uk)
+        required: true
+        type: choice
+        options:
+          - us
+          - swe
+          - uk
 
 permissions:
   contents: read
@@ -169,13 +178,14 @@ jobs:
         env:
           GCP_ZONE: ${{ secrets.GCP_ZONE }}
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          COUNTRY: ${{ inputs.country }}
         run: |
           gcloud compute ssh "$INSTANCE_NAME" \
             --zone="$GCP_ZONE" \
             --project="$GCP_PROJECT_ID" \
             --quiet \
             --tunnel-through-iap \
-            --command="sudo -u fansboda bash -c 'cd $APP_DIR && set -a && . ./.env && set +a && PIPENV_VENV_IN_PROJECT=1 pipenv run python seed_tickers.py && PIPENV_VENV_IN_PROJECT=1 pipenv run python backfill_sma.py'" \
+            --command="sudo -u fansboda bash -c 'cd $APP_DIR && set -a && . ./.env && set +a && PIPENV_VENV_IN_PROJECT=1 pipenv run python seed_tickers.py --country $COUNTRY && PIPENV_VENV_IN_PROJECT=1 pipenv run python backfill_sma.py --country $COUNTRY'" \
             2>&1 | tee collect-data.log
 
       - uses: actions/upload-artifact@v4
@@ -205,7 +215,7 @@ jobs:
       - name: Verify backfill log and dev database
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: python scripts/verify_dev_backfill.py collect-data.log
+        run: python scripts/verify_dev_backfill.py collect-data.log --country ${{ inputs.country }}
 
   delete-vm:
     needs: [spin-up-vm, deploy, collect-data, verify]

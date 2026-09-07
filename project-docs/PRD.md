@@ -113,7 +113,9 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
   `(symbol, company, sector, industry, market, exchange_name)` rows into
   `us_tickers`, `swe_tickers`, or `uk_tickers` on conflict by `symbol`
   (country chosen by listing market / symbol suffix — see §6). Resolve
-  `exchange_name` from yfinance `fullExchangeName`.
+  `exchange_name` from yfinance `fullExchangeName`. Support an optional
+  `--country us|swe|uk` filter so only symbols that route to that country set
+  are resolved and upserted (required for per-country `dev-backfill` — §8.1).
 - **FR-12 Ad-hoc metadata refresh:** `refresh_tickers.py` updates watchlist
   metadata on an ad-hoc basis — re-resolve `company`, `sector`, `industry`,
   listing `market`, and `exchange_name` (`fullExchangeName`) from yfinance and
@@ -146,11 +148,22 @@ Thursday schedule.
   already present in the matching country metrics table.
 - **FR-17 Observability:** Log per-batch generated, new, inserted, and
   skipped-existing counts plus a final summary.
+- **FR-18 Country-set scope:** Backfill must accept a required country-set
+  filter (`us` | `swe` | `uk`) so a run only loads tickers from that set's
+  `*_tickers` table and only writes that set's `*_metrics` /
+  `*_market_metrics`. Adding a new country later (e.g. UK) must not re-download
+  or re-touch an already-backfilled set (e.g. US) — even though inserts are
+  idempotent, a full multi-set run would still hit yfinance and upsert market
+  aggregates for the other sets.
 
-Run once after seeding `us_tickers` / `swe_tickers` / `uk_tickers` and applying
-`migrate_metrics_history.sql` (when upgrading a legacy DB):
+Default CLI (scoped example):
 
-`pipenv run python backfill_sma.py`
+`pipenv run python backfill_sma.py --country us`
+
+Run once per country set after seeding that set's tickers (and applying
+`migrate_metrics_history.sql` when upgrading a legacy DB). Prefer separate
+runs over one all-country backfill so production/dev history for an existing
+set is not re-processed when another set is added.
 
 ### 5.5 Configuration
 
@@ -283,15 +296,30 @@ of its rows in the matching metrics table.
 Triggered **only by manual `workflow_dispatch`** — not on push to `dev` (or any
 other branch).
 
+Each dispatch must target **exactly one** country set so markets can be
+bootstrapped independently (US today, UK later, etc.) without re-running
+backfill for sets that already have history.
+
+- **Inputs:** required `country` = `us` | `swe` | `uk` (maps to the matching
+  `*_tickers` / `*_metrics` / `*_market_metrics` set in §6).
 - **Spin up a VM:** Create ephemeral `data-fetcher-dev` in GCP; firewall must
   allow GitHub Actions SSH via IAP.
 - **Deploy:** On spin-up success, deploy code and write `.env` on the Dev VM;
-  apply schema / migrations against the Neon **dev** branch.
-- **Data collection:** On deploy success, run `seed_tickers.py` then
-  `backfill_sma.py` and store results in the Neon dev branch.
+  apply schema / migrations against the Neon **dev** branch (full schema still;
+  data collection is scoped).
+- **Data collection:** On deploy success, seed and backfill **only** the
+  selected country set (e.g. `seed_tickers.py --country uk` then
+  `backfill_sma.py --country uk`). Do not process other country sets in that
+  run.
 - **Verification:** On data collection success without a fatal error; analyze
-  missing data, failed downloads, etc., and print the result.
+  missing data, failed downloads, etc., for the selected country set, and print
+  the result.
 - **Delete VM:** Always tear down `data-fetcher-dev` (including on failure).
+
+**Rationale:** Country tables are isolated, but an unscoped seed/backfill still
+re-resolves and re-downloads every symbol in the tickers file. Scoping keeps a
+later UK (or SWE) bootstrap from polluting or re-touching production/dev US
+history and from burning yfinance quota on sets that are already complete.
 
 ### 8.2 Production  
 
@@ -388,8 +416,13 @@ Python 3.11+. Key libraries: `yfinance`, `pandas`, `psycopg2-binary`,
   `0 11 * * 4 cd /opt/fansboda-finance && pipenv run python fetch_sma.py >> /var/log/fansboda-finance/fetch_sma.log 2>&1`
 - First-time setup: run `schema.sql` in Neon, then `scripts/bootstrap-vm.sh` on
   the VM (as root/sudo). Existing databases upgrade via the `migrate_*.sql`
-  scripts. For historical SMA data, run `migrate_metrics_history.sql` in Neon,
-  then `pipenv run python backfill_sma.py` once (manual, not cron).
+  scripts. Seed **per country set** as needed (e.g.
+  `pipenv run python seed_tickers.py --country us`, and separately for `swe` /
+  `uk` when ready). For historical SMA data, run `migrate_metrics_history.sql`
+  in Neon when upgrading a legacy DB, then backfill **per country set** (manual,
+  not cron), e.g. `pipenv run python backfill_sma.py --country us` (and
+  separately for `swe` / `uk` when those watchlists are ready). Use the same
+  `--country` scope on the manual `dev-backfill` workflow (§8.1).
 - Verify data:
   `SELECT * FROM us_metrics ORDER BY trading_date DESC, ticker LIMIT 10;`
   (and the same against `swe_metrics` / `uk_metrics`)

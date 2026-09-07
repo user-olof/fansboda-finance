@@ -2,7 +2,12 @@ from unittest.mock import MagicMock, patch
 
 from db.country import CountrySet
 from db.tickers import UPSERT_TICKER_SQL, upsert_tickers
-from seed_tickers import resolve_and_upsert_symbols, seed_tickers_from_file
+from seed_tickers import (
+    build_parser,
+    filter_symbols_for_country,
+    resolve_and_upsert_symbols,
+    seed_tickers_from_file,
+)
 
 
 def test_upsert_tickers_routes_to_country_tables() -> None:
@@ -174,3 +179,84 @@ def test_seed_tickers_from_file_infers_market_on_resolve_failure(tmp_path) -> No
             ("VOD.L", None, None, None, "uk_market", None),
         ],
     )
+
+
+def test_filter_symbols_for_country() -> None:
+    symbols = ["AAPL", "AAA.ST", "VOD.L", "MSFT"]
+    assert filter_symbols_for_country(symbols, None) == symbols
+    assert filter_symbols_for_country(symbols, CountrySet.US) == ["AAPL", "MSFT"]
+    assert filter_symbols_for_country(symbols, CountrySet.SWE) == ["AAA.ST"]
+    assert filter_symbols_for_country(symbols, CountrySet.UK) == ["VOD.L"]
+
+
+def test_resolve_and_upsert_symbols_filters_by_country() -> None:
+    with patch(
+        "seed_tickers.resolve_watchlist_fields",
+        return_value=(
+            "Vodafone",
+            "communication-services",
+            "telecom",
+            "uk_market",
+            "LSE",
+        ),
+    ) as mock_resolve:
+        with patch("seed_tickers.time.sleep") as mock_sleep:
+            with patch("seed_tickers.upsert_tickers", return_value=1) as mock_upsert:
+                count = resolve_and_upsert_symbols(
+                    "postgresql://example",
+                    ["AAPL", "AAA.ST", "VOD.L"],
+                    name_delay=0.25,
+                    country=CountrySet.UK,
+                )
+
+    assert count == 1
+    mock_resolve.assert_called_once_with("VOD.L")
+    mock_sleep.assert_not_called()
+    mock_upsert.assert_called_once_with(
+        "postgresql://example",
+        [
+            (
+                "VOD.L",
+                "Vodafone",
+                "communication-services",
+                "telecom",
+                "uk_market",
+                "LSE",
+            ),
+        ],
+    )
+
+
+def test_seed_tickers_from_file_filters_by_country(tmp_path) -> None:
+    tickers_file = tmp_path / "tickers.txt"
+    tickers_file.write_text("aapl\naaa.st\nvod.l\n", encoding="utf-8")
+
+    with patch(
+        "seed_tickers.resolve_watchlist_fields",
+        return_value=("Alpha AB", "Industrials", "Machinery", "se_market", "STO"),
+    ) as mock_resolve:
+        with patch("seed_tickers.time.sleep"):
+            with patch("seed_tickers.upsert_tickers", return_value=1) as mock_upsert:
+                count = seed_tickers_from_file(
+                    "postgresql://example",
+                    tickers_file,
+                    country=CountrySet.SWE,
+                )
+
+    assert count == 1
+    mock_resolve.assert_called_once_with("AAA.ST")
+    mock_upsert.assert_called_once_with(
+        "postgresql://example",
+        [("AAA.ST", "Alpha AB", "Industrials", "Machinery", "se_market", "STO")],
+    )
+
+
+def test_build_parser_accepts_country_and_optional_file() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["--country", "uk", "all-tickers.txt"])
+    assert args.country == "uk"
+    assert args.tickers_file == "all-tickers.txt"
+
+    args_default = parser.parse_args([])
+    assert args_default.country is None
+    assert args_default.tickers_file is None

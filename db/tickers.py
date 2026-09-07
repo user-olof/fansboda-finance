@@ -7,7 +7,7 @@ from collections import defaultdict
 import psycopg2
 from psycopg2.extras import execute_values
 
-from db.country import CountrySet, country_set_for
+from db.country import TICKERS_TABLE, CountrySet, country_set_for
 from models import TickerEntry
 
 LOAD_TICKERS_SQL = """
@@ -18,6 +18,24 @@ UNION ALL
 SELECT symbol, company, sector, industry, market, exchange_name FROM uk_tickers
 ORDER BY symbol
 """
+
+LOAD_TICKERS_SQL_BY_COUNTRY = {
+    CountrySet.US: """
+SELECT symbol, company, sector, industry, market, exchange_name
+FROM us_tickers
+ORDER BY symbol
+""",
+    CountrySet.SWE: """
+SELECT symbol, company, sector, industry, market, exchange_name
+FROM swe_tickers
+ORDER BY symbol
+""",
+    CountrySet.UK: """
+SELECT symbol, company, sector, industry, market, exchange_name
+FROM uk_tickers
+ORDER BY symbol
+""",
+}
 
 UPSERT_TICKER_SQL = {
     CountrySet.US: """
@@ -60,14 +78,28 @@ TickerUpsertRow = tuple[
 ]
 
 
-def load_tickers_from_db(database_url: str) -> list[TickerEntry]:
-    """Load the watchlist from us_tickers, swe_tickers, and uk_tickers."""
+def load_tickers_from_db(
+    database_url: str,
+    *,
+    country: CountrySet | None = None,
+) -> list[TickerEntry]:
+    """Load the watchlist from country tickers tables.
+
+    When ``country`` is set, load only that set's ``*_tickers`` table (FR-18).
+    """
+    sql = (
+        LOAD_TICKERS_SQL_BY_COUNTRY[country]
+        if country is not None
+        else LOAD_TICKERS_SQL
+    )
     with psycopg2.connect(database_url) as conn:
         with conn.cursor() as cur:
-            cur.execute(LOAD_TICKERS_SQL)
+            cur.execute(sql)
             rows = cur.fetchall()
 
     if not rows:
+        if country is not None:
+            raise ValueError(f"No tickers found in {TICKERS_TABLE[country]}")
         raise ValueError("No tickers found in us_tickers, swe_tickers, or uk_tickers")
 
     return [

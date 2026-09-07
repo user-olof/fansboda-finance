@@ -169,12 +169,27 @@ def test_dev_backfill_workflow_writes_dev_env_and_runs_pipeline() -> None:
     content = DEV_BACKFILL_YML.read_text(encoding="utf-8")
     assert "DATABASE_URL_DEV" in content
     assert "APP_ENV=dev" in content
-    assert "seed_tickers.py" in content
-    assert "backfill_sma.py" in content
+    assert "seed_tickers.py --country" in content
+    assert "backfill_sma.py --country" in content
     assert "apply_migrations.sh" in content
     assert "GCP_INSTANCE_NAME" not in content
     assert "workflow_dispatch:" in content
     assert "workflow_dispatch:\n    branches:" not in content
+
+
+def test_dev_backfill_workflow_requires_country_input() -> None:
+    """PRD §8.1 / RFC-011: each dispatch targets exactly one country set."""
+    content = DEV_BACKFILL_YML.read_text(encoding="utf-8")
+    assert "inputs:" in content
+    assert "country:" in content
+    assert "required: true" in content
+    assert "type: choice" in content
+    assert "- us" in content
+    assert "- swe" in content
+    assert "- uk" in content
+    assert "seed_tickers.py --country $COUNTRY" in content
+    assert "backfill_sma.py --country $COUNTRY" in content
+    assert "verify_dev_backfill.py collect-data.log --country ${{ inputs.country }}" in content
 
 
 def test_dev_backfill_workflow_deletes_vm_on_failure() -> None:

@@ -56,6 +56,7 @@ pipenv run python refresh_tickers.py custom-tickers.txt   # optional file path
 ### Reuse from RFC-002
 
 - `resolve_and_upsert_symbols()` from `seed_tickers.py` → country-aware `upsert_tickers()`
+- Optional: when seed gains `--country`, refresh may reuse the same filter for subset runs (not required by PRD §8.1)
 - `load_tickers_from_db()` from `db/tickers.py` (all country tickers tables)
 - `get_config()` from `config.py`
 

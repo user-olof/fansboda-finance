@@ -68,13 +68,13 @@ Production deploy is **not** part of this RFC's implementation, but operations d
 ### First-time setup (PRD §10)
 
 1. Neon: run `schema.sql`; verify with `scripts/verify_schema.sql`.
-2. Existing databases: apply relevant `migrate_*.sql` through step 11 (and steps 12–13 when available) ([MIGRATIONS.md](../MIGRATIONS.md)).
+2. Existing databases: apply relevant `migrate_*.sql` through step 13 ([MIGRATIONS.md](../MIGRATIONS.md)).
 3. GCP: attach instance service account (no JSON key on disk) on the existing VM.
 4. VM: `sudo bash scripts/bootstrap-vm.sh` (user, UTC, logs, cron — not app code).
 5. GitHub: secrets + WIF + `production` environment (RFC-009).
 6. Push to `main` — deploy unpacks tarball, installs deps, writes `.env`.
-7. Seed: `pipenv run python seed_tickers.py`.
-8. Optional history: `migrate_metrics_history.sql` in Neon, then `pipenv run python backfill_sma.py` once (manual, not cron).
+7. Seed per country set as needed: `pipenv run python seed_tickers.py --country us` (and `--country swe` / `--country uk` when ready).
+8. Optional history: `migrate_metrics_history.sql` in Neon when upgrading a legacy DB, then backfill **per country set** (manual, not cron), e.g. `pipenv run python backfill_sma.py --country us`. Do not re-run an already-complete set when adding another.
 9. Branch protection: `./scripts/configure-branch-protection.sh` (RFC-007).
 
 ## Implementation
@@ -132,6 +132,8 @@ Separate from the **deploy** service account (RFC-009). The instance SA is the r
 |------|---------|
 | Check last cron run | `tail -100 /var/log/fansboda-finance/fetch_sma.log` |
 | Manual weekly run | `sudo -u fansboda bash -c 'cd /opt/fansboda-finance && set -a && . ./.env && set +a && PIPENV_VENV_IN_PROJECT=1 pipenv run python fetch_sma.py'` |
+| Seed one country set | `pipenv run python seed_tickers.py --country us` (or `swe` / `uk`) |
+| Backfill one country set | `pipenv run python backfill_sma.py --country us` (or `swe` / `uk`) |
 | Verify data | `SELECT * FROM us_metrics ORDER BY trading_date DESC, ticker LIMIT 10;` (same for `swe_metrics` / `uk_metrics`) |
 | Check retention span | `SELECT MIN(trading_date), MAX(trading_date), COUNT(*) FROM us_metrics;` (same for `swe_metrics` / `uk_metrics`) |
 | Market snapshot | `SELECT * FROM us_market_metrics ORDER BY trading_date DESC LIMIT 10;` (same for `swe_market_metrics` / `uk_market_metrics`) |
@@ -145,8 +147,8 @@ Separate from the **deploy** service account (RFC-009). The instance SA is the r
 [ ] VM: sudo bash scripts/bootstrap-vm.sh
 [ ] GitHub: secrets + WIF + production environment (RFC-009)
 [ ] Push to main: deploy writes .env (RFC-007)
-[ ] Seed: pipenv run python seed_tickers.py
-[ ] Optional: migrate_metrics_history.sql + backfill_sma.py (one-off)
+[ ] Seed: pipenv run python seed_tickers.py --country us  # repeat swe/uk when ready
+[ ] Optional: migrate_metrics_history.sql + backfill_sma.py --country us  # one-off per set
 [ ] GitHub: ./scripts/configure-branch-protection.sh
 [ ] Verify: SELECT * FROM us_metrics ORDER BY trading_date DESC LIMIT 10; (same for swe_metrics / uk_metrics)
 [ ] Market: SELECT * FROM us_market_metrics ORDER BY trading_date DESC LIMIT 10; (same for swe_market_metrics / uk_market_metrics)
@@ -174,4 +176,4 @@ Separate from the **deploy** service account (RFC-009). The instance SA is the r
 ## Open questions
 
 - **Log rotation** for `/var/log/fansboda-finance/` — not in PRD; defer.
-- **§8.1 dev pipeline** — covered by [RFC-011](./RFC-011-dev-backfill-ci.md).
+- **§8.1 dev pipeline** — covered by [RFC-011](./RFC-011-dev-backfill-ci.md) (required `country` input; one set per dispatch).

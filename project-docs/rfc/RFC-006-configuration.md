@@ -28,9 +28,9 @@ Replace scattered `os.getenv` / `os.environ` reads with `config.py` exposing `De
 |------|------|
 | `config.py` | `BaseConfig`, `DevConfig`, `ProdConfig`, `get_config()`, `get_app_env()`, `require_non_production()` |
 | `fetch_sma.py` | Uses `get_config()` in `main()` |
-| `seed_tickers.py` | Uses `get_config()` in `main()` |
+| `seed_tickers.py` | Uses `get_config()` in `main()`; optional CLI `--country` is orthogonal to config |
 | `refresh_tickers.py` | Uses `get_config()` in `main()` |
-| `backfill_sma.py` | Uses `get_config()` in `main()` |
+| `backfill_sma.py` | Uses `get_config()` in `main()`; required CLI `--country` is a CLI arg, not a config field |
 | `backfill_market.py` | Uses `get_config()` in `main()` |
 | `scripts/truncate_dev_tables.py` | Uses `require_non_production()` + `get_config()` |
 | `tests/test_config.py` | Defaults, overrides, `APP_ENV` selection |

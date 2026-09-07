@@ -12,24 +12,26 @@
 
 Ad-hoc script to load symbols from a text file, resolve company names and watchlist metadata (`sector`, `industry`, listing `market`, `exchange_name`) via yfinance, and upsert into `us_tickers`, `swe_tickers`, or `uk_tickers` (country chosen by listing market / symbol suffix — PRD §6).
 
+Optional `--country us|swe|uk` limits resolve/upsert to symbols that route to that set so `dev-backfill` (RFC-011) and manual bootstrap can seed one market without re-resolving the others.
+
 ## Requirements
 
 | ID | Requirement |
 |----|-------------|
 | FR-9 | Read symbols from file (one per line; `#` comments and blanks ignored); uppercase |
 | FR-10 | Resolve company name from yfinance (`longName`, fallback `shortName`); rate-limit delay between lookups |
-| FR-11 | Upsert `(symbol, company, sector, industry, market, exchange_name)` into `us_tickers`, `swe_tickers`, or `uk_tickers` on conflict by `symbol`; `sector` / `industry` from `sectorKey` / `industryKey`; listing `market` from yfinance; `exchange_name` from `fullExchangeName` |
+| FR-11 | Upsert `(symbol, company, sector, industry, market, exchange_name)` into `us_tickers`, `swe_tickers`, or `uk_tickers` on conflict by `symbol`; `sector` / `industry` from `sectorKey` / `industryKey`; listing `market` from yfinance; `exchange_name` from `fullExchangeName`; optional `--country us|swe|uk` to resolve/upsert only symbols that route to that set |
 
 ## Implementation
 
 ### Architecture
 
 ```
-tickers.txt  →  load_tickers()  →  resolve_watchlist_fields()  ─┐
-                      ↑                    (yfinance_client)     ┤→  upsert_tickers()
-                 symbols.py                                      ↑
-                                                            db/tickers.py
-                                              (us_tickers / swe_tickers / uk_tickers)
+tickers.txt  →  load_tickers()  →  [--country filter]  →  resolve_watchlist_fields()  ─┐
+                      ↑                                         (yfinance_client)     ┤→  upsert_tickers()
+                 symbols.py                                                           ↑
+                                                                                 db/tickers.py
+                                                                   (us_tickers / swe_tickers / uk_tickers)
 ```
 
 ### Files
@@ -52,10 +54,10 @@ tickers.txt  →  load_tickers()  →  resolve_watchlist_fields()  ─┐
 | `load_tickers(path)` | `symbols` | Parse symbol file |
 | `resolve_watchlist_fields(symbol)` | `yfinance_client` | Single yfinance lookup for company + sector + industry + listing `market` + `exchange_name` (`fullExchangeName`) |
 | `infer_listing_market(...)` | `db.country` | Fallback `se_market` / `uk_market` / `us_market` when yfinance omits `market` |
-| `resolve_and_upsert_symbols(...)` | `seed_tickers` | Rate-limited resolve loop + upsert |
+| `resolve_and_upsert_symbols(...)` | `seed_tickers` | Rate-limited resolve loop + upsert; optional `country` filter |
 | `upsert_tickers(url, rows)` | `db.tickers` | Parameterized upsert into `us_tickers` / `swe_tickers` / `uk_tickers` |
 | `seed_tickers_from_file(...)` | `seed_tickers` | Orchestration |
-| `main()` | `seed_tickers` | CLI entry point |
+| `main()` | `seed_tickers` | CLI entry point (optional `--country`, optional file path) |
 
 ### Country routing
 
@@ -72,9 +74,11 @@ When yfinance omits `market`, `infer_listing_market` fills `se_market` / `uk_mar
 ```bash
 pipenv run python seed_tickers.py
 pipenv run python seed_tickers.py all-tickers.txt
+pipenv run python seed_tickers.py --country us
+pipenv run python seed_tickers.py --country uk all-tickers.txt
 ```
 
-Optional CLI arg overrides default file; config provides `tickers_file` and `yf_name_delay_seconds`.
+Optional file path overrides default `tickers_file`. Optional `--country us|swe|uk` skips symbols that do not route to that set (PRD FR-11 / §8.1). Config provides `tickers_file` and `yf_name_delay_seconds`.
 
 ## Acceptance criteria
 
@@ -90,7 +94,17 @@ Optional CLI arg overrides default file; config provides `tickers_file` and `yf_
 - [x] SQL in `db/tickers.py` with parameterized queries
 - [x] Uses `get_config()` for database URL and tunables (RFC-006)
 - [x] Tests cover resolve, country routing (incl. UK), `exchange_name` persistence, upsert, and orchestration paths
+- [x] Optional CLI `--country us|swe|uk` — skip symbols that do not route to that set
+- [x] Tests cover filtered seed (e.g. `--country uk` ignores US/SWE symbols)
 
 ## Open questions
 
 - FR-12 (metadata refresh for existing DB symbols) is separate — see RFC-010.
+
+## Related RFCs
+
+| RFC | Relationship |
+|-----|--------------|
+| RFC-005 | Backfill follows seed; both take `--country` for per-set bootstrap |
+| RFC-011 | Dev-backfill invokes `seed_tickers.py --country <c>` |
+| RFC-010 | Refresh reuses `resolve_and_upsert_symbols` |

@@ -10,8 +10,16 @@ import sys
 
 import psycopg2
 
+COUNTRY_CHOICES = ("us", "swe", "uk")
+COUNTRY_TABLES = {
+    "us": ("us_tickers", "us_metrics"),
+    "swe": ("swe_tickers", "swe_metrics"),
+    "uk": ("uk_tickers", "uk_metrics"),
+}
+
 BACKFILL_SUMMARY_RE = re.compile(
-    r"Backfill summary: tickers=(\d+) generated=(\d+) inserted=(\d+) "
+    r"Backfill summary: (?:country=\w+ )?"
+    r"tickers=(\d+) generated=(\d+) inserted=(\d+) "
     r"skipped_existing=(\d+) market_trading_dates=(\d+) failed_batches=(\d+)"
 )
 SEED_SUMMARY_RE = re.compile(r"Seeded (\d+) ticker\(s\) from ")
@@ -72,39 +80,16 @@ def analyze_log(log_text: str) -> tuple[list[str], dict[str, int | None]]:
     return issues, fields
 
 
-def query_database(database_url: str) -> dict[str, int]:
-    """Return ticker and metrics counts from the country-set tables."""
+def query_database(database_url: str, country: str) -> dict[str, int]:
+    """Return ticker and metrics counts for the selected country set."""
+    tickers_table, metrics_table = COUNTRY_TABLES[country]
     with psycopg2.connect(database_url) as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT
-                  (SELECT COUNT(*) FROM us_tickers)
-                  + (SELECT COUNT(*) FROM swe_tickers)
-                  + (SELECT COUNT(*) FROM uk_tickers)
-                """
-            )
+            cur.execute(f"SELECT COUNT(*) FROM {tickers_table}")
             ticker_count = int(cur.fetchone()[0])
-            cur.execute(
-                """
-                SELECT COUNT(DISTINCT ticker) FROM (
-                    SELECT ticker FROM us_metrics
-                    UNION
-                    SELECT ticker FROM swe_metrics
-                    UNION
-                    SELECT ticker FROM uk_metrics
-                ) t
-                """
-            )
+            cur.execute(f"SELECT COUNT(DISTINCT ticker) FROM {metrics_table}")
             metrics_ticker_count = int(cur.fetchone()[0])
-            cur.execute(
-                """
-                SELECT
-                  (SELECT COUNT(*) FROM us_metrics)
-                  + (SELECT COUNT(*) FROM swe_metrics)
-                  + (SELECT COUNT(*) FROM uk_metrics)
-                """
-            )
+            cur.execute(f"SELECT COUNT(*) FROM {metrics_table}")
             metrics_row_count = int(cur.fetchone()[0])
 
     return {
@@ -115,16 +100,19 @@ def query_database(database_url: str) -> dict[str, int]:
 
 
 def verify_database(
-    database_url: str, *, expected_seed_count: int | None
+    database_url: str,
+    country: str,
+    *,
+    expected_seed_count: int | None,
 ) -> tuple[list[str], dict[str, int]]:
-    """Check dev branch has tickers and metrics after backfill."""
+    """Check selected country tables have tickers and metrics after backfill."""
     issues: list[str] = []
-    counts = query_database(database_url)
+    counts = query_database(database_url, country)
 
     if counts["ticker_count"] == 0:
-        issues.append("Database has no tickers")
+        issues.append(f"Database has no tickers in {COUNTRY_TABLES[country][0]}")
     if counts["metrics_row_count"] == 0:
-        issues.append("Database has no metrics rows")
+        issues.append(f"Database has no metrics rows in {COUNTRY_TABLES[country][1]}")
     if (
         counts["ticker_count"] > 0
         and counts["metrics_ticker_count"] < counts["ticker_count"]
@@ -142,12 +130,17 @@ def verify_database(
 
 
 def format_report(
+    country: str,
     log_fields: dict[str, int | None],
     db_counts: dict[str, int] | None,
     issues: list[str],
 ) -> str:
     """Build a human-readable verification summary for Actions logs."""
-    lines = ["Dev backfill verification summary", "--------------------------------"]
+    lines = [
+        "Dev backfill verification summary",
+        "--------------------------------",
+        f"Country: {country}",
+    ]
     if log_fields.get("seed_count") is not None:
         lines.append(f"Seeded tickers (log): {log_fields['seed_count']}")
     if "generated" in log_fields and log_fields["generated"] is not None:
@@ -182,6 +175,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Collect-data job log captured from SSH output",
     )
     parser.add_argument(
+        "--country",
+        choices=COUNTRY_CHOICES,
+        required=True,
+        help="Country set that was seeded/backfilled (us, swe, or uk)",
+    )
+    parser.add_argument(
         "--database-url",
         default=None,
         help="Neon dev branch URL (defaults to DATABASE_URL env)",
@@ -196,11 +195,13 @@ def main(argv: list[str] | None = None) -> int:
     database_url = args.database_url or os.environ.get("DATABASE_URL")
     if database_url:
         db_issues, db_counts = verify_database(
-            database_url, expected_seed_count=log_fields.get("seed_count")
+            database_url,
+            args.country,
+            expected_seed_count=log_fields.get("seed_count"),
         )
         issues.extend(db_issues)
 
-    report = format_report(log_fields, db_counts, issues)
+    report = format_report(args.country, log_fields, db_counts, issues)
     print(report)
 
     return 1 if issues else 0

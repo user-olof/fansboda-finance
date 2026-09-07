@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import logging
 import sys
 import time
@@ -11,6 +12,7 @@ from datetime import date, datetime, timedelta, timezone
 import pandas as pd
 
 from config import DEFAULT_BACKFILL_WINDOW_WEEKS, get_config
+from db.country import CountrySet
 from db.metrics import insert_metrics, load_existing_metric_keys
 from db.tickers import load_tickers_from_db
 from fetch_sma import (
@@ -157,7 +159,27 @@ def filter_new_rows(
     ]
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Backfill SMA history for one country set "
+            "(us_metrics / swe_metrics / uk_metrics)"
+        ),
+    )
+    parser.add_argument(
+        "--country",
+        choices=[c.value for c in CountrySet],
+        required=True,
+        help="Country set to backfill (us, swe, or uk)",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    country = CountrySet(args.country)
+
     try:
         config = get_config()
     except ValueError as exc:
@@ -174,7 +196,7 @@ def main() -> int:
     window_weeks = config.backfill_window_weeks
 
     try:
-        watchlist = load_tickers_from_db(database_url)
+        watchlist = load_tickers_from_db(database_url, country=country)
     except ValueError as exc:
         logger.error("%s", exc)
         return 1
@@ -194,7 +216,9 @@ def main() -> int:
     trading_dates: set[date] = set()
 
     logger.info(
-        "Backfill starting: tickers=%d batches=%d history_days=%d window_weeks=%d",
+        "Backfill starting: country=%s tickers=%d batches=%d "
+        "history_days=%d window_weeks=%d",
+        country.value,
         len(all_tickers),
         len(batches),
         history_days,
@@ -259,16 +283,22 @@ def main() -> int:
 
     if trading_dates:
         try:
-            upsert_market_for_trading_dates(database_url, trading_dates)
+            upsert_market_for_trading_dates(
+                database_url,
+                trading_dates,
+                country=country,
+            )
         except Exception:
             logger.exception(
-                "Failed to upsert us_/swe_/uk_market_metrics stats"
+                "Failed to upsert %s_market_metrics stats",
+                country.value,
             )
             return 1
 
     logger.info(
-        "Backfill summary: tickers=%d generated=%d inserted=%d "
+        "Backfill summary: country=%s tickers=%d generated=%d inserted=%d "
         "skipped_existing=%d market_trading_dates=%d failed_batches=%d",
+        country.value,
         len(all_tickers),
         total_generated,
         total_inserted,

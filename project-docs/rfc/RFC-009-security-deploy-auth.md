@@ -32,7 +32,7 @@ No credentials in repo. Production secrets in GitHub. Deploy authenticates via G
 | `.env` in `.gitignore` | Done |
 | `DATABASE_URL` as GitHub secret | Done |
 | Deploy via WIF in `deploy.yml` | Done |
-| Dev backfill via WIF in `dev-backfill.yml` | Done |
+| Dev backfill via WIF in `dev-backfill.yml` | Done (per-country `country` input is RFC-011 pending work, not auth) |
 | No `GCP_SA_KEY` / `credentials_json` in workflows | Done |
 | IAP tunnel on all production + dev-backfill SSH/SCP | Done |
 | `.env` written with `fansboda:fansboda` mode `600` | Done |

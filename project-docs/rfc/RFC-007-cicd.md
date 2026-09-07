@@ -91,4 +91,4 @@ CHECK_CONTEXT="Test / test" ./scripts/configure-branch-protection.sh
 ## Open questions
 
 - Branch protection is a one-time GitHub admin action — not enforced by repo code.
-- Dev backfill CI is manual `workflow_dispatch` only — see [RFC-011](./RFC-011-dev-backfill-ci.md) (PRD §8.1).
+- Dev backfill CI is manual `workflow_dispatch` with required `country` (`us` \| `swe` \| `uk`) — see [RFC-011](./RFC-011-dev-backfill-ci.md) (PRD §8.1).
