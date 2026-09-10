@@ -7,39 +7,34 @@ from collections import defaultdict
 import psycopg2
 from psycopg2.extras import execute_values
 
-from db.country import TICKERS_TABLE, CountrySet, country_set_for
+from db.country import (
+    TICKERS_TABLE,
+    CountrySet,
+    country_set_for,
+    sql_for_countries,
+    union_all_sql,
+)
 from models import TickerEntry
 
-LOAD_TICKERS_SQL = """
-SELECT symbol, company, sector, industry, market, exchange_name FROM us_tickers
-UNION ALL
-SELECT symbol, company, sector, industry, market, exchange_name FROM swe_tickers
-UNION ALL
-SELECT symbol, company, sector, industry, market, exchange_name FROM uk_tickers
+LOAD_TICKERS_SQL = (
+    union_all_sql(
+        "SELECT symbol, company, sector, industry, market, exchange_name "
+        "FROM {tickers}"
+    )
+    + "\nORDER BY symbol"
+)
+
+LOAD_TICKERS_SQL_BY_COUNTRY = sql_for_countries(
+    """
+SELECT symbol, company, sector, industry, market, exchange_name
+FROM {tickers}
 ORDER BY symbol
 """
+)
 
-LOAD_TICKERS_SQL_BY_COUNTRY = {
-    CountrySet.US: """
-SELECT symbol, company, sector, industry, market, exchange_name
-FROM us_tickers
-ORDER BY symbol
-""",
-    CountrySet.SWE: """
-SELECT symbol, company, sector, industry, market, exchange_name
-FROM swe_tickers
-ORDER BY symbol
-""",
-    CountrySet.UK: """
-SELECT symbol, company, sector, industry, market, exchange_name
-FROM uk_tickers
-ORDER BY symbol
-""",
-}
-
-UPSERT_TICKER_SQL = {
-    CountrySet.US: """
-INSERT INTO us_tickers (symbol, company, sector, industry, market, exchange_name)
+UPSERT_TICKER_SQL = sql_for_countries(
+    """
+INSERT INTO {tickers} (symbol, company, sector, industry, market, exchange_name)
 VALUES %s
 ON CONFLICT (symbol) DO UPDATE SET
     company = EXCLUDED.company,
@@ -48,30 +43,8 @@ ON CONFLICT (symbol) DO UPDATE SET
     market = EXCLUDED.market,
     exchange_name = EXCLUDED.exchange_name,
     updated_at = NOW();
-""",
-    CountrySet.SWE: """
-INSERT INTO swe_tickers (symbol, company, sector, industry, market, exchange_name)
-VALUES %s
-ON CONFLICT (symbol) DO UPDATE SET
-    company = EXCLUDED.company,
-    sector = EXCLUDED.sector,
-    industry = EXCLUDED.industry,
-    market = EXCLUDED.market,
-    exchange_name = EXCLUDED.exchange_name,
-    updated_at = NOW();
-""",
-    CountrySet.UK: """
-INSERT INTO uk_tickers (symbol, company, sector, industry, market, exchange_name)
-VALUES %s
-ON CONFLICT (symbol) DO UPDATE SET
-    company = EXCLUDED.company,
-    sector = EXCLUDED.sector,
-    industry = EXCLUDED.industry,
-    market = EXCLUDED.market,
-    exchange_name = EXCLUDED.exchange_name,
-    updated_at = NOW();
-""",
-}
+"""
+)
 
 TickerUpsertRow = tuple[
     str, str | None, str | None, str | None, str | None, str | None

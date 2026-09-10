@@ -9,109 +9,64 @@ from decimal import Decimal
 import psycopg2
 from psycopg2.extras import execute_values
 
-from db.country import CountrySet, country_set_for
+from db.country import (
+    METRICS_TABLE,
+    CountrySet,
+    country_set_for,
+    sql_for_countries,
+    union_all_sql,
+)
 from models import MetricRow
 
-INSERT_METRICS_SQL = {
-    CountrySet.US: """
-INSERT INTO us_metrics (
+INSERT_METRICS_SQL = sql_for_countries(
+    """
+INSERT INTO {metrics} (
     ticker, company, trading_date, updated_at,
     currency, sma_50, sma_200, current_price, momentum, z_score
 )
 VALUES %s
 ON CONFLICT (ticker, trading_date) DO NOTHING
-""",
-    CountrySet.SWE: """
-INSERT INTO swe_metrics (
-    ticker, company, trading_date, updated_at,
-    currency, sma_50, sma_200, current_price, momentum, z_score
-)
-VALUES %s
-ON CONFLICT (ticker, trading_date) DO NOTHING
-""",
-    CountrySet.UK: """
-INSERT INTO uk_metrics (
-    ticker, company, trading_date, updated_at,
-    currency, sma_50, sma_200, current_price, momentum, z_score
-)
-VALUES %s
-ON CONFLICT (ticker, trading_date) DO NOTHING
-""",
-}
-
-MAX_TRADING_DATE_SQL = {
-    CountrySet.US: "SELECT MAX(trading_date) FROM us_metrics",
-    CountrySet.SWE: "SELECT MAX(trading_date) FROM swe_metrics",
-    CountrySet.UK: "SELECT MAX(trading_date) FROM uk_metrics",
-}
-
-FRESH_TICKERS_SQL = {
-    CountrySet.US: """
-SELECT lt.ticker
-FROM (
-    SELECT ticker, MAX(trading_date) AS latest_trading_date
-    FROM us_metrics
-    WHERE ticker = ANY(%s)
-    GROUP BY ticker
-) lt
-WHERE lt.latest_trading_date = (SELECT MAX(trading_date) FROM us_metrics)
-""",
-    CountrySet.SWE: """
-SELECT lt.ticker
-FROM (
-    SELECT ticker, MAX(trading_date) AS latest_trading_date
-    FROM swe_metrics
-    WHERE ticker = ANY(%s)
-    GROUP BY ticker
-) lt
-WHERE lt.latest_trading_date = (SELECT MAX(trading_date) FROM swe_metrics)
-""",
-    CountrySet.UK: """
-SELECT lt.ticker
-FROM (
-    SELECT ticker, MAX(trading_date) AS latest_trading_date
-    FROM uk_metrics
-    WHERE ticker = ANY(%s)
-    GROUP BY ticker
-) lt
-WHERE lt.latest_trading_date = (SELECT MAX(trading_date) FROM uk_metrics)
-""",
-}
-
-EXISTING_METRICS_SQL = """
-SELECT ticker, trading_date FROM us_metrics WHERE ticker = ANY(%s)
-UNION ALL
-SELECT ticker, trading_date FROM swe_metrics WHERE ticker = ANY(%s)
-UNION ALL
-SELECT ticker, trading_date FROM uk_metrics WHERE ticker = ANY(%s)
 """
-
-DELETE_STALE_SQL = (
-    "DELETE FROM us_metrics WHERE trading_date < %s",
-    "DELETE FROM swe_metrics WHERE trading_date < %s",
-    "DELETE FROM uk_metrics WHERE trading_date < %s",
 )
 
-LOAD_MOMENTUM_BY_MARKET_FOR_DATE_SQL = """
-SELECT t.market, m.momentum
-FROM us_metrics m
-JOIN us_tickers t ON t.symbol = m.ticker
-WHERE m.trading_date = %s
-UNION ALL
-SELECT t.market, m.momentum
-FROM swe_metrics m
-JOIN swe_tickers t ON t.symbol = m.ticker
-WHERE m.trading_date = %s
-UNION ALL
-SELECT t.market, m.momentum
-FROM uk_metrics m
-JOIN uk_tickers t ON t.symbol = m.ticker
-WHERE m.trading_date = %s
+MAX_TRADING_DATE_SQL = sql_for_countries(
+    "SELECT MAX(trading_date) FROM {metrics}"
+)
+
+FRESH_TICKERS_SQL = sql_for_countries(
+    """
+SELECT lt.ticker
+FROM (
+    SELECT ticker, MAX(trading_date) AS latest_trading_date
+    FROM {metrics}
+    WHERE ticker = ANY(%s)
+    GROUP BY ticker
+) lt
+WHERE lt.latest_trading_date = (SELECT MAX(trading_date) FROM {metrics})
 """
+)
 
-UPDATE_Z_SCORES_SQL = {
-    CountrySet.US: """
-UPDATE us_metrics m
+EXISTING_METRICS_SQL = union_all_sql(
+    "SELECT ticker, trading_date FROM {metrics} WHERE ticker = ANY(%s)"
+)
+
+DELETE_STALE_SQL = tuple(
+    f"DELETE FROM {METRICS_TABLE[country]} WHERE trading_date < %s"
+    for country in CountrySet
+)
+
+LOAD_MOMENTUM_BY_MARKET_FOR_DATE_SQL = union_all_sql(
+    """
+SELECT t.market, m.momentum
+FROM {metrics} m
+JOIN {tickers} t ON t.symbol = m.ticker
+WHERE m.trading_date = %s
+""".strip()
+)
+
+UPDATE_Z_SCORES_SQL = sql_for_countries(
+    """
+UPDATE {metrics} m
 SET z_score = CASE
     WHEN m.momentum IS NULL
          OR mm.momentum_mean IS NULL
@@ -120,95 +75,35 @@ SET z_score = CASE
     THEN NULL
     ELSE (m.momentum - mm.momentum_mean) / mm.momentum_std
 END
-FROM us_tickers t
-JOIN us_market_metrics mm
+FROM {tickers} t
+JOIN {market_metrics} mm
   ON mm.market = t.market
 WHERE m.ticker = t.symbol
   AND mm.trading_date = m.trading_date
   AND m.trading_date = %s
-""",
-    CountrySet.SWE: """
-UPDATE swe_metrics m
-SET z_score = CASE
-    WHEN m.momentum IS NULL
-         OR mm.momentum_mean IS NULL
-         OR mm.momentum_std IS NULL
-         OR mm.momentum_std = 0
-    THEN NULL
-    ELSE (m.momentum - mm.momentum_mean) / mm.momentum_std
-END
-FROM swe_tickers t
-JOIN swe_market_metrics mm
-  ON mm.market = t.market
-WHERE m.ticker = t.symbol
-  AND mm.trading_date = m.trading_date
-  AND m.trading_date = %s
-""",
-    CountrySet.UK: """
-UPDATE uk_metrics m
-SET z_score = CASE
-    WHEN m.momentum IS NULL
-         OR mm.momentum_mean IS NULL
-         OR mm.momentum_std IS NULL
-         OR mm.momentum_std = 0
-    THEN NULL
-    ELSE (m.momentum - mm.momentum_mean) / mm.momentum_std
-END
-FROM uk_tickers t
-JOIN uk_market_metrics mm
-  ON mm.market = t.market
-WHERE m.ticker = t.symbol
-  AND mm.trading_date = m.trading_date
-  AND m.trading_date = %s
-""",
-}
+"""
+)
 
-LOAD_DISTINCT_TRADING_DATES_SQL = {
-    CountrySet.US: """
-SELECT DISTINCT trading_date FROM us_metrics ORDER BY trading_date
-""",
-    CountrySet.SWE: """
-SELECT DISTINCT trading_date FROM swe_metrics ORDER BY trading_date
-""",
-    CountrySet.UK: """
-SELECT DISTINCT trading_date FROM uk_metrics ORDER BY trading_date
-""",
-}
+LOAD_DISTINCT_TRADING_DATES_SQL = sql_for_countries(
+    "SELECT DISTINCT trading_date FROM {metrics} ORDER BY trading_date"
+)
 
-LOAD_ALL_DISTINCT_TRADING_DATES_SQL = """
+LOAD_ALL_DISTINCT_TRADING_DATES_SQL = f"""
 SELECT DISTINCT trading_date FROM (
-    SELECT trading_date FROM us_metrics
-    UNION ALL
-    SELECT trading_date FROM swe_metrics
-    UNION ALL
-    SELECT trading_date FROM uk_metrics
+{union_all_sql("SELECT trading_date FROM {metrics}")}
 ) dates
 ORDER BY trading_date
 """
 
-RECOMPUTE_MOMENTUM_SQL = {
-    CountrySet.US: """
-UPDATE us_metrics
+RECOMPUTE_MOMENTUM_SQL = sql_for_countries(
+    """
+UPDATE {metrics}
 SET momentum = CASE
     WHEN sma_50 IS NULL OR sma_200 IS NULL OR sma_200 = 0 THEN NULL
     ELSE sma_50 / sma_200
 END
-""",
-    CountrySet.SWE: """
-UPDATE swe_metrics
-SET momentum = CASE
-    WHEN sma_50 IS NULL OR sma_200 IS NULL OR sma_200 = 0 THEN NULL
-    ELSE sma_50 / sma_200
-END
-""",
-    CountrySet.UK: """
-UPDATE uk_metrics
-SET momentum = CASE
-    WHEN sma_50 IS NULL OR sma_200 IS NULL OR sma_200 = 0 THEN NULL
-    ELSE sma_50 / sma_200
-END
-""",
-}
+"""
+)
 
 
 def retention_cutoff(retention_days: int, *, today: date | None = None) -> date:

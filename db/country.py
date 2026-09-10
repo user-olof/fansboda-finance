@@ -50,3 +50,30 @@ MARKET_METRICS_TABLE = {
     CountrySet.SWE: "swe_market_metrics",
     CountrySet.UK: "uk_market_metrics",
 }
+
+
+def _table_placeholders(country: CountrySet) -> dict[str, str]:
+    """Allowlisted table names for SQL templates (never user input)."""
+    return {
+        "tickers": TICKERS_TABLE[country],
+        "metrics": METRICS_TABLE[country],
+        "market_metrics": MARKET_METRICS_TABLE[country],
+    }
+
+
+def sql_for_countries(template: str) -> dict[CountrySet, str]:
+    """Format ``template`` once per country set.
+
+    Placeholders: ``{tickers}``, ``{metrics}``, ``{market_metrics}``.
+    """
+    return {
+        country: template.format(**_table_placeholders(country))
+        for country in CountrySet
+    }
+
+
+def union_all_sql(fragment: str) -> str:
+    """Join a per-country SQL fragment with ``UNION ALL``."""
+    return "\nUNION ALL\n".join(
+        fragment.format(**_table_placeholders(country)) for country in CountrySet
+    )

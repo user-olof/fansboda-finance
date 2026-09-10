@@ -6,13 +6,18 @@ from datetime import datetime, timezone
 
 import psycopg2
 
-from db.country import CountrySet, country_set_for
+from db.country import (
+    MARKET_METRICS_TABLE,
+    CountrySet,
+    country_set_for,
+    sql_for_countries,
+)
 from db.metrics import retention_cutoff
 from models import MarketRow
 
-UPSERT_MARKET_SQL = {
-    CountrySet.US: """
-INSERT INTO us_market_metrics (
+UPSERT_MARKET_SQL = sql_for_countries(
+    """
+INSERT INTO {market_metrics} (
     market, trading_date, updated_at,
     momentum_mean, momentum_std
 )
@@ -21,35 +26,12 @@ ON CONFLICT (market, trading_date) DO UPDATE SET
     updated_at = EXCLUDED.updated_at,
     momentum_mean = EXCLUDED.momentum_mean,
     momentum_std = EXCLUDED.momentum_std
-""",
-    CountrySet.SWE: """
-INSERT INTO swe_market_metrics (
-    market, trading_date, updated_at,
-    momentum_mean, momentum_std
+"""
 )
-VALUES (%s, %s, %s, %s, %s)
-ON CONFLICT (market, trading_date) DO UPDATE SET
-    updated_at = EXCLUDED.updated_at,
-    momentum_mean = EXCLUDED.momentum_mean,
-    momentum_std = EXCLUDED.momentum_std
-""",
-    CountrySet.UK: """
-INSERT INTO uk_market_metrics (
-    market, trading_date, updated_at,
-    momentum_mean, momentum_std
-)
-VALUES (%s, %s, %s, %s, %s)
-ON CONFLICT (market, trading_date) DO UPDATE SET
-    updated_at = EXCLUDED.updated_at,
-    momentum_mean = EXCLUDED.momentum_mean,
-    momentum_std = EXCLUDED.momentum_std
-""",
-}
 
-DELETE_STALE_MARKET_SQL = (
-    "DELETE FROM us_market_metrics WHERE trading_date < %s",
-    "DELETE FROM swe_market_metrics WHERE trading_date < %s",
-    "DELETE FROM uk_market_metrics WHERE trading_date < %s",
+DELETE_STALE_MARKET_SQL = tuple(
+    f"DELETE FROM {MARKET_METRICS_TABLE[country]} WHERE trading_date < %s"
+    for country in CountrySet
 )
 
 

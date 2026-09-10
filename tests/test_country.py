@@ -1,6 +1,12 @@
 """Tests for db.country routing helpers (RFC-001 / RFC-002)."""
 
-from db.country import CountrySet, country_set_for, infer_listing_market
+from db.country import (
+    CountrySet,
+    country_set_for,
+    infer_listing_market,
+    sql_for_countries,
+    union_all_sql,
+)
 
 
 def test_country_set_for_se_market() -> None:
@@ -36,3 +42,18 @@ def test_infer_listing_market_from_symbol() -> None:
     assert infer_listing_market(symbol="VOLV-B.ST") == "se_market"
     assert infer_listing_market(symbol="VOD.L") == "uk_market"
     assert infer_listing_market(symbol="AAPL") == "us_market"
+
+
+def test_sql_for_countries_formats_allowlisted_tables() -> None:
+    sql = sql_for_countries("SELECT 1 FROM {metrics} JOIN {tickers}")
+    assert "FROM us_metrics JOIN us_tickers" in sql[CountrySet.US]
+    assert "FROM swe_metrics JOIN swe_tickers" in sql[CountrySet.SWE]
+    assert "FROM uk_metrics JOIN uk_tickers" in sql[CountrySet.UK]
+
+
+def test_union_all_sql_joins_country_fragments() -> None:
+    sql = union_all_sql("SELECT trading_date FROM {metrics}")
+    assert "UNION ALL" in sql
+    assert "FROM us_metrics" in sql
+    assert "FROM swe_metrics" in sql
+    assert "FROM uk_market_metrics" not in sql
