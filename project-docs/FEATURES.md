@@ -7,8 +7,8 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 | Area | Description |
 |------|-------------|
 | Weekly SMA pipeline | Thursday job fetches prices, computes SMA-50/200, appends history |
-| Normalized SMA ratios | Per-ticker `raw_50` / `raw_200` (SMA ÷ price) for cross-sectional comparison |
-| Market aggregates | Per-`(market, trading_date)` mean and std of `raw_50` / `raw_200` in `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics` |
+| Normalized momentum | Per-ticker `momentum` (`sma_50 / sma_200`) and cross-sectional `z_score` |
+| Market aggregates | Per-`(market, trading_date)` `momentum_mean` / `momentum_std` in `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics` |
 | Historical backfill | Bootstrap of rolling weekly SMA snapshots (~2 years), **scoped per country set** (`--country us|swe|uk`) so adding a market later does not re-process others |
 | Watchlist seeding | Load symbols from file, resolve company metadata, upsert into Postgres (optional `--country`) |
 | Rolling retention | Keeps ~1 year of `*_metrics` and `*_market_metrics` history; older rows purged after each weekly run |
@@ -22,7 +22,7 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 ## Users & use cases
 
 - **Primary user:** project owner with personal watchlists of US, Swedish (`.ST`), and UK (`.L`) symbols.
-- **Primary use case:** query `us_metrics` / `swe_metrics` / `uk_metrics` to compare `current_price`, `sma_50`, and `sma_200` — including trends over retained history (golden-cross / death-cross style signals). Use `raw_50`, `raw_200`, and `*_market_metrics` to rank tickers relative to peers in the same country set on each `trading_date` (cross-sectional normalization for heatmaps; sector views via `*_tickers.sector`).
+- **Primary use case:** query `us_metrics` / `swe_metrics` / `uk_metrics` to compare `current_price`, `sma_50`, and `sma_200` — including trends over retained history (golden-cross / death-cross style signals). Use **`momentum`**, **`z_score`**, and `*_market_metrics` (`momentum_mean` / `momentum_std`) to rank tickers relative to peers in the same country set on each `trading_date` (cross-sectional normalization for heatmaps; sector views via `*_tickers.sector`).
 - **Watchlist management:** add or remove symbols via SQL on `us_tickers` / `swe_tickers` / `uk_tickers`, or by running `seed_tickers.py` (optionally `--country us|swe|uk` to touch only one set).
 
 ---
@@ -33,7 +33,9 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 
 - Stored in **`us_metrics`** (US), **`swe_metrics`** (Swedish), and **`uk_metrics`** (UK).
 - Stores **SMA-50**, **SMA-200**, and **current price** (adjusted close) per ticker.
-- Stores **raw_50** and **raw_200** — SMA divided by `current_price` (`sma_50 / current_price`, `sma_200 / current_price`) for scale-free comparison across tickers.
+- Stores **momentum** — `sma_50 / sma_200` — and **z_score** —
+  `(momentum - momentum_mean) / momentum_std` using that date's matching
+  `*_market_metrics` aggregates — for cross-sectional comparison across tickers.
 - Stores **currency** from yfinance at fetch/backfill time. **Company** is copied from the matching `*_tickers` table into each snapshot.
 - **Sector**, **industry**, listing **market**, and **exchange_name** are watchlist-level fields on `*_tickers`, not duplicated per metric row.
 - One row per `(ticker, trading_date)` within each country set — each weekly run appends a new snapshot.
@@ -42,10 +44,12 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 ### Market aggregates
 
 - **`us_market_metrics` / `swe_market_metrics` / `uk_market_metrics`:** one row per `(market, trading_date)` with cross-sectional stats over tickers in that listing-market bucket on that date (PRD §6).
-- Aggregates `raw_50` / `raw_200` from the matching country `*_metrics` rows on that date.
-- **`raw_mean_50` / `raw_mean_200`:** mean of tickers' `raw_50` / `raw_200` in the bucket on the date.
-- **`raw_std_50` / `raw_std_200`:** standard deviation of tickers' `raw_50` / `raw_200` in the bucket on the date.
-- Supports unbiased heatmap coloring (e.g. z-scores or percentile ranks vs peers in the same country set) without raw SMA-distance bias.
+- Aggregates **`momentum`** from the matching country `*_metrics` rows on that date.
+- **`momentum_mean`:** mean of tickers' `momentum` in the bucket on the date.
+- **`momentum_std`:** standard deviation of tickers' `momentum` in the bucket on the date.
+- Supports unbiased heatmap coloring via stored `z_score` on each metrics row.
+
+**Status:** Implemented — see [RFC-012](./rfc/RFC-012-normalized-ratios-market.md).
 
 ### Watchlist
 
@@ -81,10 +85,10 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 | Table role | Key columns |
 |------------|-------------|
 | `*_tickers` | `symbol` (PK), `company`, `sector`, `industry`, `market`, `exchange_name`, `updated_at` |
-| `*_metrics` | `id` (PK), `ticker` (FK → matching `*_tickers.symbol`), `company`, `trading_date`, `updated_at`, `currency`, `sma_50`, `sma_200`, `current_price`, `raw_50`, `raw_200` |
-| `*_market_metrics` | `market`, `trading_date`, `updated_at`, `raw_mean_50`, `raw_mean_200`, `raw_std_50`, `raw_std_200` |
+| `*_metrics` | `id` (PK), `ticker` (FK → matching `*_tickers.symbol`), `company`, `trading_date`, `updated_at`, `currency`, `sma_50`, `sma_200`, `current_price`, `momentum`, `z_score` |
+| `*_market_metrics` | `market`, `trading_date`, `updated_at`, `momentum_mean`, `momentum_std` |
 
-`company` on each metrics row is copied from the matching tickers table at fetch time. `currency` is the listing currency code captured per snapshot. Listing `market` lives on the tickers tables and is also stored on `*_market_metrics`. `exchange_name` is the human-readable exchange from yfinance `fullExchangeName`. `raw_50` and `raw_200` are `sma_50 / current_price` and `sma_200 / current_price`. Price and ratio columns use `NUMERIC(18, 6)`. Unique on `*_metrics (ticker, trading_date)` and `*_market_metrics (market, trading_date)`.
+`company` on each metrics row is copied from the matching tickers table at fetch time. `currency` is the listing currency code captured per snapshot. Listing `market` lives on the tickers tables and is also stored on `*_market_metrics`. `exchange_name` is the human-readable exchange from yfinance `fullExchangeName`. **`momentum`** is `sma_50 / sma_200`; **`z_score`** is `(momentum - momentum_mean) / momentum_std` using that date's market aggregates. Price and derived columns use `NUMERIC(18, 6)`. Unique on `*_metrics (ticker, trading_date)` and `*_market_metrics (market, trading_date)`.
 
 DDL: `schema.sql` for new databases; `migrate_*.sql` for upgrades ([MIGRATIONS.md](./MIGRATIONS.md)).
 
@@ -103,8 +107,9 @@ Scheduled **Thursdays at 11:00 UTC** on the Production VM (FR-1 – FR-8).
 | Batch download | ~300 days OHLCV via yfinance (default 40 symbols/batch) |
 | Retry / backoff | Retries 429, rate limits, timeouts, connection errors, empty frames |
 | Compute SMAs | Requires ≥200 valid daily closes; captures latest close and `trading_date` |
-| Raw ratios | Computes `raw_50` and `raw_200` (`sma / current_price`) per ticker |
-| Market stats | Aggregates mean and std of `raw_50` / `raw_200` into `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics` per `(market, trading_date)` |
+| Momentum | Computes `momentum` = `sma_50 / sma_200` per ticker |
+| Market stats | Aggregates `momentum_mean` / `momentum_std` into `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics` per `(market, trading_date)` |
+| Z-score | Sets `z_score` = `(momentum - momentum_mean) / momentum_std` using that date's market aggregates |
 | yfinance metadata | Captures `currency` per snapshot; copies `company` from the matching `*_tickers` table |
 | Append metrics | Inserts new rows into `us_metrics` / `swe_metrics` / `uk_metrics` without overwriting history |
 | Retention purge | Deletes `*_metrics` and `*_market_metrics` rows older than configured retention (default 365 days) |
@@ -157,8 +162,8 @@ Bootstrap script for SMA history — **not** part of the weekly cron (FR-13 – 
 | Batch download | ~730 days daily OHLCV (default 25 symbols/batch) with retry and inter-batch delay |
 | Rolling 52-week windows | Week 0 anchored at oldest bar; windows 0–51, 1–52, 2–53, … |
 | SMA snapshots | One metric row per window at the last trading day in the window |
-| Raw ratios | Populates `raw_50` and `raw_200` on each inserted country `*_metrics` row |
-| Market stats | Upserts matching `*_market_metrics` rows for backfilled `trading_date` values |
+| Momentum / z-score | Populates `momentum` and `z_score` on each inserted country `*_metrics` row |
+| Market stats | Upserts matching `*_market_metrics` with `momentum_mean` / `momentum_std` for backfilled `trading_date` values |
 | Currency | Resolves listing `currency` per ticker (same rate-limit pattern as weekly fetch) |
 | Skip existing | Skips `(ticker, trading_date)` pairs already in the matching country metrics table |
 | Resume-safe | `ON CONFLICT DO NOTHING`; interrupted runs can continue without duplicates |

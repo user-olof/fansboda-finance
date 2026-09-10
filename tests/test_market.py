@@ -16,10 +16,8 @@ def test_upsert_market_stats_executes_upsert() -> None:
     row = MarketRow(
         market="us_market",
         trading_date=date(2026, 6, 6),
-        raw_mean_50=Decimal("0.95"),
-        raw_mean_200=Decimal("0.90"),
-        raw_std_50=Decimal("0.05"),
-        raw_std_200=Decimal("0.04"),
+        momentum_mean=Decimal("0.95"),
+        momentum_std=Decimal("0.05"),
     )
 
     with patch("db.market.psycopg2.connect", return_value=mock_conn):
@@ -28,11 +26,14 @@ def test_upsert_market_stats_executes_upsert() -> None:
     mock_cursor.execute.assert_called_once()
     sql = mock_cursor.execute.call_args[0][0]
     assert "INSERT INTO us_market_metrics" in sql
+    assert "momentum_mean" in sql
+    assert "momentum_std" in sql
     assert "ON CONFLICT (market, trading_date) DO UPDATE" in sql
     values = mock_cursor.execute.call_args[0][1]
     assert values[0] == "us_market"
     assert values[1] == date(2026, 6, 6)
     assert values[3] == Decimal("0.95")
+    assert values[4] == Decimal("0.05")
     mock_conn.commit.assert_called_once()
     assert affected == 1
 
@@ -47,10 +48,8 @@ def test_upsert_market_stats_routes_se_market_to_swe_table() -> None:
     row = MarketRow(
         market="se_market",
         trading_date=date(2026, 6, 6),
-        raw_mean_50=Decimal("0.88"),
-        raw_mean_200=Decimal("0.77"),
-        raw_std_50=Decimal("0.03"),
-        raw_std_200=Decimal("0.02"),
+        momentum_mean=Decimal("0.88"),
+        momentum_std=Decimal("0.03"),
     )
 
     with patch("db.market.psycopg2.connect", return_value=mock_conn):
@@ -72,10 +71,8 @@ def test_upsert_market_stats_routes_uk_market_to_uk_table() -> None:
     row = MarketRow(
         market="uk_market",
         trading_date=date(2026, 6, 6),
-        raw_mean_50=Decimal("0.91"),
-        raw_mean_200=Decimal("0.85"),
-        raw_std_50=Decimal("0.04"),
-        raw_std_200=Decimal("0.03"),
+        momentum_mean=Decimal("0.91"),
+        momentum_std=Decimal("0.04"),
     )
 
     with patch("db.market.psycopg2.connect", return_value=mock_conn):

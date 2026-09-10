@@ -71,4 +71,7 @@ run_sql "$REPO_DIR/migrate_add_exchange_name.sql"
 # Step 13: UK table set (uk_tickers / uk_metrics / uk_market_metrics); move .L / uk_market from us_*.
 run_sql "$REPO_DIR/migrate_add_uk_tables.sql"
 
+# Step 14: momentum / z_score (drop raw_* columns).
+run_sql "$REPO_DIR/migrate_momentum_zscore.sql"
+
 echo "All migrations applied (us_* / swe_* / uk_*)."

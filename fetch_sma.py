@@ -23,7 +23,8 @@ from db.market import upsert_market_stats
 from db.metrics import (
     filter_stale_tickers,
     insert_metrics,
-    load_raw_ratios_by_market_for_date,
+    load_momentum_by_market_for_date,
+    update_z_scores_for_trading_date,
 )
 from db.retention import purge_stale_data
 from db.tickers import load_tickers_from_db
@@ -74,26 +75,30 @@ def trading_date_from_index(index: pd.DatetimeIndex) -> date:
     return pd.Timestamp(ts).date()
 
 
-def compute_raw_ratios(
+def compute_momentum(
     sma_50: Decimal | None,
     sma_200: Decimal | None,
-    current_price: Decimal | None,
-) -> tuple[Decimal | None, Decimal | None]:
-    """Return sma/current_price ratios; None when inputs are missing or price is zero."""
-    if current_price is None or current_price == 0:
-        return None, None
+) -> Decimal | None:
+    """Return sma_50 / sma_200; None when inputs are missing or sma_200 is zero."""
+    if sma_50 is None or sma_200 is None or sma_200 == 0:
+        return None
+    return _to_decimal(float(sma_50) / float(sma_200))
 
-    raw_50 = (
-        _to_decimal(float(sma_50) / float(current_price))
-        if sma_50 is not None
-        else None
-    )
-    raw_200 = (
-        _to_decimal(float(sma_200) / float(current_price))
-        if sma_200 is not None
-        else None
-    )
-    return raw_50, raw_200
+
+def compute_z_score(
+    momentum: Decimal | None,
+    momentum_mean: Decimal | None,
+    momentum_std: Decimal | None,
+) -> Decimal | None:
+    """Return (momentum - mean) / std; None when inputs missing or std is zero."""
+    if (
+        momentum is None
+        or momentum_mean is None
+        or momentum_std is None
+        or momentum_std == 0
+    ):
+        return None
+    return _to_decimal((float(momentum) - float(momentum_mean)) / float(momentum_std))
 
 
 def _mean_decimal(values: list[Decimal]) -> Decimal | None:
@@ -113,20 +118,17 @@ def _population_std_decimal(values: list[Decimal]) -> Decimal | None:
 def aggregate_market_stats(
     trading_date: date,
     market: str,
-    raw_50_values: list[Decimal],
-    raw_200_values: list[Decimal],
+    momentum_values: list[Decimal],
 ) -> MarketRow | None:
     """Build cross-sectional market stats for one (market, trading_date)."""
-    if not raw_50_values and not raw_200_values:
+    if not momentum_values:
         return None
 
     return MarketRow(
         market=market,
         trading_date=trading_date,
-        raw_mean_50=_mean_decimal(raw_50_values),
-        raw_mean_200=_mean_decimal(raw_200_values),
-        raw_std_50=_population_std_decimal(raw_50_values),
-        raw_std_200=_population_std_decimal(raw_200_values),
+        momentum_mean=_mean_decimal(momentum_values),
+        momentum_std=_population_std_decimal(momentum_values),
     )
 
 
@@ -155,7 +157,7 @@ def metric_row_from_history(
     sma_50, sma_200 = compute_smas(close)
     trading_date = trading_date_from_index(history.index)
     current_price = _to_decimal(close.iloc[-1])
-    raw_50, raw_200 = compute_raw_ratios(sma_50, sma_200, current_price)
+    momentum = compute_momentum(sma_50, sma_200)
 
     return MetricRow(
         ticker=ticker,
@@ -165,8 +167,8 @@ def metric_row_from_history(
         sma_200=sma_200,
         current_price=current_price,
         currency=currency,
-        raw_50=raw_50,
-        raw_200=raw_200,
+        momentum=momentum,
+        z_score=None,
     )
 
 
@@ -218,18 +220,20 @@ def upsert_market_for_trading_dates(
     *,
     country: CountrySet | None = None,
 ) -> None:
-    """Recompute and upsert us_/swe_/uk_market_metrics for each date.
+    """Recompute market aggregates and z_scores for each date.
 
-    When ``country`` is set, only upsert aggregates for listing markets that
-    route to that country set (FR-18).
+    When ``country`` is set, only upsert aggregates / z_scores for that
+    country set (FR-18).
     """
     for trading_date in sorted(trading_dates):
-        by_market = load_raw_ratios_by_market_for_date(database_url, trading_date)
+        by_market = load_momentum_by_market_for_date(database_url, trading_date)
         if not by_market:
-            logger.warning("No raw ratios available for market stats on %s", trading_date)
+            logger.warning(
+                "No momentum values available for market stats on %s", trading_date
+            )
             continue
 
-        for market, (raw_50_values, raw_200_values) in sorted(
+        for market, momentum_values in sorted(
             by_market.items(),
             key=lambda item: (item[0] is None, item[0] or ""),
         ):
@@ -246,25 +250,24 @@ def upsert_market_for_trading_dates(
             market_row = aggregate_market_stats(
                 trading_date,
                 market,
-                raw_50_values,
-                raw_200_values,
+                momentum_values,
             )
             if market_row is None:
                 continue
 
             upsert_market_stats(database_url, market_row)
             logger.info(
-                "Market stats for %s %s: raw_mean_50=%s raw_mean_200=%s "
-                "raw_std_50=%s raw_std_200=%s (n_50=%d n_200=%d)",
+                "Market stats for %s %s: momentum_mean=%s momentum_std=%s (n=%d)",
                 market,
                 trading_date,
-                market_row.raw_mean_50,
-                market_row.raw_mean_200,
-                market_row.raw_std_50,
-                market_row.raw_std_200,
-                len(raw_50_values),
-                len(raw_200_values),
+                market_row.momentum_mean,
+                market_row.momentum_std,
+                len(momentum_values),
             )
+
+        update_z_scores_for_trading_date(
+            database_url, trading_date, country=country
+        )
 
 
 def _run_retention_purge(database_url: str, retention_days: int) -> tuple[int, int]:
@@ -378,7 +381,7 @@ def main() -> int:
                 trading_dates.add(row.trading_date)
                 logger.info(
                     "Fetched %s (%s): trading_date=%s currency=%s current_price=%s "
-                    "sma_50=%s sma_200=%s raw_50=%s raw_200=%s",
+                    "sma_50=%s sma_200=%s momentum=%s",
                     row.ticker,
                     row.company,
                     row.trading_date,
@@ -386,8 +389,7 @@ def main() -> int:
                     row.current_price,
                     row.sma_50,
                     row.sma_200,
-                    row.raw_50,
-                    row.raw_200,
+                    row.momentum,
                 )
             batch_inserted = insert_metrics(database_url, batch_rows)
             inserted_count += batch_inserted

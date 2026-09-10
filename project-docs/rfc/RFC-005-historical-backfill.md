@@ -10,7 +10,7 @@
 
 ## Summary
 
-One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **Not** cron-scheduled. SMA price fields, `raw_50` / `raw_200` ratios, and cross-sectional aggregate stats are backfilled from OHLCV into `us_metrics` / `swe_metrics` / `uk_metrics` and `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics`. `sector`, `industry`, listing `market`, and `exchange_name` live on `*_tickers` (RFC-002). Currency is resolved per ticker during backfill (`yfinance_client.load_currency_for_tickers`).
+One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **Not** cron-scheduled. SMA price fields, **`momentum` / `z_score`**, and cross-sectional **`momentum_mean` / `momentum_std`** are backfilled from OHLCV into `us_metrics` / `swe_metrics` / `uk_metrics` and `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics` (RFC-012). `sector`, `industry`, listing `market`, and `exchange_name` live on `*_tickers` (RFC-002). Currency is resolved per ticker during backfill (`yfinance_client.load_currency_for_tickers`).
 
 **Country scope (FR-18):** each run targets **exactly one** country set via required `--country us|swe|uk`. Adding UK later must not re-download or re-touch an already-backfilled US (or SWE) set.
 
@@ -24,7 +24,7 @@ One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **N
 | FR-16 | Skip `(ticker, trading_date)` pairs already in the matching country metrics table |
 | FR-17 | Log per-batch generated/new/inserted/skipped counts and final summary |
 | FR-18 | Required `--country us|swe|uk`: load only that set's `*_tickers`; write only that set's `*_metrics` / `*_market_metrics` |
-| — | Set `raw_50`, `raw_200` on each inserted metrics row (RFC-012) |
+| — | Set `momentum`, `z_score` on each inserted metrics row; upsert `momentum_mean` / `momentum_std` (RFC-012) |
 
 ## Implementation
 
@@ -33,7 +33,7 @@ One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **N
 | File | Role |
 |------|------|
 | `backfill_sma.py` | Week indexing, rolling windows, orchestration; required `--country` |
-| `fetch_sma.py` | Shared: `compute_smas`, `compute_raw_ratios`, `chunked`, `_to_decimal`, `trading_date_from_index`, country-scoped `upsert_market_for_trading_dates` |
+| `fetch_sma.py` | Shared: `compute_smas`, `compute_momentum`, `chunked`, `_to_decimal`, `trading_date_from_index`, country-scoped `upsert_market_for_trading_dates` |
 | `yfinance_client.py` | Shared: `download_batch`, `load_currency_for_tickers` |
 | `db/metrics.py` | `insert_metrics`, `load_existing_metric_keys` |
 | `db/tickers.py` | `load_tickers_from_db(..., country=)` loads one `*_tickers` table when set |
@@ -83,7 +83,8 @@ pipenv run python backfill_sma.py --country us
 - [x] Not scheduled in cron
 - [x] Populates `currency` per ticker during backfill (PRD §6)
 - [x] Uses `yfinance_client.py` for batch download and currency resolution
-- [x] Populates `raw_50`, `raw_200` on backfilled metrics rows (RFC-012)
+- [x] Populates `momentum` / `z_score` on backfilled metrics rows (RFC-012)
+- [x] Upserts `momentum_mean` / `momentum_std` on country market tables (RFC-012)
 - [x] Can insert into `us_metrics` / `swe_metrics` / `uk_metrics` and upsert matching market tables (RFC-001, RFC-012)
 - [x] Required CLI `--country us|swe|uk`
 - [x] Watchlist load and writes scoped to that country set only (no yfinance / market upserts for other sets)

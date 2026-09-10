@@ -19,7 +19,7 @@ from config import BaseConfig
 from db.country import CountrySet
 from db.metrics import INSERT_METRICS_SQL, load_existing_metric_keys
 from db.tickers import load_tickers_from_db
-from fetch_sma import compute_raw_ratios, upsert_market_for_trading_dates
+from fetch_sma import compute_momentum, upsert_market_for_trading_dates
 from models import MetricRow, TickerEntry
 
 
@@ -75,13 +75,8 @@ def test_metric_rows_from_weekly_samples_creates_rolling_windows() -> None:
     assert rows[0].sma_50 is not None
     assert rows[0].sma_200 is not None
     assert rows[0].current_price is not None
-    expected_raw_50, expected_raw_200 = compute_raw_ratios(
-        rows[0].sma_50,
-        rows[0].sma_200,
-        rows[0].current_price,
-    )
-    assert rows[0].raw_50 == expected_raw_50
-    assert rows[0].raw_200 == expected_raw_200
+    assert rows[0].momentum == compute_momentum(rows[0].sma_50, rows[0].sma_200)
+    assert rows[0].z_score is None
     assert rows[-1].trading_date >= rows[0].trading_date
 
 
@@ -105,8 +100,8 @@ def test_metric_rows_from_backfill_batch_sets_currency() -> None:
     assert rows
     assert all(row.currency == "SEK" for row in rows)
     assert all(row.company == "Alpha AB" for row in rows)
-    assert all(row.raw_50 is not None for row in rows)
-    assert all(row.raw_200 is not None for row in rows)
+    assert all(row.momentum is not None for row in rows)
+    assert all(row.z_score is None for row in rows)
 
 
 def test_filter_new_rows_skips_existing_pairs() -> None:
@@ -144,8 +139,8 @@ def test_main_backfill_inserts_new_rows() -> None:
         sma_200=Decimal("2"),
         current_price=Decimal("3"),
         currency="SEK",
-        raw_50=Decimal("0.333333"),
-        raw_200=Decimal("0.666667"),
+        momentum=Decimal("0.5"),
+        z_score=None,
     )
 
     with patch("backfill_sma.get_config", return_value=_mock_config()):
@@ -193,8 +188,8 @@ def test_main_succeeds_when_all_rows_already_exist() -> None:
         sma_200=Decimal("2"),
         current_price=Decimal("3"),
         currency="SEK",
-        raw_50=Decimal("0.333333"),
-        raw_200=Decimal("0.666667"),
+        momentum=Decimal("0.5"),
+        z_score=None,
     )
 
     with patch("backfill_sma.get_config", return_value=_mock_config()):
@@ -237,8 +232,8 @@ def test_main_returns_failure_when_market_metrics_upsert_fails() -> None:
         sma_200=Decimal("2"),
         current_price=Decimal("3"),
         currency="SEK",
-        raw_50=Decimal("0.333333"),
-        raw_200=Decimal("0.666667"),
+        momentum=Decimal("0.5"),
+        z_score=None,
     )
 
     with patch("backfill_sma.get_config", return_value=_mock_config()):
@@ -266,17 +261,18 @@ def test_main_returns_failure_when_market_metrics_upsert_fails() -> None:
 
 def test_upsert_market_for_trading_dates_groups_backfill_dates_by_listing_market() -> None:
     with patch(
-        "fetch_sma.load_raw_ratios_by_market_for_date",
+        "fetch_sma.load_momentum_by_market_for_date",
         return_value={
-            "se_market": ([Decimal("0.5")], [Decimal("0.4")]),
-            "us_market": ([Decimal("0.6")], [Decimal("0.5")]),
+            "se_market": [Decimal("0.5")],
+            "us_market": [Decimal("0.6")],
         },
     ):
         with patch("fetch_sma.upsert_market_stats") as mock_upsert:
-            upsert_market_for_trading_dates(
-                "postgresql://example",
-                {date(2025, 6, 6)},
-            )
+            with patch("fetch_sma.update_z_scores_for_trading_date"):
+                upsert_market_for_trading_dates(
+                    "postgresql://example",
+                    {date(2025, 6, 6)},
+                )
 
     assert mock_upsert.call_count == 2
     markets = {call.args[1].market for call in mock_upsert.call_args_list}
@@ -285,23 +281,26 @@ def test_upsert_market_for_trading_dates_groups_backfill_dates_by_listing_market
 
 def test_upsert_market_for_trading_dates_scopes_to_country() -> None:
     with patch(
-        "fetch_sma.load_raw_ratios_by_market_for_date",
+        "fetch_sma.load_momentum_by_market_for_date",
         return_value={
-            "se_market": ([Decimal("0.5")], [Decimal("0.4")]),
-            "us_market": ([Decimal("0.6")], [Decimal("0.5")]),
-            "uk_market": ([Decimal("0.7")], [Decimal("0.6")]),
+            "se_market": [Decimal("0.5")],
+            "us_market": [Decimal("0.6")],
+            "uk_market": [Decimal("0.7")],
         },
     ):
         with patch("fetch_sma.upsert_market_stats") as mock_upsert:
-            upsert_market_for_trading_dates(
-                "postgresql://example",
-                {date(2025, 6, 6)},
-                country=CountrySet.US,
-            )
+            with patch("fetch_sma.update_z_scores_for_trading_date") as mock_z:
+                upsert_market_for_trading_dates(
+                    "postgresql://example",
+                    {date(2025, 6, 6)},
+                    country=CountrySet.US,
+                )
 
     assert mock_upsert.call_count == 1
     assert mock_upsert.call_args.args[1].market == "us_market"
-
+    mock_z.assert_called_once_with(
+        "postgresql://example", date(2025, 6, 6), country=CountrySet.US
+    )
 
 def test_main_us_only_ignores_swe_and_uk_tickers() -> None:
     metric_row = MetricRow(
@@ -312,8 +311,8 @@ def test_main_us_only_ignores_swe_and_uk_tickers() -> None:
         sma_200=Decimal("2"),
         current_price=Decimal("3"),
         currency="USD",
-        raw_50=Decimal("0.333333"),
-        raw_200=Decimal("0.666667"),
+        momentum=Decimal("0.5"),
+        z_score=None,
     )
 
     with patch("backfill_sma.get_config", return_value=_mock_config()):
@@ -455,8 +454,8 @@ def test_main_backfill_routes_uk_ticker() -> None:
         sma_200=Decimal("2"),
         current_price=Decimal("3"),
         currency="GBP",
-        raw_50=Decimal("0.333333"),
-        raw_200=Decimal("0.666667"),
+        momentum=Decimal("0.5"),
+        z_score=None,
     )
 
     with patch("backfill_sma.get_config", return_value=_mock_config()):
@@ -508,42 +507,46 @@ def test_main_backfill_routes_uk_ticker() -> None:
 
 def test_upsert_market_for_trading_dates_includes_uk_market() -> None:
     with patch(
-        "fetch_sma.load_raw_ratios_by_market_for_date",
+        "fetch_sma.load_momentum_by_market_for_date",
         return_value={
-            "uk_market": ([Decimal("0.7")], [Decimal("0.6")]),
-            "us_market": ([Decimal("0.6")], [Decimal("0.5")]),
+            "uk_market": [Decimal("0.7")],
+            "us_market": [Decimal("0.6")],
         },
     ):
         with patch("fetch_sma.upsert_market_stats") as mock_upsert:
-            upsert_market_for_trading_dates(
-                "postgresql://example",
-                {date(2025, 6, 6)},
-            )
+            with patch("fetch_sma.update_z_scores_for_trading_date"):
+                upsert_market_for_trading_dates(
+                    "postgresql://example",
+                    {date(2025, 6, 6)},
+                )
 
     assert mock_upsert.call_count == 2
     markets = {call.args[1].market for call in mock_upsert.call_args_list}
     assert markets == {"uk_market", "us_market"}
 
 
-def test_upsert_market_for_trading_dates_scopes_to_country() -> None:
+def test_upsert_market_for_trading_dates_scopes_to_uk_country() -> None:
     with patch(
-        "fetch_sma.load_raw_ratios_by_market_for_date",
+        "fetch_sma.load_momentum_by_market_for_date",
         return_value={
-            "uk_market": ([Decimal("0.7")], [Decimal("0.6")]),
-            "us_market": ([Decimal("0.6")], [Decimal("0.5")]),
-            "se_market": ([Decimal("0.5")], [Decimal("0.4")]),
+            "uk_market": [Decimal("0.7")],
+            "us_market": [Decimal("0.6")],
+            "se_market": [Decimal("0.5")],
         },
     ):
         with patch("fetch_sma.upsert_market_stats") as mock_upsert:
-            upsert_market_for_trading_dates(
-                "postgresql://example",
-                {date(2025, 6, 6)},
-                country=CountrySet.UK,
-            )
+            with patch("fetch_sma.update_z_scores_for_trading_date") as mock_z:
+                upsert_market_for_trading_dates(
+                    "postgresql://example",
+                    {date(2025, 6, 6)},
+                    country=CountrySet.UK,
+                )
 
     assert mock_upsert.call_count == 1
     assert mock_upsert.call_args.args[1].market == "uk_market"
-
+    mock_z.assert_called_once_with(
+        "postgresql://example", date(2025, 6, 6), country=CountrySet.UK
+    )
 
 def test_build_parser_requires_country() -> None:
     from backfill_sma import build_parser

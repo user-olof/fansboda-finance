@@ -14,41 +14,35 @@ UPSERT_MARKET_SQL = {
     CountrySet.US: """
 INSERT INTO us_market_metrics (
     market, trading_date, updated_at,
-    raw_mean_50, raw_mean_200, raw_std_50, raw_std_200
+    momentum_mean, momentum_std
 )
-VALUES (%s, %s, %s, %s, %s, %s, %s)
+VALUES (%s, %s, %s, %s, %s)
 ON CONFLICT (market, trading_date) DO UPDATE SET
     updated_at = EXCLUDED.updated_at,
-    raw_mean_50 = EXCLUDED.raw_mean_50,
-    raw_mean_200 = EXCLUDED.raw_mean_200,
-    raw_std_50 = EXCLUDED.raw_std_50,
-    raw_std_200 = EXCLUDED.raw_std_200
+    momentum_mean = EXCLUDED.momentum_mean,
+    momentum_std = EXCLUDED.momentum_std
 """,
     CountrySet.SWE: """
 INSERT INTO swe_market_metrics (
     market, trading_date, updated_at,
-    raw_mean_50, raw_mean_200, raw_std_50, raw_std_200
+    momentum_mean, momentum_std
 )
-VALUES (%s, %s, %s, %s, %s, %s, %s)
+VALUES (%s, %s, %s, %s, %s)
 ON CONFLICT (market, trading_date) DO UPDATE SET
     updated_at = EXCLUDED.updated_at,
-    raw_mean_50 = EXCLUDED.raw_mean_50,
-    raw_mean_200 = EXCLUDED.raw_mean_200,
-    raw_std_50 = EXCLUDED.raw_std_50,
-    raw_std_200 = EXCLUDED.raw_std_200
+    momentum_mean = EXCLUDED.momentum_mean,
+    momentum_std = EXCLUDED.momentum_std
 """,
     CountrySet.UK: """
 INSERT INTO uk_market_metrics (
     market, trading_date, updated_at,
-    raw_mean_50, raw_mean_200, raw_std_50, raw_std_200
+    momentum_mean, momentum_std
 )
-VALUES (%s, %s, %s, %s, %s, %s, %s)
+VALUES (%s, %s, %s, %s, %s)
 ON CONFLICT (market, trading_date) DO UPDATE SET
     updated_at = EXCLUDED.updated_at,
-    raw_mean_50 = EXCLUDED.raw_mean_50,
-    raw_mean_200 = EXCLUDED.raw_mean_200,
-    raw_std_50 = EXCLUDED.raw_std_50,
-    raw_std_200 = EXCLUDED.raw_std_200
+    momentum_mean = EXCLUDED.momentum_mean,
+    momentum_std = EXCLUDED.momentum_std
 """,
 }
 
@@ -71,10 +65,8 @@ def upsert_market_stats(database_url: str, row: MarketRow) -> int:
                     row.market,
                     row.trading_date,
                     now,
-                    row.raw_mean_50,
-                    row.raw_mean_200,
-                    row.raw_std_50,
-                    row.raw_std_200,
+                    row.momentum_mean,
+                    row.momentum_std,
                 ),
             )
             affected = cur.rowcount

@@ -29,7 +29,7 @@ SELECT table_name, column_name
 FROM information_schema.columns
 WHERE table_schema = 'public'
   AND table_name IN ('us_metrics', 'swe_metrics', 'uk_metrics')
-  AND column_name IN ('currency', 'company', 'raw_50', 'raw_200')
+  AND column_name IN ('currency', 'company', 'momentum', 'z_score')
 ORDER BY table_name, column_name;
 -- expect 12 rows
 
@@ -41,6 +41,16 @@ WHERE table_schema = 'public'
     'us_market_metrics', 'swe_market_metrics', 'uk_market_metrics'
   )
 ORDER BY table_name, ordinal_position;
+
+SELECT table_name, column_name
+FROM information_schema.columns
+WHERE table_schema = 'public'
+  AND table_name IN (
+    'us_market_metrics', 'swe_market_metrics', 'uk_market_metrics'
+  )
+  AND column_name IN ('momentum_mean', 'momentum_std')
+ORDER BY table_name, column_name;
+-- expect 6 rows
 
 SELECT c.conrelid::regclass AS table_name, c.conname
 FROM pg_constraint c

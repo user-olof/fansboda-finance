@@ -238,8 +238,8 @@ def test_main_fetches_stale_tickers_and_inserts() -> None:
         sma_200=Decimal("2"),
         current_price=Decimal("3"),
         currency="SEK",
-        raw_50=Decimal("0.333333"),
-        raw_200=Decimal("0.666667"),
+        momentum=Decimal("0.5"),
+        z_score=None,
     )
 
     with patch("fetch_sma.get_config", return_value=_mock_config()):
@@ -264,22 +264,22 @@ def test_main_fetches_stale_tickers_and_inserts() -> None:
                                 "fetch_sma.insert_metrics", return_value=1
                             ) as mock_insert:
                                 with patch(
-                                    "fetch_sma.load_raw_ratios_by_market_for_date",
+                                    "fetch_sma.load_momentum_by_market_for_date",
                                     return_value={
-                                        "se_market": (
-                                            [Decimal("0.333333")],
-                                            [Decimal("0.666667")],
-                                        )
+                                        "se_market": [Decimal("0.5")]
                                     },
                                 ):
                                     with patch(
                                         "fetch_sma.upsert_market_stats"
                                     ) as mock_market:
                                         with patch(
-                                            "fetch_sma.purge_stale_data",
-                                            return_value=(0, 0),
+                                            "fetch_sma.update_z_scores_for_trading_date"
                                         ):
-                                            assert main() == 0
+                                            with patch(
+                                                "fetch_sma.purge_stale_data",
+                                                return_value=(0, 0),
+                                            ):
+                                                assert main() == 0
 
     mock_currency.assert_called_once()
     mock_download.assert_called_once()
@@ -289,6 +289,7 @@ def test_main_fetches_stale_tickers_and_inserts() -> None:
     market_row = mock_market.call_args[0][1]
     assert market_row.market == "se_market"
     assert market_row.trading_date == date(2026, 6, 6)
+    assert market_row.momentum_mean == Decimal("0.5")
     inserted_rows = mock_insert.call_args[0][1]
     assert inserted_rows[0].company == "Alpha"
     assert inserted_rows[0].currency == "SEK"
@@ -303,8 +304,8 @@ def test_main_fetches_uk_ticker_and_upserts_uk_market() -> None:
         sma_200=Decimal("2"),
         current_price=Decimal("3"),
         currency="GBp",
-        raw_50=Decimal("0.333333"),
-        raw_200=Decimal("0.666667"),
+        momentum=Decimal("0.5"),
+        z_score=None,
     )
 
     with patch("fetch_sma.get_config", return_value=_mock_config()):
@@ -336,22 +337,22 @@ def test_main_fetches_uk_ticker_and_upserts_uk_market() -> None:
                                 "fetch_sma.insert_metrics", return_value=1
                             ) as mock_insert:
                                 with patch(
-                                    "fetch_sma.load_raw_ratios_by_market_for_date",
+                                    "fetch_sma.load_momentum_by_market_for_date",
                                     return_value={
-                                        "uk_market": (
-                                            [Decimal("0.333333")],
-                                            [Decimal("0.666667")],
-                                        )
+                                        "uk_market": [Decimal("0.5")]
                                     },
                                 ):
                                     with patch(
                                         "fetch_sma.upsert_market_stats"
                                     ) as mock_market:
                                         with patch(
-                                            "fetch_sma.purge_stale_data",
-                                            return_value=(0, 0),
+                                            "fetch_sma.update_z_scores_for_trading_date"
                                         ):
-                                            assert main() == 0
+                                            with patch(
+                                                "fetch_sma.purge_stale_data",
+                                                return_value=(0, 0),
+                                            ):
+                                                assert main() == 0
 
     mock_insert.assert_called_once()
     assert mock_insert.call_args[0][1][0].ticker == "VOD.L"

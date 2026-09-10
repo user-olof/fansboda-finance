@@ -56,7 +56,7 @@ Listing **`market`** (yfinance bucket on `*_tickers`, e.g. `us_market`, `se_mark
 | `updated_at` | TIMESTAMPTZ | Insert time |
 | `currency` | TEXT | From yfinance |
 | `sma_50` / `sma_200` / `current_price` | NUMERIC(18,6) | |
-| `raw_50` / `raw_200` | NUMERIC(18,6) | SMA / price ratios |
+| `momentum` / `z_score` | NUMERIC(18,6) | `sma_50/sma_200`; cross-sectional z-score vs market aggregates |
 
 - One row per `(ticker, trading_date)` within each set (`*_metrics_ticker_trading_date_key`)
 - Append-only: `ON CONFLICT (ticker, trading_date) DO NOTHING`
@@ -69,7 +69,7 @@ Listing **`market`** (yfinance bucket on `*_tickers`, e.g. `us_market`, `se_mark
 | `market` | TEXT | Listing market bucket |
 | `trading_date` | DATE | |
 | `updated_at` | TIMESTAMPTZ | |
-| `raw_mean_50` / `raw_mean_200` / `raw_std_50` / `raw_std_200` | NUMERIC(18,6) | Cross-sectional stats |
+| `momentum_mean` / `momentum_std` | NUMERIC(18,6) | Cross-sectional mean/std of `momentum` |
 | PK | `(market, trading_date)` | |
 
 ## Implementation
@@ -89,7 +89,7 @@ Listing **`market`** (yfinance bucket on `*_tickers`, e.g. `us_market`, `se_mark
 | `db/country.py` | Routes rows to US / SWE / UK by `market` / `.ST` / `.L` |
 | `db/tickers.py`, `db/metrics.py`, `db/market.py` | Target all three country-set tables |
 
-**Schema note:** PRD §6 places `sector`, `industry`, listing `market`, and `exchange_name` on `*_tickers` (RFC-002, RFC-010), `currency` on `*_metrics` (RFC-003), and per-country-set aggregates in `*_market_metrics` (RFC-012).
+**Schema note:** PRD §6 places `sector`, `industry`, listing `market`, and `exchange_name` on `*_tickers` (RFC-002, RFC-010), `currency` on `*_metrics` (RFC-003), and **`momentum` / `z_score`** plus per-country-set **`momentum_mean` / `momentum_std`** in `*_market_metrics` (RFC-012). Legacy `raw_*` columns are superseded by RFC-012.
 
 ### Files
 
@@ -111,8 +111,8 @@ Listing **`market`** (yfinance bucket on `*_tickers`, e.g. `us_market`, `se_mark
 | `migrate_add_exchange_name.sql` | Step 12 — add `exchange_name` to `*_tickers` |
 | `migrate_add_uk_tables.sql` | Step 13 — create `uk_*` sets |
 | `models.py` | `TickerEntry` (incl. `exchange_name`), `MetricRow`, `MarketRow` |
-| `db/metrics.py` | `insert_metrics` persists `raw_50`, `raw_200` into country metrics |
-| `db/market.py` | `upsert_market_stats`, `purge_stale_market` for all country sets |
+| `db/metrics.py` | `insert_metrics` persists metrics including `momentum` / `z_score` (RFC-012) |
+| `db/market.py` | `upsert_market_stats`, `purge_stale_market` for `momentum_mean` / `momentum_std` |
 
 ### New database setup
 
@@ -133,24 +133,24 @@ SELECT symbol, company, sector, industry, market, exchange_name FROM swe_tickers
 SELECT symbol, company, sector, industry, market, exchange_name FROM uk_tickers LIMIT 5;
 
 SELECT ticker, trading_date, company, currency,
-       sma_50, sma_200, current_price, raw_50, raw_200
+       sma_50, sma_200, current_price, momentum, z_score
 FROM us_metrics ORDER BY trading_date DESC LIMIT 5;
 
 SELECT ticker, trading_date, company, currency,
-       sma_50, sma_200, current_price, raw_50, raw_200
+       sma_50, sma_200, current_price, momentum, z_score
 FROM swe_metrics ORDER BY trading_date DESC LIMIT 5;
 
 SELECT ticker, trading_date, company, currency,
-       sma_50, sma_200, current_price, raw_50, raw_200
+       sma_50, sma_200, current_price, momentum, z_score
 FROM uk_metrics ORDER BY trading_date DESC LIMIT 5;
 
-SELECT market, trading_date, raw_mean_50, raw_mean_200, raw_std_50, raw_std_200
+SELECT market, trading_date, momentum_mean, momentum_std
 FROM us_market_metrics ORDER BY trading_date DESC, market LIMIT 5;
 
-SELECT market, trading_date, raw_mean_50, raw_mean_200, raw_std_50, raw_std_200
+SELECT market, trading_date, momentum_mean, momentum_std
 FROM swe_market_metrics ORDER BY trading_date DESC, market LIMIT 5;
 
-SELECT market, trading_date, raw_mean_50, raw_mean_200, raw_std_50, raw_std_200
+SELECT market, trading_date, momentum_mean, momentum_std
 FROM uk_market_metrics ORDER BY trading_date DESC, market LIMIT 5;
 ```
 
@@ -166,7 +166,7 @@ FROM uk_market_metrics ORDER BY trading_date DESC, market LIMIT 5;
 - [x] Migration path in `MIGRATIONS.md` (steps 1–10)
 - [x] `tests/test_schema.py` validates DDL in CI
 - [x] `tickers.updated_at`, `sector`, `industry`, `market`; `metrics.currency`, `company`
-- [x] `MetricRow` / `insert_metrics` include `currency` and `raw_50`, `raw_200`
+- [x] `MetricRow` / `insert_metrics` include `currency` (and derived fields per RFC-012)
 - [x] `TickerEntry` / `upsert_tickers` include `sector`, `industry`, `market`
 - [x] Legacy `market` → `market_metrics` with PK on `(market, trading_date)` (step 10)
 - [x] `MarketRow` / `db/market.py` upsert and purge helpers

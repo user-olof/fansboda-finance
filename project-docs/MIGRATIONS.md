@@ -47,6 +47,7 @@ Steps 1–10 upgrade the **legacy** single-set tables (`tickers` / `metrics` / `
 | 11 | `migrate_split_us_swe_tables.sql` | Create `us_*` / `swe_*` table sets; move rows from legacy `tickers` / `metrics` / `market_metrics` by listing country; drop legacy tables |
 | 12 | `migrate_add_exchange_name.sql` | Add `exchange_name` to `us_tickers` / `swe_tickers` / `uk_tickers` (yfinance `fullExchangeName`) |
 | 13 | `migrate_add_uk_tables.sql` | Create `uk_tickers` / `uk_metrics` / `uk_market_metrics` (PRD §6); move existing `.L` / `uk_market` rows out of `us_*` |
+| 14 | `migrate_momentum_zscore.sql` | Drop `raw_50` / `raw_200` / `raw_mean_*` / `raw_std_*`; add `momentum` / `z_score` on `*_metrics` and `momentum_mean` / `momentum_std` on `*_market_metrics` (PRD §6 / RFC-012) |
 
 See [RFC-001](./rfc/RFC-001-data-model.md) and [RFC-012](./rfc/RFC-012-normalized-ratios-market.md).
 
@@ -54,7 +55,7 @@ See [RFC-001](./rfc/RFC-001-data-model.md) and [RFC-012](./rfc/RFC-012-normalize
 
 **Note:** Step 11 supersedes the single-set layout from steps 1–10. Fresh installs use `schema.sql` with country sets only. Existing databases apply step 11 after step 10.
 
-**Note:** Steps 12–13 bring an already-split US/SWE database in line with the full PRD §6 target (exchange display names + UK set). Fresh installs get both from an updated `schema.sql` and do not need separate upgrade steps once those files ship.
+**Note:** Steps 12–13 bring an already-split US/SWE database in line with the UK + `exchange_name` target. Step 14 replaces SMA/price `raw_*` ratios with `momentum` / `z_score` and market `momentum_mean` / `momentum_std` (RFC-012). Fresh installs get the target layout from an updated `schema.sql`.
 
 ### Path by starting state
 
@@ -87,15 +88,23 @@ Run step 11 (`migrate_split_us_swe_tables.sql`), then re-seed / refresh as neede
 1. Run step 12 (`migrate_add_exchange_name.sql`) when available, then `refresh_tickers.py` to populate `exchange_name`.
 2. Run step 13 (`migrate_add_uk_tables.sql`) when available; re-seed / refresh UK symbols (`.L`) as needed.
 
+**After step 13 (raw_* ratios still present):**
+
+Run step 14 (`migrate_momentum_zscore.sql`), then
+`pipenv run python backfill_market.py` (optional `--country us|swe|uk`) to set
+`momentum` from stored SMAs and refresh `momentum_mean` / `momentum_std` /
+`z_score`. Fresh installs already have the target columns from `schema.sql`
+(no `raw_*`).
+
 ## Dev-backfill CI (`scripts/apply_migrations.sh`)
 
 Used by `.github/workflows/dev-backfill.yml` (manual `workflow_dispatch`) against the Neon **dev** branch:
 
 1. Apply `schema.sql` (country baseline, `CREATE IF NOT EXISTS`).
 2. If legacy `tickers` / `metrics` still exist, run pre-split migrations (steps 1, 4–10; skips destructive steps 2–3).
-3. Always run steps 11–13 (`migrate_split_us_swe_tables.sql`, `exchange_name`, UK tables).
+3. Always run steps 11–14 (`migrate_split_us_swe_tables.sql`, `exchange_name`, UK tables, momentum/z_score).
 
-Fresh country-only databases skip the legacy chain and only get `schema.sql` + steps 11–13 (idempotent).
+Fresh country-only databases skip the legacy chain and only get `schema.sql` + steps 11–14 (idempotent).
 
 ## Verify schema
 

@@ -16,7 +16,7 @@ INSERT_METRICS_SQL = {
     CountrySet.US: """
 INSERT INTO us_metrics (
     ticker, company, trading_date, updated_at,
-    currency, sma_50, sma_200, current_price, raw_50, raw_200
+    currency, sma_50, sma_200, current_price, momentum, z_score
 )
 VALUES %s
 ON CONFLICT (ticker, trading_date) DO NOTHING
@@ -24,7 +24,7 @@ ON CONFLICT (ticker, trading_date) DO NOTHING
     CountrySet.SWE: """
 INSERT INTO swe_metrics (
     ticker, company, trading_date, updated_at,
-    currency, sma_50, sma_200, current_price, raw_50, raw_200
+    currency, sma_50, sma_200, current_price, momentum, z_score
 )
 VALUES %s
 ON CONFLICT (ticker, trading_date) DO NOTHING
@@ -32,7 +32,7 @@ ON CONFLICT (ticker, trading_date) DO NOTHING
     CountrySet.UK: """
 INSERT INTO uk_metrics (
     ticker, company, trading_date, updated_at,
-    currency, sma_50, sma_200, current_price, raw_50, raw_200
+    currency, sma_50, sma_200, current_price, momentum, z_score
 )
 VALUES %s
 ON CONFLICT (ticker, trading_date) DO NOTHING
@@ -92,24 +92,90 @@ DELETE_STALE_SQL = (
     "DELETE FROM uk_metrics WHERE trading_date < %s",
 )
 
-LOAD_RAW_RATIOS_BY_MARKET_FOR_DATE_SQL = """
-SELECT t.market, m.raw_50, m.raw_200
+LOAD_MOMENTUM_BY_MARKET_FOR_DATE_SQL = """
+SELECT t.market, m.momentum
 FROM us_metrics m
 JOIN us_tickers t ON t.symbol = m.ticker
 WHERE m.trading_date = %s
 UNION ALL
-SELECT t.market, m.raw_50, m.raw_200
+SELECT t.market, m.momentum
 FROM swe_metrics m
 JOIN swe_tickers t ON t.symbol = m.ticker
 WHERE m.trading_date = %s
 UNION ALL
-SELECT t.market, m.raw_50, m.raw_200
+SELECT t.market, m.momentum
 FROM uk_metrics m
 JOIN uk_tickers t ON t.symbol = m.ticker
 WHERE m.trading_date = %s
 """
 
-LOAD_DISTINCT_TRADING_DATES_SQL = """
+UPDATE_Z_SCORES_SQL = {
+    CountrySet.US: """
+UPDATE us_metrics m
+SET z_score = CASE
+    WHEN m.momentum IS NULL
+         OR mm.momentum_mean IS NULL
+         OR mm.momentum_std IS NULL
+         OR mm.momentum_std = 0
+    THEN NULL
+    ELSE (m.momentum - mm.momentum_mean) / mm.momentum_std
+END
+FROM us_tickers t
+JOIN us_market_metrics mm
+  ON mm.market = t.market
+WHERE m.ticker = t.symbol
+  AND mm.trading_date = m.trading_date
+  AND m.trading_date = %s
+""",
+    CountrySet.SWE: """
+UPDATE swe_metrics m
+SET z_score = CASE
+    WHEN m.momentum IS NULL
+         OR mm.momentum_mean IS NULL
+         OR mm.momentum_std IS NULL
+         OR mm.momentum_std = 0
+    THEN NULL
+    ELSE (m.momentum - mm.momentum_mean) / mm.momentum_std
+END
+FROM swe_tickers t
+JOIN swe_market_metrics mm
+  ON mm.market = t.market
+WHERE m.ticker = t.symbol
+  AND mm.trading_date = m.trading_date
+  AND m.trading_date = %s
+""",
+    CountrySet.UK: """
+UPDATE uk_metrics m
+SET z_score = CASE
+    WHEN m.momentum IS NULL
+         OR mm.momentum_mean IS NULL
+         OR mm.momentum_std IS NULL
+         OR mm.momentum_std = 0
+    THEN NULL
+    ELSE (m.momentum - mm.momentum_mean) / mm.momentum_std
+END
+FROM uk_tickers t
+JOIN uk_market_metrics mm
+  ON mm.market = t.market
+WHERE m.ticker = t.symbol
+  AND mm.trading_date = m.trading_date
+  AND m.trading_date = %s
+""",
+}
+
+LOAD_DISTINCT_TRADING_DATES_SQL = {
+    CountrySet.US: """
+SELECT DISTINCT trading_date FROM us_metrics ORDER BY trading_date
+""",
+    CountrySet.SWE: """
+SELECT DISTINCT trading_date FROM swe_metrics ORDER BY trading_date
+""",
+    CountrySet.UK: """
+SELECT DISTINCT trading_date FROM uk_metrics ORDER BY trading_date
+""",
+}
+
+LOAD_ALL_DISTINCT_TRADING_DATES_SQL = """
 SELECT DISTINCT trading_date FROM (
     SELECT trading_date FROM us_metrics
     UNION ALL
@@ -119,6 +185,30 @@ SELECT DISTINCT trading_date FROM (
 ) dates
 ORDER BY trading_date
 """
+
+RECOMPUTE_MOMENTUM_SQL = {
+    CountrySet.US: """
+UPDATE us_metrics
+SET momentum = CASE
+    WHEN sma_50 IS NULL OR sma_200 IS NULL OR sma_200 = 0 THEN NULL
+    ELSE sma_50 / sma_200
+END
+""",
+    CountrySet.SWE: """
+UPDATE swe_metrics
+SET momentum = CASE
+    WHEN sma_50 IS NULL OR sma_200 IS NULL OR sma_200 = 0 THEN NULL
+    ELSE sma_50 / sma_200
+END
+""",
+    CountrySet.UK: """
+UPDATE uk_metrics
+SET momentum = CASE
+    WHEN sma_50 IS NULL OR sma_200 IS NULL OR sma_200 = 0 THEN NULL
+    ELSE sma_50 / sma_200
+END
+""",
+}
 
 
 def retention_cutoff(retention_days: int, *, today: date | None = None) -> date:
@@ -138,8 +228,8 @@ def _metric_values(rows: list[MetricRow], *, updated_at: datetime) -> list[tuple
             row.sma_50,
             row.sma_200,
             row.current_price,
-            row.raw_50,
-            row.raw_200,
+            row.momentum,
+            row.z_score,
         )
         for row in rows
     ]
@@ -217,36 +307,78 @@ def filter_stale_tickers(
     return stale, skipped, max_date
 
 
-def load_raw_ratios_by_market_for_date(
+def load_momentum_by_market_for_date(
     database_url: str,
     trading_date: date,
-) -> dict[str | None, tuple[list[Decimal], list[Decimal]]]:
-    """Return raw_50/raw_200 values grouped by tickers.market for a trading_date."""
+) -> dict[str | None, list[Decimal]]:
+    """Return momentum values grouped by tickers.market for a trading_date."""
     with psycopg2.connect(database_url) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                LOAD_RAW_RATIOS_BY_MARKET_FOR_DATE_SQL,
+                LOAD_MOMENTUM_BY_MARKET_FOR_DATE_SQL,
                 (trading_date, trading_date, trading_date),
             )
             rows = cur.fetchall()
 
-    grouped: dict[str | None, tuple[list[Decimal], list[Decimal]]] = {}
-    for market, raw_50, raw_200 in rows:
-        raw_50_values, raw_200_values = grouped.setdefault(market, ([], []))
-        if raw_50 is not None:
-            raw_50_values.append(raw_50)
-        if raw_200 is not None:
-            raw_200_values.append(raw_200)
+    grouped: dict[str | None, list[Decimal]] = {}
+    for market, momentum in rows:
+        values = grouped.setdefault(market, [])
+        if momentum is not None:
+            values.append(momentum)
 
     return grouped
 
 
-def load_distinct_trading_dates(database_url: str) -> list[date]:
-    """Return all distinct trading_date values across country metrics tables."""
+def update_z_scores_for_trading_date(
+    database_url: str,
+    trading_date: date,
+    *,
+    country: CountrySet | None = None,
+) -> int:
+    """Set z_score from market aggregates for all metrics on ``trading_date``."""
+    countries = [country] if country is not None else list(CountrySet)
+    updated = 0
     with psycopg2.connect(database_url) as conn:
         with conn.cursor() as cur:
-            cur.execute(LOAD_DISTINCT_TRADING_DATES_SQL)
+            for set_key in countries:
+                cur.execute(UPDATE_Z_SCORES_SQL[set_key], (trading_date,))
+                updated += cur.rowcount
+        conn.commit()
+
+    return updated
+
+
+def load_distinct_trading_dates(
+    database_url: str,
+    *,
+    country: CountrySet | None = None,
+) -> list[date]:
+    """Return distinct trading_date values from country metrics tables."""
+    with psycopg2.connect(database_url) as conn:
+        with conn.cursor() as cur:
+            if country is None:
+                cur.execute(LOAD_ALL_DISTINCT_TRADING_DATES_SQL)
+            else:
+                cur.execute(LOAD_DISTINCT_TRADING_DATES_SQL[country])
             return [row[0] for row in cur.fetchall()]
+
+
+def recompute_momentum_from_smas(
+    database_url: str,
+    *,
+    country: CountrySet | None = None,
+) -> int:
+    """Set ``momentum = sma_50 / sma_200`` on metrics rows (DB-only recompute)."""
+    countries = [country] if country is not None else list(CountrySet)
+    updated = 0
+    with psycopg2.connect(database_url) as conn:
+        with conn.cursor() as cur:
+            for set_key in countries:
+                cur.execute(RECOMPUTE_MOMENTUM_SQL[set_key])
+                updated += cur.rowcount
+        conn.commit()
+
+    return updated
 
 
 def purge_stale_metrics(database_url: str, retention_days: int) -> int:

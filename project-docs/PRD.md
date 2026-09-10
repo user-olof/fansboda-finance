@@ -17,8 +17,9 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
 
 ### Goals
 
-- Maintain a rolling one-year history of SMA-50, SMA-200, and current price for
-  a user-managed watchlist of symbols (one row per ticker per `trading_date`).
+- Maintain a rolling one-year history of SMA-50, SMA-200, current price,
+  **momentum** (`sma_50 / sma_200`), and cross-sectional **`z_score`** for a
+  user-managed watchlist of symbols (one row per ticker per `trading_date`).
 - Run fully unattended on a weekly schedule (Thursdays).
 - Keep monthly operating cost at ~$0 within GCP Always Free and Neon free tiers.
 - Be resilient to transient data-provider failures (rate limits, timeouts).
@@ -29,7 +30,8 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
 
 - No user-facing UI or API — data is consumed directly from Postgres.
 - No intraday / real-time quotes; the job runs once weekly (Thursday).
-- No additional technical indicators beyond SMA-50, SMA-200, and current price.
+- No additional technical indicators beyond SMA-50, SMA-200, current price,
+  and the derived `momentum` / `z_score` fields in §6.
 - No portfolio, order, or transaction tracking.
 - No authentication/authorization layer (single-owner, infra-level access only).
 
@@ -41,7 +43,10 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
   above/below their long-term moving averages.
 - **Primary use case:** identify golden-cross / death-cross style signals by
   comparing `current_price`, `sma_50`, and `sma_200` for each watched symbol,
-  including trends over the retained history.
+  including trends over the retained history. Use **`momentum`** and
+  **`z_score`** (vs peers in the same country set / listing `market` on that
+  date via `*_market_metrics`) to rank relative strength for heatmaps; sector
+  views via `*_tickers.sector`.
 - **Watchlist management:** add or remove symbols by editing `us_tickers`,
   `swe_tickers`, or `uk_tickers` (directly via SQL or by running the seeding
   script).
@@ -90,11 +95,18 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
   connection, empty frames) with exponential backoff (`download_batch`).
 - **FR-5 Compute metrics:** From daily closes compute SMA-50 and SMA-200; skip
   symbols with fewer than 200 valid closes. Capture the latest close as
-  `current_price` and the latest bar's date as `trading_date`.
+  `current_price` and the latest bar's date as `trading_date`. Compute
+  **`momentum`** = `sma_50 / sma_200` (NULL when either SMA is NULL or
+  `sma_200` is zero). After per-ticker values for a `trading_date` are known,
+  upsert cross-sectional **`momentum_mean`** / **`momentum_std`** into the
+  matching `*_market_metrics` row, then set each ticker's **`z_score`** =
+  `(momentum - momentum_mean) / momentum_std` (NULL when `momentum` or
+  aggregates are missing, or `momentum_std` is zero).
 - **FR-6 Insert:** Append one new row per ticker into `us_metrics`,
   `swe_metrics`, or `uk_metrics` for the computed `trading_date`
-  (`insert_metrics`). Do not overwrite prior rows; use
-  `ON CONFLICT (ticker, trading_date) DO NOTHING` so re-runs are idempotent.
+  (`insert_metrics`), including `momentum` and `z_score`. Do not overwrite
+  prior rows; use `ON CONFLICT (ticker, trading_date) DO NOTHING` so re-runs
+  are idempotent.
 - **FR-7 Retention purge:** After inserts, delete rows from `us_metrics` /
   `swe_metrics` / `uk_metrics` (and the matching `*_market_metrics` tables)
   where `trading_date` is older than one year (`purge_stale_metrics`).
@@ -243,8 +255,8 @@ One row per ticker per `trading_date` within that country set.
 | `sma_50` | NUMERIC(18,6) | 50-day SMA of closes |
 | `sma_200` | NUMERIC(18,6) | 200-day SMA of closes |
 | `current_price` | NUMERIC(18,6) | Adjusted close on `trading_date` |
-| `raw_50` | NUMERIC(18,6) | 50-day SMA / current price |
-| `raw_200`| NUMERIC(18,6) | 200-day SMA / current price |
+| `momentum` | NUMERIC(18,6) | `sma_50 / sma_200` |
+| `z_score` | NUMERIC(18,6) | `(momentum - momentum_mean) / momentum_std` using that date's matching `*_market_metrics` aggregates |
 
 Unique constraint on `(ticker, trading_date)`. Multiple rows per ticker are
 expected; each weekly run appends a new snapshot. Rows with `trading_date`
@@ -252,18 +264,17 @@ older than one year are deleted on each run.
 
 ### Market metrics tables (`us_market_metrics` / `swe_market_metrics` / `uk_market_metrics`)
 
-Cross-sectional SMA stats for one country set; one row per `(market, trading_date)`.
-Aggregates `raw_50` / `raw_200` from that set's metrics rows on that date.
+Cross-sectional momentum stats for one country set; one row per
+`(market, trading_date)`. Aggregates `momentum` from that set's metrics rows
+on that date.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `market` | TEXT | Listing market bucket (e.g. `us_market`, `se_market`, `uk_market`); matches the set's tickers `market` values |
 | `trading_date` | DATE | Market session used for this snapshot |
 | `updated_at` | TIMESTAMPTZ | When the row was written |
-| `raw_mean_50` | NUMERIC(18,6) | Mean of tickers' `raw_50` in this set on this date |
-| `raw_mean_200`| NUMERIC(18,6) | Mean of tickers' `raw_200` in this set on this date |
-| `raw_std_50` | NUMERIC(18,6) | St. dev. of tickers' `raw_50` in this set on this date |
-| `raw_std_200` | NUMERIC(18,6) | St. dev. of tickers' `raw_200` in this set on this date |
+| `momentum_mean` | NUMERIC(18,6) | Mean of tickers' `momentum` in this set on this date |
+| `momentum_std` | NUMERIC(18,6) | St. dev. of tickers' `momentum` in this set on this date |
 
 Unique constraint on `(market, trading_date)`. Rows with `trading_date` older
 than one year are deleted on each weekly run (same retention as the metrics

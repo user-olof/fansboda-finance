@@ -8,21 +8,21 @@ import pytest
 from db.metrics import (
     filter_stale_tickers,
     insert_metrics,
-    load_raw_ratios_by_market_for_date,
+    load_momentum_by_market_for_date,
 )
 from db.tickers import load_tickers_from_db
 from fetch_sma import (
     aggregate_market_stats,
     chunked,
-    compute_raw_ratios,
+    compute_momentum,
     compute_smas,
+    compute_z_score,
     metric_row_from_history,
     metric_rows_from_batch,
     trading_date_from_index,
     upsert_market_for_trading_dates,
 )
 from models import MarketRow, MetricRow, TickerEntry
-
 
 def test_load_tickers_from_db() -> None:
     mock_cursor = MagicMock()
@@ -101,23 +101,22 @@ def test_load_tickers_from_db_scopes_to_country() -> None:
     assert "FROM swe_tickers" not in sql
 
 
-def test_compute_raw_ratios_divides_sma_by_price() -> None:
-    raw_50, raw_200 = compute_raw_ratios(
-        Decimal("100"),
-        Decimal("200"),
-        Decimal("50"),
-    )
-
-    assert raw_50 == Decimal("2")
-    assert raw_200 == Decimal("4")
+def test_compute_momentum_divides_sma50_by_sma200() -> None:
+    assert compute_momentum(Decimal("100"), Decimal("50")) == Decimal("2.0")
 
 
-def test_compute_raw_ratios_returns_none_when_price_missing_or_zero() -> None:
-    assert compute_raw_ratios(Decimal("1"), Decimal("2"), None) == (None, None)
-    assert compute_raw_ratios(Decimal("1"), Decimal("2"), Decimal("0")) == (
-        None,
-        None,
-    )
+def test_compute_momentum_returns_none_when_inputs_missing_or_zero() -> None:
+    assert compute_momentum(None, Decimal("2")) is None
+    assert compute_momentum(Decimal("1"), None) is None
+    assert compute_momentum(Decimal("1"), Decimal("0")) is None
+
+
+def test_compute_z_score() -> None:
+    assert compute_z_score(
+        Decimal("1.2"), Decimal("1.0"), Decimal("0.2")
+    ) == Decimal("1.0")
+    assert compute_z_score(Decimal("1"), Decimal("1"), Decimal("0")) is None
+    assert compute_z_score(None, Decimal("1"), Decimal("1")) is None
 
 
 def test_aggregate_market_stats_uses_population_std() -> None:
@@ -125,38 +124,36 @@ def test_aggregate_market_stats_uses_population_std() -> None:
         date(2026, 6, 6),
         "us_market",
         [Decimal("1"), Decimal("3")],
-        [Decimal("0.5"), Decimal("0.7")],
     )
 
     assert row == MarketRow(
         market="us_market",
         trading_date=date(2026, 6, 6),
-        raw_mean_50=Decimal("2"),
-        raw_mean_200=Decimal("0.6"),
-        raw_std_50=Decimal("1"),
-        raw_std_200=Decimal("0.1"),
+        momentum_mean=Decimal("2"),
+        momentum_std=Decimal("1"),
     )
 
 
 def test_aggregate_market_stats_returns_none_when_empty() -> None:
-    assert aggregate_market_stats(date(2026, 6, 6), "us_market", [], []) is None
+    assert aggregate_market_stats(date(2026, 6, 6), "us_market", []) is None
 
 
-def test_load_raw_ratios_by_market_for_date_groups_by_tickers_market() -> None:
+def test_load_momentum_by_market_for_date_groups_by_tickers_market() -> None:
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = [
-        ("us_market", Decimal("0.5"), Decimal("0.4")),
-        ("us_market", Decimal("0.7"), None),
-        ("se_market", Decimal("0.6"), Decimal("0.5")),
-        ("uk_market", Decimal("0.8"), Decimal("0.7")),
-        (None, Decimal("0.9"), Decimal("0.8")),
+        ("us_market", Decimal("0.5")),
+        ("us_market", Decimal("0.7")),
+        ("se_market", Decimal("0.6")),
+        ("uk_market", Decimal("0.8")),
+        (None, Decimal("0.9")),
+        ("us_market", None),
     ]
     mock_conn = MagicMock()
     mock_conn.__enter__.return_value = mock_conn
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
     with patch("db.metrics.psycopg2.connect", return_value=mock_conn):
-        grouped = load_raw_ratios_by_market_for_date(
+        grouped = load_momentum_by_market_for_date(
             "postgresql://example",
             date(2026, 6, 6),
         )
@@ -165,36 +162,41 @@ def test_load_raw_ratios_by_market_for_date_groups_by_tickers_market() -> None:
     assert "JOIN us_tickers t ON t.symbol = m.ticker" in sql
     assert "JOIN swe_tickers t ON t.symbol = m.ticker" in sql
     assert "JOIN uk_tickers t ON t.symbol = m.ticker" in sql
+    assert "m.momentum" in sql
     assert mock_cursor.execute.call_args[0][1] == (
         date(2026, 6, 6),
         date(2026, 6, 6),
         date(2026, 6, 6),
     )
     assert grouped == {
-        "us_market": ([Decimal("0.5"), Decimal("0.7")], [Decimal("0.4")]),
-        "se_market": ([Decimal("0.6")], [Decimal("0.5")]),
-        "uk_market": ([Decimal("0.8")], [Decimal("0.7")]),
-        None: ([Decimal("0.9")], [Decimal("0.8")]),
+        "us_market": [Decimal("0.5"), Decimal("0.7")],
+        "se_market": [Decimal("0.6")],
+        "uk_market": [Decimal("0.8")],
+        None: [Decimal("0.9")],
     }
 
 
 def test_upsert_market_for_trading_dates_upserts_per_listing_market() -> None:
     trading_date = date(2026, 6, 6)
     with patch(
-        "fetch_sma.load_raw_ratios_by_market_for_date",
+        "fetch_sma.load_momentum_by_market_for_date",
         return_value={
-            "us_market": ([Decimal("1"), Decimal("3")], [Decimal("0.5"), Decimal("0.7")]),
-            "se_market": ([Decimal("0.6")], [Decimal("0.5")]),
-            "uk_market": ([Decimal("0.8")], [Decimal("0.7")]),
+            "us_market": [Decimal("1"), Decimal("3")],
+            "se_market": [Decimal("0.6")],
+            "uk_market": [Decimal("0.8")],
         },
     ):
         with patch("fetch_sma.upsert_market_stats") as mock_upsert:
-            upsert_market_for_trading_dates(
-                "postgresql://example",
-                {trading_date},
-            )
+            with patch("fetch_sma.update_z_scores_for_trading_date") as mock_z:
+                upsert_market_for_trading_dates(
+                    "postgresql://example",
+                    {trading_date},
+                )
 
     assert mock_upsert.call_count == 3
+    mock_z.assert_called_once_with(
+        "postgresql://example", trading_date, country=None
+    )
     rows_by_market = {
         call.args[1].market: call.args[1]
         for call in mock_upsert.call_args_list
@@ -203,27 +205,28 @@ def test_upsert_market_for_trading_dates_upserts_per_listing_market() -> None:
     se_row = rows_by_market["se_market"]
     uk_row = rows_by_market["uk_market"]
     assert us_row.trading_date == trading_date
-    assert us_row.raw_mean_50 == Decimal("2")
+    assert us_row.momentum_mean == Decimal("2")
+    assert us_row.momentum_std == Decimal("1")
     assert se_row.market == "se_market"
-    assert se_row.raw_mean_50 == Decimal("0.6")
+    assert se_row.momentum_mean == Decimal("0.6")
     assert uk_row.market == "uk_market"
-    assert uk_row.raw_mean_50 == Decimal("0.8")
-    assert uk_row.raw_mean_200 == Decimal("0.7")
+    assert uk_row.momentum_mean == Decimal("0.8")
 
 
 def test_upsert_market_for_trading_dates_skips_null_market_bucket() -> None:
     with patch(
-        "fetch_sma.load_raw_ratios_by_market_for_date",
+        "fetch_sma.load_momentum_by_market_for_date",
         return_value={
-            None: ([Decimal("0.9")], [Decimal("0.8")]),
-            "se_market": ([Decimal("0.6")], [Decimal("0.5")]),
+            None: [Decimal("0.9")],
+            "se_market": [Decimal("0.6")],
         },
     ):
         with patch("fetch_sma.upsert_market_stats") as mock_upsert:
-            upsert_market_for_trading_dates(
-                "postgresql://example",
-                {date(2026, 6, 6)},
-            )
+            with patch("fetch_sma.update_z_scores_for_trading_date"):
+                upsert_market_for_trading_dates(
+                    "postgresql://example",
+                    {date(2026, 6, 6)},
+                )
 
     mock_upsert.assert_called_once()
     assert mock_upsert.call_args[0][1].market == "se_market"
@@ -300,9 +303,8 @@ def test_metric_row_from_history() -> None:
     assert row.sma_50 == Decimal("195.5")
     assert row.sma_200 == Decimal("120.5")
     assert row.current_price == Decimal("220")
-    assert row.raw_50 == Decimal("0.888636")
-    assert row.raw_200 == Decimal("0.547727")
-
+    assert row.momentum == Decimal("1.622407")
+    assert row.z_score is None
 
 def test_metric_rows_from_batch_parses_multiindex() -> None:
     index = pd.date_range("2025-01-01", periods=220, freq="B")
@@ -489,8 +491,10 @@ def test_insert_metrics_executes_values() -> None:
     sql = mock_execute.call_args[0][1]
     assert "company" in sql
     assert "currency" in sql
-    assert "raw_50" in sql
-    assert "raw_200" in sql
+    assert "momentum" in sql
+    assert "z_score" in sql
+    assert "raw_50" not in sql
+    assert "raw_200" not in sql
     assert "sector" not in sql
     assert "industry" not in sql
     assert "ON CONFLICT (ticker, trading_date) DO NOTHING" in sql
@@ -515,11 +519,10 @@ def test_insert_metrics_routes_uk_ticker_to_uk_metrics() -> None:
             sma_200=Decimal("2"),
             current_price=Decimal("3"),
             currency="GBp",
-            raw_50=Decimal("0.333333"),
-            raw_200=Decimal("0.666667"),
+            momentum=Decimal("0.5"),
+            z_score=None,
         )
     ]
-
     with patch("db.metrics.psycopg2.connect", return_value=mock_conn):
         with patch("db.metrics.execute_values") as mock_execute:
             inserted = insert_metrics("postgresql://example", rows)

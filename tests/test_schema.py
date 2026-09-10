@@ -19,6 +19,7 @@ MIGRATIONS = [
     REPO_ROOT / "migrate_split_us_swe_tables.sql",
     REPO_ROOT / "migrate_add_exchange_name.sql",
     REPO_ROOT / "migrate_add_uk_tables.sql",
+    REPO_ROOT / "migrate_momentum_zscore.sql",
 ]
 APPLY_MIGRATIONS_SH = REPO_ROOT / "scripts" / "apply_migrations.sh"
 COUNTRY_TABLES = (
@@ -77,10 +78,10 @@ def test_schema_numeric_precision() -> None:
         "sma_50",
         "sma_200",
         "current_price",
-        "raw_50",
-        "raw_200",
-        "raw_mean_50",
-        "raw_std_200",
+        "momentum",
+        "z_score",
+        "momentum_mean",
+        "momentum_std",
     ):
         assert re.search(rf"\b{column}\s+NUMERIC\(18,\s*6\)", sql)
 
@@ -112,14 +113,16 @@ def test_schema_tickers_sector_industry_market_company_exchange_name() -> None:
     assert not re.search(r"\bname\s+TEXT", us_tickers)
 
 
-def test_schema_metrics_currency_and_raw_ratios() -> None:
+def test_schema_metrics_currency_and_momentum() -> None:
     sql = SCHEMA_SQL.read_text(encoding="utf-8")
     us_metrics = sql.split("CREATE TABLE IF NOT EXISTS us_market_metrics", 1)[0]
     us_metrics = us_metrics.split("CREATE TABLE IF NOT EXISTS us_metrics", 1)[1]
     assert re.search(r"\bcurrency\s+TEXT", us_metrics)
     assert re.search(r"\bcompany\s+TEXT", us_metrics)
-    for column in ("raw_50", "raw_200"):
+    for column in ("momentum", "z_score"):
         assert re.search(rf"\b{column}\s+NUMERIC\(18,\s*6\)", us_metrics)
+    assert "raw_50" not in us_metrics
+    assert "raw_200" not in us_metrics
     assert "sector" not in us_metrics.split("CREATE INDEX")[0]
     assert "industry" not in us_metrics.split("CREATE INDEX")[0]
 
@@ -157,6 +160,20 @@ def test_migrate_add_raw_ratios_and_market() -> None:
     assert "CREATE TABLE IF NOT EXISTS market" in sql
     assert "raw_mean_50" in sql
     assert "raw_std_200" in sql
+
+
+def test_migrate_momentum_zscore() -> None:
+    sql = (REPO_ROOT / "migrate_momentum_zscore.sql").read_text(encoding="utf-8")
+    assert "ADD COLUMN IF NOT EXISTS momentum" in sql
+    assert "ADD COLUMN IF NOT EXISTS z_score" in sql
+    assert "ADD COLUMN IF NOT EXISTS momentum_mean" in sql
+    assert "ADD COLUMN IF NOT EXISTS momentum_std" in sql
+    assert "DROP COLUMN IF EXISTS raw_50" in sql
+    assert "DROP COLUMN IF EXISTS raw_mean_50" in sql
+    for table in ("us_metrics", "swe_metrics", "uk_metrics"):
+        assert table in sql
+    for table in ("us_market_metrics", "swe_market_metrics", "uk_market_metrics"):
+        assert table in sql
 
 
 def test_migrate_tickers_market_and_market_metrics() -> None:
@@ -232,6 +249,9 @@ def test_apply_migrations_script_lists_ci_safe_migrations_in_order() -> None:
     )
     assert script.index("migrate_add_uk_tables.sql") > script.index(
         "migrate_add_exchange_name.sql"
+    )
+    assert script.index("migrate_momentum_zscore.sql") > script.index(
+        "migrate_add_uk_tables.sql"
     )
     assert "migrate_one_row_per_ticker.sql" not in script.split("LEGACY_MIGRATIONS=", 1)[
         1

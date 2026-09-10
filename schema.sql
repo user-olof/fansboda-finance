@@ -27,8 +27,8 @@ CREATE TABLE IF NOT EXISTS us_metrics (
     sma_50         NUMERIC(18, 6),
     sma_200        NUMERIC(18, 6),
     current_price  NUMERIC(18, 6),
-    raw_50         NUMERIC(18, 6),
-    raw_200        NUMERIC(18, 6),
+    momentum       NUMERIC(18, 6),
+    z_score        NUMERIC(18, 6),
     CONSTRAINT us_metrics_ticker_trading_date_key UNIQUE (ticker, trading_date)
 );
 
@@ -38,10 +38,8 @@ CREATE TABLE IF NOT EXISTS us_market_metrics (
     market          TEXT            NOT NULL,
     trading_date    DATE            NOT NULL,
     updated_at      TIMESTAMPTZ     NOT NULL,
-    raw_mean_50     NUMERIC(18, 6),
-    raw_mean_200    NUMERIC(18, 6),
-    raw_std_50      NUMERIC(18, 6),
-    raw_std_200     NUMERIC(18, 6),
+    momentum_mean   NUMERIC(18, 6),
+    momentum_std    NUMERIC(18, 6),
     PRIMARY KEY (market, trading_date)
 );
 
@@ -73,8 +71,8 @@ CREATE TABLE IF NOT EXISTS swe_metrics (
     sma_50         NUMERIC(18, 6),
     sma_200        NUMERIC(18, 6),
     current_price  NUMERIC(18, 6),
-    raw_50         NUMERIC(18, 6),
-    raw_200        NUMERIC(18, 6),
+    momentum       NUMERIC(18, 6),
+    z_score        NUMERIC(18, 6),
     CONSTRAINT swe_metrics_ticker_trading_date_key UNIQUE (ticker, trading_date)
 );
 
@@ -84,10 +82,8 @@ CREATE TABLE IF NOT EXISTS swe_market_metrics (
     market          TEXT            NOT NULL,
     trading_date    DATE            NOT NULL,
     updated_at      TIMESTAMPTZ     NOT NULL,
-    raw_mean_50     NUMERIC(18, 6),
-    raw_mean_200    NUMERIC(18, 6),
-    raw_std_50      NUMERIC(18, 6),
-    raw_std_200     NUMERIC(18, 6),
+    momentum_mean   NUMERIC(18, 6),
+    momentum_std    NUMERIC(18, 6),
     PRIMARY KEY (market, trading_date)
 );
 
@@ -119,8 +115,8 @@ CREATE TABLE IF NOT EXISTS uk_metrics (
     sma_50         NUMERIC(18, 6),
     sma_200        NUMERIC(18, 6),
     current_price  NUMERIC(18, 6),
-    raw_50         NUMERIC(18, 6),
-    raw_200        NUMERIC(18, 6),
+    momentum       NUMERIC(18, 6),
+    z_score        NUMERIC(18, 6),
     CONSTRAINT uk_metrics_ticker_trading_date_key UNIQUE (ticker, trading_date)
 );
 
@@ -130,10 +126,8 @@ CREATE TABLE IF NOT EXISTS uk_market_metrics (
     market          TEXT            NOT NULL,
     trading_date    DATE            NOT NULL,
     updated_at      TIMESTAMPTZ     NOT NULL,
-    raw_mean_50     NUMERIC(18, 6),
-    raw_mean_200    NUMERIC(18, 6),
-    raw_std_50      NUMERIC(18, 6),
-    raw_std_200     NUMERIC(18, 6),
+    momentum_mean   NUMERIC(18, 6),
+    momentum_std    NUMERIC(18, 6),
     PRIMARY KEY (market, trading_date)
 );
 

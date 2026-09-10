@@ -19,7 +19,7 @@ from fetch_sma import (
     SMA_200_WINDOW,
     _to_decimal,
     chunked,
-    compute_raw_ratios,
+    compute_momentum,
     compute_smas,
     trading_date_from_index,
     upsert_market_for_trading_dates,
@@ -84,7 +84,7 @@ def metric_rows_from_weekly_samples(
         sma_50, sma_200 = compute_smas(window_close)
         trading_date = trading_date_from_index(window_close.index)
         current_price = _to_decimal(window_close.iloc[-1])
-        raw_50, raw_200 = compute_raw_ratios(sma_50, sma_200, current_price)
+        momentum = compute_momentum(sma_50, sma_200)
         rows.append(
             MetricRow(
                 ticker=ticker,
@@ -94,8 +94,8 @@ def metric_rows_from_weekly_samples(
                 sma_200=sma_200,
                 current_price=current_price,
                 currency=currency,
-                raw_50=raw_50,
-                raw_200=raw_200,
+                momentum=momentum,
+                z_score=None,
             )
         )
 
