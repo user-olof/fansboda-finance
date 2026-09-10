@@ -12,6 +12,7 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 | Historical backfill | Bootstrap of rolling weekly SMA snapshots (~2 years), **scoped per country set** (`--country us|swe|uk`) so adding a market later does not re-process others |
 | Watchlist seeding | Load symbols from file, resolve company metadata, upsert into Postgres (optional `--country`) |
 | Rolling retention | Keeps ~1 year of `*_metrics` and `*_market_metrics` history; older rows purged after each weekly run |
+| Golden Cross detection | Ad-hoc scan of stored SMA-50/200 history for downtrend → convergence → crossover ([RFC-013](./rfc/RFC-013-golden-cross-detection.md)) |
 | Centralized configuration | `DevConfig` / `ProdConfig` in `config.py`; selected via `APP_ENV` |
 | Zero-cost ops | **One** GCP `e2-micro` (Always Free) + Neon Postgres free tier |
 | CI/CD — production | `pytest` on PR to `main`; deploy to long-lived Production VM on push to `main` |
@@ -22,7 +23,7 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 ## Users & use cases
 
 - **Primary user:** project owner with personal watchlists of US, Swedish (`.ST`), and UK (`.L`) symbols.
-- **Primary use case:** query `us_metrics` / `swe_metrics` / `uk_metrics` to compare `current_price`, `sma_50`, and `sma_200` — including trends over retained history (golden-cross / death-cross style signals). Use **`momentum`**, **`z_score`**, and `*_market_metrics` (`momentum_mean` / `momentum_std`) to rank tickers relative to peers in the same country set on each `trading_date` (cross-sectional normalization for heatmaps; sector views via `*_tickers.sector`).
+- **Primary use case:** query `us_metrics` / `swe_metrics` / `uk_metrics` to compare `current_price`, `sma_50`, and `sma_200` — including trends over retained history (golden-cross / death-cross style signals). Run `detect_golden_cross.py` for structured Golden Cross detections from stored SMAs ([RFC-013](./rfc/RFC-013-golden-cross-detection.md)). Use **`momentum`**, **`z_score`**, and `*_market_metrics` (`momentum_mean` / `momentum_std`) to rank tickers relative to peers in the same country set on each `trading_date` (cross-sectional normalization for heatmaps; sector views via `*_tickers.sector`).
 - **Watchlist management:** add or remove symbols via SQL on `us_tickers` / `swe_tickers` / `uk_tickers`, or by running `seed_tickers.py` (optionally `--country us|swe|uk` to touch only one set).
 
 ---
@@ -179,6 +180,26 @@ pipenv run python backfill_sma.py --country us
 
 **Status:** Shipped — required `--country us|swe|uk` scopes watchlist load and writes ([RFC-005](./rfc/RFC-005-historical-backfill.md)).
 
+### Golden Cross detection (`detect_golden_cross.py`)
+
+Ad-hoc detector over retained weekly SMA history — **not** cron-scheduled and **not** an alerting product (PRD §11). Uses stored `sma_50` / `sma_200` only (no yfinance).
+
+| Capability | Detail |
+|------------|--------|
+| Pattern stages | (1) `sma_50 < sma_200` for ≥ `min_below_weeks`; (2) gap narrows over `convergence_weeks`; (3) crossover when `sma_50` moves from below to at/above `sma_200` |
+| Country scope | Optional `--country us\|swe\|uk` (default: all three sets) |
+| Filters | Optional `--tickers AAPL,VOLV-B.ST,VOD.L` |
+| Output | `table` (default), `json` (includes stage annotations), or `csv` |
+| Config | `GOLDEN_CROSS_MIN_BELOW_WEEKS` (default 4), `GOLDEN_CROSS_CONVERGENCE_WEEKS` (default 3); CLI overrides |
+
+```bash
+pipenv run python detect_golden_cross.py
+pipenv run python detect_golden_cross.py --country us --format json
+pipenv run python detect_golden_cross.py --tickers AAPL,MSFT --min-below-weeks 6
+```
+
+**Status:** Shipped — pure logic in `golden_cross.py`; DB load via `db.metrics.load_sma_history` ([RFC-013](./rfc/RFC-013-golden-cross-detection.md)).
+
 ---
 
 ## Configuration
@@ -206,6 +227,8 @@ All tunables live in **`config.py`** (PRD §5.5):
 | `backfill_window_weeks` | 52 | 52 | Rolling SMA window length |
 | `backfill_batch_size` | 25 | 25 | Backfill batch size |
 | `backfill_batch_delay_seconds` | 5.0 | 5.0 | Delay between backfill batches |
+| `golden_cross_min_below_weeks` | 4 | 4 | Min consecutive weeks `sma_50 < sma_200` before a golden cross |
+| `golden_cross_convergence_weeks` | 3 | 3 | Lookback weeks for gap narrowing before the cross |
 
 `DevConfig` and `ProdConfig` may override shared defaults per environment.
 
@@ -292,6 +315,7 @@ Uses GitHub **`DEV`** environment and `DATABASE_URL` secret (dev branch). Deploy
 | Manual weekly run | `sudo -u fansboda bash -c 'cd /opt/fansboda-finance && set -a && . ./.env && set +a && PIPENV_VENV_IN_PROJECT=1 pipenv run python fetch_sma.py'` |
 | Seed one country set | `pipenv run python seed_tickers.py --country us` (or `swe` / `uk`) |
 | Backfill one country set | `pipenv run python backfill_sma.py --country us` (or `swe` / `uk`; do not re-run a completed set when adding another) |
+| Detect golden crosses | `pipenv run python detect_golden_cross.py` (optional `--country` / `--format json`) |
 | Dev backfill CI | Manual `workflow_dispatch` on `dev-backfill.yml` with `country=us\|swe\|uk` |
 | Verify data | `SELECT * FROM us_metrics ORDER BY trading_date DESC, ticker LIMIT 10;` (same for `swe_metrics` / `uk_metrics`) |
 | Check retention | `SELECT MIN(trading_date), MAX(trading_date), COUNT(*) FROM us_metrics;` (same for `swe_metrics` / `uk_metrics`) |
@@ -332,7 +356,7 @@ Explicitly **not** part of fansboda-finance (PRD §2, §11):
 
 - User-facing UI or read API
 - Intraday or real-time quotes (weekly Thursday job only)
-- Additional indicators (EMA, RSI, MACD) or signal/alerting layer
+- Additional indicators (EMA, RSI, MACD) or signal/alerting layer (push notifications, watchers). Ad-hoc **Golden Cross detection** from stored SMAs is in scope — see [RFC-013](./rfc/RFC-013-golden-cross-detection.md).
 - Portfolio, order, or transaction tracking
 - Application authentication / authorization
 - Gap detection for missed weekly runs

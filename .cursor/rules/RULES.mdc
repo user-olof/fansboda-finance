@@ -20,10 +20,10 @@ Lightweight weekly pipeline: yfinance → SMA-50/200 + close → Neon Postgres. 
 
 | Path | Role |
 |------|------|
-| `fetch_sma.py`, `seed_tickers.py`, `backfill_sma.py`, `backfill_market.py`, `refresh_tickers.py` | Job entrypoints |
-| `symbols.py`, `yfinance_client.py` | Shared symbol parsing and yfinance I/O |
+| `fetch_sma.py`, `seed_tickers.py`, `backfill_sma.py`, `backfill_market.py`, `refresh_tickers.py`, `detect_golden_cross.py` | Job entrypoints |
+| `symbols.py`, `yfinance_client.py`, `golden_cross.py` | Shared symbol parsing, yfinance I/O, golden-cross detection |
 | `config.py` | `BaseConfig`, `DevConfig`, `ProdConfig`, `get_config()` |
-| `models.py` | `TickerEntry`, `MetricRow` |
+| `models.py` | `TickerEntry`, `MetricRow`, `SmaSnapshot` |
 | `db/metrics.py`, `db/tickers.py` | Parameterized SQL — no SQL in job scripts |
 | `db/retention.py` | Rolling retention purge (RFC-004) |
 | `schema.sql`, `migrate_*.sql` | DDL (commit both; see MIGRATIONS.md for upgrade order) |
@@ -41,6 +41,7 @@ Dependencies: **Pipenv only** (`Pipfile` / `Pipfile.lock`). No `requirements.txt
 | `seed_tickers.py` | Load symbols from file, resolve names via yfinance, upsert `us_tickers` / `swe_tickers` / `uk_tickers` (optional `--country us|swe|uk`) |
 | `backfill_sma.py` | One-off per country set (`--country us|swe|uk`): ~730d history, rolling 52-week SMA windows, append to matching `*_metrics`, upsert `*_market_metrics` |
 | `backfill_market.py` | One-off: recompute `momentum` from SMAs, then `*_market_metrics` + `z_score` (optional `--country`) |
+| `detect_golden_cross.py` | Ad-hoc: detect Golden Cross events from stored SMA history (optional `--country`; RFC-013) |
 
 | Utility | Role |
 |---------|------|
@@ -69,7 +70,7 @@ Reuse shared logic (`download_batch`, `compute_smas`, `metric_row_from_history`,
 
 Centralize in `config.py` with **`DevConfig`** (local; loads git-ignored `.env` via `python-dotenv`) and **`ProdConfig`** (VM; env vars only). `get_config()` selects via `APP_ENV` (`dev` default; `prod` / `production` → `ProdConfig`).
 
-Scripts read from the config object — not scattered `os.getenv` calls. Key tunables: `DATABASE_URL`, `TICKERS_FILE`, yfinance batch/retry settings, `METRICS_RETENTION_DAYS`, backfill window/batch settings (see `config.py` defaults).
+Scripts read from the config object — not scattered `os.getenv` calls. Key tunables: `DATABASE_URL`, `TICKERS_FILE`, yfinance batch/retry settings, `METRICS_RETENTION_DAYS`, backfill window/batch settings, golden-cross stage windows (see `config.py` defaults).
 
 ## Code style
 

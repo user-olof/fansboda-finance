@@ -16,7 +16,7 @@ from db.country import (
     sql_for_countries,
     union_all_sql,
 )
-from models import MetricRow
+from models import MetricRow, SmaSnapshot
 
 INSERT_METRICS_SQL = sql_for_countries(
     """
@@ -102,6 +102,23 @@ SET momentum = CASE
     WHEN sma_50 IS NULL OR sma_200 IS NULL OR sma_200 = 0 THEN NULL
     ELSE sma_50 / sma_200
 END
+"""
+)
+
+LOAD_SMA_HISTORY_SQL = sql_for_countries(
+    """
+SELECT ticker, trading_date, sma_50, sma_200
+FROM {metrics}
+ORDER BY ticker, trading_date
+"""
+)
+
+LOAD_SMA_HISTORY_FOR_TICKERS_SQL = sql_for_countries(
+    """
+SELECT ticker, trading_date, sma_50, sma_200
+FROM {metrics}
+WHERE ticker = ANY(%s)
+ORDER BY ticker, trading_date
 """
 )
 
@@ -274,6 +291,42 @@ def recompute_momentum_from_smas(
         conn.commit()
 
     return updated
+
+
+def load_sma_history(
+    database_url: str,
+    *,
+    country: CountrySet | None = None,
+    tickers: list[str] | None = None,
+) -> dict[tuple[CountrySet, str], list[SmaSnapshot]]:
+    """Load ordered SMA snapshots from country metrics tables.
+
+    Returns a mapping of ``(country, ticker)`` → chronological ``SmaSnapshot``
+    list. Optional ``tickers`` filters by symbol list within each selected set.
+    """
+    countries = [country] if country is not None else list(CountrySet)
+    result: dict[tuple[CountrySet, str], list[SmaSnapshot]] = {}
+
+    with psycopg2.connect(database_url) as conn:
+        with conn.cursor() as cur:
+            for set_key in countries:
+                if tickers is not None:
+                    cur.execute(
+                        LOAD_SMA_HISTORY_FOR_TICKERS_SQL[set_key], (tickers,)
+                    )
+                else:
+                    cur.execute(LOAD_SMA_HISTORY_SQL[set_key])
+                for ticker, trading_date, sma_50, sma_200 in cur.fetchall():
+                    key = (set_key, ticker)
+                    result.setdefault(key, []).append(
+                        SmaSnapshot(
+                            trading_date=trading_date,
+                            sma_50=sma_50,
+                            sma_200=sma_200,
+                        )
+                    )
+
+    return result
 
 
 def purge_stale_metrics(database_url: str, retention_days: int) -> int:

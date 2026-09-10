@@ -36,3 +36,12 @@ class MarketRow:
     trading_date: date
     momentum_mean: Decimal | None
     momentum_std: Decimal | None
+
+
+@dataclass(frozen=True)
+class SmaSnapshot:
+    """Minimal SMA history point for golden-cross detection (RFC-013)."""
+
+    trading_date: date
+    sma_50: Decimal | None
+    sma_200: Decimal | None

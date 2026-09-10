@@ -20,6 +20,8 @@ DEFAULT_BACKFILL_HISTORY_DAYS = 730
 DEFAULT_BACKFILL_WINDOW_WEEKS = 52
 DEFAULT_BACKFILL_BATCH_SIZE = 25
 DEFAULT_BACKFILL_BATCH_DELAY_SECONDS = 5.0
+DEFAULT_GOLDEN_CROSS_MIN_BELOW_WEEKS = 4
+DEFAULT_GOLDEN_CROSS_CONVERGENCE_WEEKS = 3
 
 _PRODUCTION_APP_ENVS = frozenset({"prod", "production"})
 
@@ -79,6 +81,10 @@ class BaseConfig:
     backfill_window_weeks: int = DEFAULT_BACKFILL_WINDOW_WEEKS
     backfill_batch_size: int = DEFAULT_BACKFILL_BATCH_SIZE
     backfill_batch_delay_seconds: float = DEFAULT_BACKFILL_BATCH_DELAY_SECONDS
+    golden_cross_min_below_weeks: int = DEFAULT_GOLDEN_CROSS_MIN_BELOW_WEEKS
+    golden_cross_convergence_weeks: int = (
+        DEFAULT_GOLDEN_CROSS_CONVERGENCE_WEEKS
+    )
 
     @classmethod
     def _from_env(cls, *, require_database_url: bool = True) -> BaseConfig:
@@ -115,6 +121,14 @@ class BaseConfig:
             backfill_batch_delay_seconds=_env_float(
                 "BACKFILL_BATCH_DELAY_SECONDS",
                 DEFAULT_BACKFILL_BATCH_DELAY_SECONDS,
+            ),
+            golden_cross_min_below_weeks=_env_int(
+                "GOLDEN_CROSS_MIN_BELOW_WEEKS",
+                DEFAULT_GOLDEN_CROSS_MIN_BELOW_WEEKS,
+            ),
+            golden_cross_convergence_weeks=_env_int(
+                "GOLDEN_CROSS_CONVERGENCE_WEEKS",
+                DEFAULT_GOLDEN_CROSS_CONVERGENCE_WEEKS,
             ),
         )
 
