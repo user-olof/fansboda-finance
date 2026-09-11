@@ -11,6 +11,7 @@ JOB_SCRIPTS = (
     "backfill_sma.py",
     "backfill_market.py",
     "refresh_tickers.py",
+    "detect_crosses.py",
 )
 
 SQL_MARKERS = (

@@ -20,6 +20,8 @@ DEFAULT_BACKFILL_HISTORY_DAYS = 730
 DEFAULT_BACKFILL_WINDOW_WEEKS = 52
 DEFAULT_BACKFILL_BATCH_SIZE = 25
 DEFAULT_BACKFILL_BATCH_DELAY_SECONDS = 5.0
+DEFAULT_CROSS_MIN_REGIME_WEEKS = 4
+DEFAULT_CROSS_CONVERGENCE_WEEKS = 3
 
 _PRODUCTION_APP_ENVS = frozenset({"prod", "production"})
 
@@ -79,6 +81,16 @@ class BaseConfig:
     backfill_window_weeks: int = DEFAULT_BACKFILL_WINDOW_WEEKS
     backfill_batch_size: int = DEFAULT_BACKFILL_BATCH_SIZE
     backfill_batch_delay_seconds: float = DEFAULT_BACKFILL_BATCH_DELAY_SECONDS
+    cross_min_regime_weeks: int = DEFAULT_CROSS_MIN_REGIME_WEEKS
+    cross_convergence_weeks: int = DEFAULT_CROSS_CONVERGENCE_WEEKS
+
+    def __post_init__(self) -> None:
+        if self.cross_convergence_weeks > self.cross_min_regime_weeks:
+            raise ValueError(
+                "cross_convergence_weeks must be <= cross_min_regime_weeks "
+                f"(got convergence={self.cross_convergence_weeks}, "
+                f"regime={self.cross_min_regime_weeks})"
+            )
 
     @classmethod
     def _from_env(cls, *, require_database_url: bool = True) -> BaseConfig:
@@ -115,6 +127,12 @@ class BaseConfig:
             backfill_batch_delay_seconds=_env_float(
                 "BACKFILL_BATCH_DELAY_SECONDS",
                 DEFAULT_BACKFILL_BATCH_DELAY_SECONDS,
+            ),
+            cross_min_regime_weeks=_env_int(
+                "CROSS_MIN_REGIME_WEEKS", DEFAULT_CROSS_MIN_REGIME_WEEKS
+            ),
+            cross_convergence_weeks=_env_int(
+                "CROSS_CONVERGENCE_WEEKS", DEFAULT_CROSS_CONVERGENCE_WEEKS
             ),
         )
 

@@ -10,7 +10,7 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 | Normalized momentum | Per-ticker `momentum` (`sma_50 / sma_200`) and cross-sectional `z_score` |
 | Market aggregates | Per-`(market, trading_date)` `momentum_mean` / `momentum_std` in `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics` |
 | Historical backfill | Bootstrap of rolling weekly SMA snapshots (~2 years), **scoped per country set** (`--country us|swe|uk`) so adding a market later does not re-process others |
-| Golden Cross & Death Cross detection | Ad-hoc detection of completed three-stage Golden / Death Cross processes over retained weekly SMA-50/200 (PRD §5.6; Planned) |
+| Golden Cross & Death Cross detection | Ad-hoc detection of completed three-stage Golden / Death Cross processes over retained weekly SMA-50/200 (PRD §5.6; Shipped) |
 | Watchlist seeding | Load symbols from file, resolve company metadata, upsert into Postgres (optional `--country`) |
 | Rolling retention | Keeps ~1 year of `*_metrics` and `*_market_metrics` history; older rows purged after each weekly run |
 | Centralized configuration | `DevConfig` / `ProdConfig` in `config.py`; selected via `APP_ENV` |
@@ -186,15 +186,15 @@ Detection-only feature over retained weekly SMA history (PRD §5.6, FR-19 – FR
 
 | Capability | Detail |
 |------------|--------|
-| Status | **Planned** (PRD §5.6) — not Shipped; design: [RFC-013](./rfc/RFC-013-cross-detection.md) |
+| Status | **Shipped** (PRD §5.6) — [RFC-013](./rfc/RFC-013-cross-detection.md) |
 | Mode | Detection-only; not cron-scheduled; no alerts / push / watchers |
 | Golden stages | (1) SMA-50 below SMA-200 → (2) convergence → (3) SMA-50 crosses **above** SMA-200 |
 | Death stages | (1) SMA-50 above SMA-200 → (2) convergence → (3) SMA-50 crosses **below** SMA-200 |
 | Source of truth | Country `*_metrics` only (`sma_50`, `sma_200`, `trading_date`); no yfinance at detection time |
 | Scope | US / SWE / UK; optional country and/or symbol filters for an ad-hoc run |
-| Consumption | Ad-hoc CLI (or equivalent) with human-readable and machine-readable output |
+| Consumption | Ad-hoc CLI `detect_crosses.py` with `--pattern` / `--country` / `--symbols` and `table` / `json` / `csv` output |
 | Gaps | Rows with NULL SMAs are skipped; incomplete stage sequences do not emit events |
-| Stage config | Configurable (PRD FR-26); proposed defaults in [RFC-013](./rfc/RFC-013-cross-detection.md) |
+| Stage config | `CROSS_MIN_REGIME_WEEKS=4`, `CROSS_CONVERGENCE_WEEKS=3` on `BaseConfig` ([RFC-013](./rfc/RFC-013-cross-detection.md) FR-26) |
 | Persistence | No dedicated detections table in this product pass — computed on demand from retained `*_metrics` |
 
 ---
@@ -224,6 +224,8 @@ All tunables live in **`config.py`** (PRD §5.5):
 | `backfill_window_weeks` | 52 | 52 | Rolling SMA window length |
 | `backfill_batch_size` | 25 | 25 | Backfill batch size |
 | `backfill_batch_delay_seconds` | 5.0 | 5.0 | Delay between backfill batches |
+| `cross_min_regime_weeks` | 4 | 4 | Min consecutive valid weeks in stage-1 regime before crossover (RFC-013) |
+| `cross_convergence_weeks` | 3 | 3 | Convergence lookback ending at last regime week; must be ≤ regime weeks |
 
 `DevConfig` and `ProdConfig` may override shared defaults per environment.
 
@@ -358,6 +360,6 @@ Explicitly **not** part of fansboda-finance (PRD §2, §11), except where noted:
 - Gap detection for missed weekly runs
 - Dashboard for `us_metrics` / `swe_metrics` / `uk_metrics` data
 
-**In scope / planned (not out of scope):** Golden Cross & Death Cross *detection* via PRD §5.6 (FR-19 – FR-26) — see the pipeline section above. Stage-window defaults are proposed in [RFC-013](./rfc/RFC-013-cross-detection.md) (FR-26).
+**In scope / shipped:** Golden Cross & Death Cross *detection* via PRD §5.6 (FR-19 – FR-26) — see the pipeline section above. Stage-window defaults are in [RFC-013](./rfc/RFC-013-cross-detection.md) (FR-26); CLI is `detect_crosses.py`.
 
 See PRD §11 for future considerations that may be revisited later.

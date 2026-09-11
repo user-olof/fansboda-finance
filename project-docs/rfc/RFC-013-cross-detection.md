@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | **Priority** | P2 |
-| **Status** | **Proposed** |
+| **Status** | **Implemented** |
 | **Depends on** | RFC-001, RFC-003, RFC-005, RFC-006 |
 | **PRD** | §3, §5.6 (FR-19–FR-26) |
 | **Feature** | [Golden Cross & Death Cross detection](../FEATURES.md#golden-cross--death-cross-detection) |
@@ -196,27 +196,27 @@ time; keep JSON keys stable once shipped.
 
 ## Acceptance criteria
 
-- [ ] Pure detection module covers Golden and Death patterns with shared
+- [x] Pure detection module covers Golden and Death patterns with shared
       knobs; incomplete sequences do not emit
-- [ ] Null SMA rows are skipped when walking series
-- [ ] Crossover uses strict inequality (`>` Golden, `<` Death); equal SMAs
+- [x] Null SMA rows are skipped when walking series
+- [x] Crossover uses strict inequality (`>` Golden, `<` Death); equal SMAs
       do not count
-- [ ] Convergence is first-vs-last gap narrowing over
+- [x] Convergence is first-vs-last gap narrowing over
       `cross_convergence_weeks` ending at the last regime week
-- [ ] Regime requires `cross_min_regime_weeks` consecutive valid weeks in
+- [x] Regime requires `cross_min_regime_weeks` consecutive valid weeks in
       stage-1 regime immediately before the crossover week
-- [ ] Config defaults: `CROSS_MIN_REGIME_WEEKS=4`,
+- [x] Config defaults: `CROSS_MIN_REGIME_WEEKS=4`,
       `CROSS_CONVERGENCE_WEEKS=3` on `BaseConfig`; convergence ≤ regime
       validated
-- [ ] One ad-hoc CLI for both patterns (`--pattern`, optional `--country`,
+- [x] One ad-hoc CLI for both patterns (`--pattern`, optional `--country`,
       ticker subset, `table` / `json` / `csv`)
-- [ ] DB load helper uses parameterized SQL in `db/`; listed in
+- [x] DB load helper uses parameterized SQL in `db/`; listed in
       SQL-security tests when coded
-- [ ] No yfinance calls; not cron-scheduled; no alerting / watchers
-- [ ] No detections table / no new metrics columns (MIGRATIONS.md)
-- [ ] Unit tests for both patterns (including edge cases: equals, NULLs,
+- [x] No yfinance calls; not cron-scheduled; no alerting / watchers
+- [x] No detections table / no new metrics columns (MIGRATIONS.md)
+- [x] Unit tests for both patterns (including edge cases: equals, NULLs,
       incomplete regime, non-converging gap)
-- [ ] Docs (FEATURES status → Shipped when implemented; this RFC →
+- [x] Docs (FEATURES status → Shipped when implemented; this RFC →
       Implemented) updated in the implementation PR
 
 ## Resolved decisions
