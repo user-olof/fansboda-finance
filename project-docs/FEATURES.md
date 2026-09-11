@@ -186,7 +186,7 @@ Detection-only feature over retained weekly SMA history (PRD §5.6, FR-19 – FR
 
 | Capability | Detail |
 |------------|--------|
-| Status | **Planned** (PRD §5.6) — not Shipped; no design RFC yet |
+| Status | **Planned** (PRD §5.6) — not Shipped; design: [RFC-013](./rfc/RFC-013-cross-detection.md) |
 | Mode | Detection-only; not cron-scheduled; no alerts / push / watchers |
 | Golden stages | (1) SMA-50 below SMA-200 → (2) convergence → (3) SMA-50 crosses **above** SMA-200 |
 | Death stages | (1) SMA-50 above SMA-200 → (2) convergence → (3) SMA-50 crosses **below** SMA-200 |
@@ -194,7 +194,7 @@ Detection-only feature over retained weekly SMA history (PRD §5.6, FR-19 – FR
 | Scope | US / SWE / UK; optional country and/or symbol filters for an ad-hoc run |
 | Consumption | Ad-hoc CLI (or equivalent) with human-readable and machine-readable output |
 | Gaps | Rows with NULL SMAs are skipped; incomplete stage sequences do not emit events |
-| Stage config | Stage windows and numeric thresholds configurable later (PRD FR-26); defaults not frozen in the PRD |
+| Stage config | Configurable (PRD FR-26); proposed defaults in [RFC-013](./rfc/RFC-013-cross-detection.md) |
 | Persistence | No dedicated detections table in this product pass — computed on demand from retained `*_metrics` |
 
 ---
@@ -358,6 +358,6 @@ Explicitly **not** part of fansboda-finance (PRD §2, §11), except where noted:
 - Gap detection for missed weekly runs
 - Dashboard for `us_metrics` / `swe_metrics` / `uk_metrics` data
 
-**In scope / planned (not out of scope):** Golden Cross & Death Cross *detection* via PRD §5.6 (FR-19 – FR-26) — see the pipeline section above. Exact stage-window defaults remain deferred to a later design RFC / config (FR-26).
+**In scope / planned (not out of scope):** Golden Cross & Death Cross *detection* via PRD §5.6 (FR-19 – FR-26) — see the pipeline section above. Stage-window defaults are proposed in [RFC-013](./rfc/RFC-013-cross-detection.md) (FR-26).
 
 See PRD §11 for future considerations that may be revisited later.
