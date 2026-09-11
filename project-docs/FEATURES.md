@@ -10,6 +10,7 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 | Normalized momentum | Per-ticker `momentum` (`sma_50 / sma_200`) and cross-sectional `z_score` |
 | Market aggregates | Per-`(market, trading_date)` `momentum_mean` / `momentum_std` in `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics` |
 | Historical backfill | Bootstrap of rolling weekly SMA snapshots (~2 years), **scoped per country set** (`--country us|swe|uk`) so adding a market later does not re-process others |
+| Golden Cross & Death Cross detection | Ad-hoc detection of completed three-stage Golden / Death Cross processes over retained weekly SMA-50/200 (PRD §5.6; Planned) |
 | Watchlist seeding | Load symbols from file, resolve company metadata, upsert into Postgres (optional `--country`) |
 | Rolling retention | Keeps ~1 year of `*_metrics` and `*_market_metrics` history; older rows purged after each weekly run |
 | Centralized configuration | `DevConfig` / `ProdConfig` in `config.py`; selected via `APP_ENV` |
@@ -21,8 +22,8 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 
 ## Users & use cases
 
-- **Primary user:** project owner with personal watchlists of US, Swedish (`.ST`), and UK (`.L`) symbols.
-- **Primary use case:** query `us_metrics` / `swe_metrics` / `uk_metrics` to compare `current_price`, `sma_50`, and `sma_200` — including trends over retained history (golden-cross / death-cross style signals). Use **`momentum`**, **`z_score`**, and `*_market_metrics` (`momentum_mean` / `momentum_std`) to rank tickers relative to peers in the same country set on each `trading_date` (cross-sectional normalization for heatmaps; sector views via `*_tickers.sector`).
+- **Primary user:** project owner with personal watchlists of US, Swedish (`.ST`), and UK (`.L`) symbols; may also query country metrics tables to see which stocks are above/below their long-term moving averages.
+- **Primary use case — Golden / Death Cross detection:** detect completed **Golden Cross** and **Death Cross** three-stage processes from stored weekly `sma_50` / `sma_200` history (no yfinance at detection time; PRD §5.6). Use **`momentum`**, **`z_score`**, and `*_market_metrics` (`momentum_mean` / `momentum_std`) to rank tickers relative to peers in the same country set on each `trading_date` (cross-sectional normalization for heatmaps; sector views via `*_tickers.sector`).
 - **Watchlist management:** add or remove symbols via SQL on `us_tickers` / `swe_tickers` / `uk_tickers`, or by running `seed_tickers.py` (optionally `--country us|swe|uk` to touch only one set).
 
 ---
@@ -179,6 +180,23 @@ pipenv run python backfill_sma.py --country us
 
 **Status:** Shipped — required `--country us|swe|uk` scopes watchlist load and writes ([RFC-005](./rfc/RFC-005-historical-backfill.md)).
 
+### Golden Cross & Death Cross detection
+
+Detection-only feature over retained weekly SMA history (PRD §5.6, FR-19 – FR-26).
+
+| Capability | Detail |
+|------------|--------|
+| Status | **Planned** (PRD §5.6) — not Shipped; no design RFC yet |
+| Mode | Detection-only; not cron-scheduled; no alerts / push / watchers |
+| Golden stages | (1) SMA-50 below SMA-200 → (2) convergence → (3) SMA-50 crosses **above** SMA-200 |
+| Death stages | (1) SMA-50 above SMA-200 → (2) convergence → (3) SMA-50 crosses **below** SMA-200 |
+| Source of truth | Country `*_metrics` only (`sma_50`, `sma_200`, `trading_date`); no yfinance at detection time |
+| Scope | US / SWE / UK; optional country and/or symbol filters for an ad-hoc run |
+| Consumption | Ad-hoc CLI (or equivalent) with human-readable and machine-readable output |
+| Gaps | Rows with NULL SMAs are skipped; incomplete stage sequences do not emit events |
+| Stage config | Stage windows and numeric thresholds configurable later (PRD FR-26); defaults not frozen in the PRD |
+| Persistence | No dedicated detections table in this product pass — computed on demand from retained `*_metrics` |
+
 ---
 
 ## Configuration
@@ -328,14 +346,18 @@ Deploy SA IAM roles: `compute.instanceAdmin.v1`, `iam.serviceAccountUser`, `comp
 
 ## Out of scope
 
-Explicitly **not** part of fansboda-finance (PRD §2, §11):
+Explicitly **not** part of fansboda-finance (PRD §2, §11), except where noted:
 
 - User-facing UI or read API
 - Intraday or real-time quotes (weekly Thursday job only)
-- Additional indicators (EMA, RSI, MACD) or signal/alerting layer
+- Additional indicators (EMA, RSI, MACD) or alternate moving-average windows beyond the SMA-50 / SMA-200 pair used by §5.6
+- Push notifications, alerting, or watchers when a cross completes (or for other signals)
+- Dedicated detections table / persisted detection history in this product pass (detection is on-demand from `*_metrics`)
 - Portfolio, order, or transaction tracking
 - Application authentication / authorization
 - Gap detection for missed weekly runs
 - Dashboard for `us_metrics` / `swe_metrics` / `uk_metrics` data
+
+**In scope / planned (not out of scope):** Golden Cross & Death Cross *detection* via PRD §5.6 (FR-19 – FR-26) — see the pipeline section above. Exact stage-window defaults remain deferred to a later design RFC / config (FR-26).
 
 See PRD §11 for future considerations that may be revisited later.

@@ -49,6 +49,8 @@ Steps 1–10 upgrade the **legacy** single-set tables (`tickers` / `metrics` / `
 | 13 | `migrate_add_uk_tables.sql` | Create `uk_tickers` / `uk_metrics` / `uk_market_metrics` (PRD §6); move existing `.L` / `uk_market` rows out of `us_*` |
 | 14 | `migrate_momentum_zscore.sql` | Drop `raw_50` / `raw_200` / `raw_mean_*` / `raw_std_*`; add `momentum` / `z_score` on `*_metrics` and `momentum_mean` / `momentum_std` on `*_market_metrics` (PRD §6 / RFC-012) |
 
+**Golden Cross / Death Cross detection (PRD §5.6):** Requires **no schema migration**. Detection reads existing `*_metrics` columns (`sma_50`, `sma_200`, `trading_date`) on demand. This product pass adds no detections table and no new columns. Steps 1–14 and an up-to-date `schema.sql` remain sufficient for the data model the feature reads.
+
 See [RFC-001](./rfc/RFC-001-data-model.md) and [RFC-012](./rfc/RFC-012-normalized-ratios-market.md).
 
 **Note:** Step 10 supersedes the watchlist-wide layout from step 9. Existing databases keep one aggregate row per `trading_date` until step 10 runs; recompute grouped rows with `backfill_market.py` or the next weekly run after migration.
