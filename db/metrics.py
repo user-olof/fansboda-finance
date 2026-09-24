@@ -50,6 +50,10 @@ EXISTING_METRICS_SQL = union_all_sql(
     "SELECT ticker, trading_date FROM {metrics} WHERE ticker = ANY(%s)"
 )
 
+EXISTING_METRICS_SQL_BY_COUNTRY = sql_for_countries(
+    "SELECT ticker, trading_date FROM {metrics} WHERE ticker = ANY(%s)"
+)
+
 DELETE_STALE_SQL = tuple(
     f"DELETE FROM {METRICS_TABLE[country]} WHERE trading_date < %s"
     for country in CountrySet
@@ -156,15 +160,24 @@ def insert_metrics(database_url: str, rows: list[MetricRow]) -> int:
 
 
 def load_existing_metric_keys(
-    database_url: str, tickers: list[str]
+    database_url: str,
+    tickers: list[str],
+    *,
+    country: CountrySet | None = None,
 ) -> set[tuple[str, date]]:
-    """Return (ticker, trading_date) pairs already stored for the given tickers."""
+    """Return (ticker, trading_date) pairs already stored for the given tickers.
+
+    When ``country`` is set, only that set's ``*_metrics`` table is queried.
+    """
     if not tickers:
         return set()
 
     with psycopg2.connect(database_url) as conn:
         with conn.cursor() as cur:
-            cur.execute(EXISTING_METRICS_SQL, (tickers, tickers, tickers))
+            if country is None:
+                cur.execute(EXISTING_METRICS_SQL, (tickers, tickers, tickers))
+            else:
+                cur.execute(EXISTING_METRICS_SQL_BY_COUNTRY[country], (tickers,))
             return {(row[0], row[1]) for row in cur.fetchall()}
 
 

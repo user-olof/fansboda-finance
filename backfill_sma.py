@@ -233,7 +233,9 @@ def main(argv: list[str] | None = None) -> int:
             len(batch),
         )
         try:
-            existing = load_existing_metric_keys(database_url, batch)
+            existing = load_existing_metric_keys(
+                database_url, batch, country=country
+            )
             batch_currencies = load_currency_for_tickers(
                 batch,
                 name_delay=name_delay,

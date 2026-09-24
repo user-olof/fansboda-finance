@@ -148,7 +148,9 @@ def test_main_backfill_inserts_new_rows() -> None:
             "backfill_sma.load_tickers_from_db",
             return_value=[TickerEntry(symbol="AAA.ST", company="Alpha AB")],
         ):
-            with patch("backfill_sma.load_existing_metric_keys", return_value=set()):
+            with patch(
+                "backfill_sma.load_existing_metric_keys", return_value=set()
+            ) as mock_existing:
                 with patch(
                     "backfill_sma.load_currency_for_tickers",
                     return_value={"AAA.ST": "SEK"},
@@ -166,6 +168,9 @@ def test_main_backfill_inserts_new_rows() -> None:
                                 ) as mock_market:
                                     assert main(['--country', 'swe']) == 0
 
+    mock_existing.assert_called_once_with(
+        "postgresql://example", ["AAA.ST"], country=CountrySet.SWE
+    )
     mock_currency.assert_called_once()
     mock_download.assert_called_once()
     mock_insert.assert_called_once_with("postgresql://example", [metric_row])
@@ -346,7 +351,9 @@ def test_main_us_only_ignores_swe_and_uk_tickers() -> None:
         "postgresql://example",
         country=CountrySet.US,
     )
-    mock_existing.assert_called_once_with("postgresql://example", ["AAPL"])
+    mock_existing.assert_called_once_with(
+        "postgresql://example", ["AAPL"], country=CountrySet.US
+    )
     mock_currency.assert_called_once()
     assert mock_currency.call_args.args[0] == ["AAPL"]
     mock_download.assert_called_once()
@@ -414,6 +421,27 @@ def test_load_existing_metric_keys_queries_uk_metrics() -> None:
     assert "FROM swe_metrics" in sql
     assert "FROM uk_metrics" in sql
     assert mock_cursor.execute.call_args[0][1] == (["VOD.L"], ["VOD.L"], ["VOD.L"])
+
+
+def test_load_existing_metric_keys_with_country_queries_only_that_table() -> None:
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = [("VOD.L", date(2025, 1, 3))]
+    mock_conn = MagicMock()
+    mock_conn.__enter__.return_value = mock_conn
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    with patch("db.metrics.psycopg2.connect", return_value=mock_conn):
+        keys = load_existing_metric_keys(
+            "postgresql://example", ["VOD.L"], country=CountrySet.UK
+        )
+
+    assert keys == {("VOD.L", date(2025, 1, 3))}
+    sql = mock_cursor.execute.call_args[0][0]
+    assert "FROM uk_metrics" in sql
+    assert "us_metrics" not in sql
+    assert "swe_metrics" not in sql
+    assert "UNION ALL" not in sql
+    assert mock_cursor.execute.call_args[0][1] == (["VOD.L"],)
 
 
 def test_insert_metrics_sql_targets_uk_metrics() -> None:
@@ -494,7 +522,9 @@ def test_main_backfill_routes_uk_ticker() -> None:
         "postgresql://example",
         country=CountrySet.UK,
     )
-    mock_existing.assert_called_once_with("postgresql://example", ["VOD.L"])
+    mock_existing.assert_called_once_with(
+        "postgresql://example", ["VOD.L"], country=CountrySet.UK
+    )
     mock_insert.assert_called_once_with("postgresql://example", [metric_row])
     mock_market.assert_called_once_with(
         "postgresql://example",
