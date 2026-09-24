@@ -13,15 +13,15 @@ Lightweight weekly pipeline: yfinance → SMA-50/200 + close → Neon Postgres. 
 
 - No UI, API, auth layer, portfolio tracking, or extra indicators (EMA, RSI, MACD).
 - No intraday/real-time data; weekly Thursday job only.
-- `backfill_sma.py` is a **one-off manual** bootstrap — never cron-schedule it on production.
-- Planned but not built: metadata refresh (`RFC-010`), dashboard, gap detection — see PRD §11.
+- `backfill_sma.py` is a **one-off manual** bootstrap — never cron-schedule it on production; run **per country set** (`--country us|swe|uk`, PRD FR-18).
+- Planned but not built: country-scoped `dev-backfill` input, dashboard, gap detection — see PRD §8.1 / §11.
 
 ## Repo layout
 
 | Path | Role |
 |------|------|
-| `fetch_sma.py`, `seed_tickers.py`, `backfill_sma.py`, `backfill_market.py`, `refresh_tickers.py` | Job entrypoints |
-| `symbols.py`, `yfinance_client.py` | Shared symbol parsing and yfinance I/O |
+| `fetch_sma.py`, `seed_tickers.py`, `backfill_sma.py`, `backfill_market.py`, `refresh_tickers.py`, `detect_crosses.py` | Job / ad-hoc entrypoints |
+| `symbols.py`, `yfinance_client.py`, `cross_detection.py` | Shared symbol parsing, yfinance I/O, pure cross detection |
 | `config.py` | `BaseConfig`, `DevConfig`, `ProdConfig`, `get_config()` |
 | `models.py` | `TickerEntry`, `MetricRow` |
 | `db/metrics.py`, `db/tickers.py` | Parameterized SQL — no SQL in job scripts |
@@ -38,9 +38,10 @@ Dependencies: **Pipenv only** (`Pipfile` / `Pipfile.lock`). No `requirements.txt
 | Script | Role |
 |--------|------|
 | `fetch_sma.py` | Weekly job: load watchlist from DB, skip fresh tickers, batch-download ~300d OHLCV, compute SMAs, append metrics, purge rows older than retention |
-| `seed_tickers.py` | Load symbols from file, resolve names via yfinance, upsert `tickers` |
-| `backfill_sma.py` | One-off: ~730d history, rolling 52-week SMA windows, append to `metrics`, upsert `market` |
-| `backfill_market.py` | One-off: recompute all `market` rows from stored `metrics` |
+| `seed_tickers.py` | Load symbols from file, resolve names via yfinance, upsert `us_tickers` / `swe_tickers` / `uk_tickers` (optional `--country us|swe|uk`) |
+| `backfill_sma.py` | One-off per country set (`--country us|swe|uk`): ~730d history, rolling 52-week SMA windows, append to matching `*_metrics`, upsert `*_market_metrics` |
+| `backfill_market.py` | One-off: recompute `momentum` from SMAs, then `*_market_metrics` + `z_score` (optional `--country`) |
+| `detect_crosses.py` | Ad-hoc Golden / Death Cross detection from retained `*_metrics` (RFC-013); no yfinance; not cron-scheduled |
 
 | Utility | Role |
 |---------|------|
@@ -48,21 +49,22 @@ Dependencies: **Pipenv only** (`Pipfile` / `Pipfile.lock`). No `requirements.txt
 | `scripts/bootstrap-dev-vm.sh` | Ephemeral dev VM for CI backfill |
 | `scripts/verify_schema.sql` | Post-DDL sanity checks |
 | `scripts/verify_dev_backfill.py` | Parse backfill log + DB checks (dev CI) |
+| `scripts/truncate_dev_tables.py` | Dev-only: truncate `us_*` / `swe_*` / `uk_*` tickers, metrics, market_metrics (refuses prod) |
 | `scripts/configure-branch-protection.sh` | Require `test` check on `main` |
 
 Reuse shared logic (`download_batch`, `compute_smas`, `metric_row_from_history`, `MetricRow`, `chunked`, batching) from `fetch_sma.py` / `yfinance_client.py` instead of duplicating.
 
 ## Data model
 
-- **`tickers`:** `symbol` (PK), `name`, `updated_at` (default `NOW()` on insert; set on upsert)
-- **`metrics`:** `id` (PK), `ticker` (FK → `tickers.symbol` ON DELETE CASCADE), `name`, `trading_date`, `updated_at`, `sma_50`, `sma_200`, `current_price` — `NUMERIC(18, 6)` for prices
-- One row per `(ticker, trading_date)`; unique constraint `metrics_ticker_trading_date_key`
+- **Country sets (PRD §6):** US (`us_tickers`, `us_metrics`, `us_market_metrics`), Swedish (`swe_tickers`, `swe_metrics`, `swe_market_metrics`), and UK (`uk_tickers`, `uk_metrics`, `uk_market_metrics`)
+- **`*_tickers`:** `symbol` (PK), `company`, `sector`, `industry`, `market`, `exchange_name`, `updated_at`
+- **`*_metrics`:** `id` (PK), `ticker` (FK → matching `*_tickers.symbol` ON DELETE CASCADE), `company`, `trading_date`, `updated_at`, `sma_50`, `sma_200`, `current_price`, `momentum`, `z_score` — `NUMERIC(18, 6)` for prices/derived fields
+- One row per `(ticker, trading_date)` within each set; unique constraint `*_metrics_ticker_trading_date_key`
 - Append-only inserts: `ON CONFLICT (ticker, trading_date) DO NOTHING`
-- Retention: `DELETE FROM metrics WHERE trading_date < cutoff` (default 365 days) after each weekly run
-- Index: `idx_metrics_trading_date` on `metrics (trading_date)`
+- Retention: delete from `*_metrics` / `*_market_metrics` where `trading_date` < cutoff (default 365 days)
 - Schema changes go in `schema.sql` or `migrate_*.sql` — not ad-hoc in Python
 
-**Fresh DB:** `schema.sql` → `seed_tickers.py` → optional `backfill_sma.py`. **Legacy DB:** apply `migrate_*.sql` per `MIGRATIONS.md`.
+**Fresh DB:** `schema.sql` → `seed_tickers.py --country us` → optional `backfill_sma.py --country us` (repeat `swe` / `uk` when ready). **Legacy DB:** apply `migrate_*.sql` per `MIGRATIONS.md` (through step 14).
 
 ## Configuration
 
@@ -91,8 +93,8 @@ Scripts read from the config object — not scattered `os.getenv` calls. Key tun
 | Workflow | Trigger | Action |
 |----------|---------|--------|
 | `test.yml` | Push / PR to `main` | `pipenv install --dev`, `pipenv run pytest` |
-| `deploy.yml` | Push to `main` | SSH to production VM: `git pull`, `pipenv install --deploy`, write `.env` (`APP_ENV=production`) |
-| `dev-backfill.yml` | Push to `dev` | Ephemeral `data-fetcher-dev` VM: bootstrap, `seed_tickers.py` + `backfill_sma.py`, verify, tear down |
+| `deploy.yml` | Push to `main` | SCP tarball to production VM, ensure pipenv, `pipenv install --deploy`, write `.env` (temporary `APP_ENV=dev` while validating) |
+| `dev-backfill.yml` | Manual `workflow_dispatch` only | Ephemeral `data-fetcher-dev` VM: tarball deploy, `apply_migrations.sh`, seed + backfill, verify `us_*`/`swe_*`/`uk_*`, tear down |
 
 - Production VM path: `/opt/fansboda-finance`; logs: `/var/log/fansboda-finance/fetch_sma.log`.
 - Cron (Thu 11:00 UTC): `pipenv run python fetch_sma.py` — bootstrap sources `.env` and sets `PIPENV_VENV_IN_PROJECT=1`.

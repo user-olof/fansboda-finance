@@ -20,6 +20,10 @@ DEFAULT_BACKFILL_HISTORY_DAYS = 730
 DEFAULT_BACKFILL_WINDOW_WEEKS = 52
 DEFAULT_BACKFILL_BATCH_SIZE = 25
 DEFAULT_BACKFILL_BATCH_DELAY_SECONDS = 5.0
+DEFAULT_CROSS_MIN_REGIME_WEEKS = 4
+DEFAULT_CROSS_CONVERGENCE_WEEKS = 3
+
+_PRODUCTION_APP_ENVS = frozenset({"prod", "production"})
 
 
 def _env_int(name: str, default: int) -> int:
@@ -43,6 +47,26 @@ def _env_path(name: str, default: Path) -> Path:
     return Path(raw)
 
 
+def get_app_env() -> str:
+    """Return normalized APP_ENV (default ``dev``)."""
+    return os.environ.get("APP_ENV", "dev").lower()
+
+
+def is_production_env(app_env: str | None = None) -> bool:
+    """Return True when APP_ENV selects ProdConfig."""
+    env = get_app_env() if app_env is None else app_env.lower()
+    return env in _PRODUCTION_APP_ENVS
+
+
+def require_non_production() -> None:
+    """Raise if APP_ENV is production (for destructive dev-only tools)."""
+    env = get_app_env()
+    if is_production_env(env):
+        raise ValueError(
+            f"This operation is for development only (APP_ENV={env!r})"
+        )
+
+
 @dataclass(frozen=True)
 class BaseConfig:
     database_url: str
@@ -57,6 +81,16 @@ class BaseConfig:
     backfill_window_weeks: int = DEFAULT_BACKFILL_WINDOW_WEEKS
     backfill_batch_size: int = DEFAULT_BACKFILL_BATCH_SIZE
     backfill_batch_delay_seconds: float = DEFAULT_BACKFILL_BATCH_DELAY_SECONDS
+    cross_min_regime_weeks: int = DEFAULT_CROSS_MIN_REGIME_WEEKS
+    cross_convergence_weeks: int = DEFAULT_CROSS_CONVERGENCE_WEEKS
+
+    def __post_init__(self) -> None:
+        if self.cross_convergence_weeks > self.cross_min_regime_weeks:
+            raise ValueError(
+                "cross_convergence_weeks must be <= cross_min_regime_weeks "
+                f"(got convergence={self.cross_convergence_weeks}, "
+                f"regime={self.cross_min_regime_weeks})"
+            )
 
     @classmethod
     def _from_env(cls, *, require_database_url: bool = True) -> BaseConfig:
@@ -94,6 +128,12 @@ class BaseConfig:
                 "BACKFILL_BATCH_DELAY_SECONDS",
                 DEFAULT_BACKFILL_BATCH_DELAY_SECONDS,
             ),
+            cross_min_regime_weeks=_env_int(
+                "CROSS_MIN_REGIME_WEEKS", DEFAULT_CROSS_MIN_REGIME_WEEKS
+            ),
+            cross_convergence_weeks=_env_int(
+                "CROSS_CONVERGENCE_WEEKS", DEFAULT_CROSS_CONVERGENCE_WEEKS
+            ),
         )
 
 
@@ -115,7 +155,6 @@ class ProdConfig(BaseConfig):
 
 
 def get_config() -> BaseConfig:
-    env = os.environ.get("APP_ENV", "dev").lower()
-    if env in ("prod", "production"):
+    if is_production_env():
         return ProdConfig.load()
     return DevConfig.load()

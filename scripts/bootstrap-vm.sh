@@ -30,11 +30,25 @@ chown "$APP_USER:$APP_USER" "$LOG_DIR"
 touch "$LOG_DIR/fetch_sma.log"
 chown "$APP_USER:$APP_USER" "$LOG_DIR/fetch_sma.log"
 
+# Minimal cloud images often omit cron; crontab is required for the weekly job.
+if ! command -v crontab >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y cron
+fi
+systemctl enable --now cron 2>/dev/null || systemctl enable --now crond 2>/dev/null || true
+
 if ! crontab -u "$APP_USER" -l 2>/dev/null | grep -q 'fetch_sma.py'; then
   CRON_LINE="${CRON_SCHEDULE} cd ${APP_DIR} && set -a && [ -f .env ] && . ./.env && set +a && PIPENV_VENV_IN_PROJECT=1 pipenv run python fetch_sma.py >> ${LOG_DIR}/fetch_sma.log 2>&1"
   (crontab -u "$APP_USER" -l 2>/dev/null || true; echo "$CRON_LINE") | crontab -u "$APP_USER" -
 fi
 
 echo "Bootstrap complete."
-echo "Add DATABASE_URL via GitHub deploy (push to main) or manually:"
-echo "  $APP_DIR/.env  (owner $APP_USER, mode 600, include APP_ENV=production)"
+echo "Application code and Pipenv deps come from deploy.yml (tarball + pipenv install --deploy)."
+echo "Add DATABASE_URL / APP_ENV via GitHub deploy (push to main) or manually:"
+echo "  $APP_DIR/.env  (owner $APP_USER, mode 600)"
+echo "Seed and backfill one country set at a time (do not re-run a completed set):"
+echo "  pipenv run python seed_tickers.py --country us   # or swe / uk"
+echo "  pipenv run python backfill_sma.py --country us    # optional; or swe / uk"
+echo "After seed/fetch, verify Neon: us_metrics / swe_metrics / uk_metrics"
+echo "  and us_market_metrics / swe_market_metrics / uk_market_metrics"
+echo "  (tickers tables include exchange_name; see RFC-008 runbook)."

@@ -14,6 +14,7 @@ class TickerEntry:
     sector: str | None = None
     industry: str | None = None
     market: str | None = None
+    exchange_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -25,15 +26,13 @@ class MetricRow:
     sma_200: Decimal | None
     current_price: Decimal | None
     currency: str | None = None
-    raw_50: Decimal | None = None
-    raw_200: Decimal | None = None
+    momentum: Decimal | None = None
+    z_score: Decimal | None = None
 
 
 @dataclass(frozen=True)
 class MarketRow:
     market: str
     trading_date: date
-    raw_mean_50: Decimal | None
-    raw_mean_200: Decimal | None
-    raw_std_50: Decimal | None
-    raw_std_200: Decimal | None
+    momentum_mean: Decimal | None
+    momentum_std: Decimal | None

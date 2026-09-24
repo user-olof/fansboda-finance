@@ -1,8 +1,19 @@
 """Tests for dev backfill verification script (RFC-011)."""
 
+from pathlib import Path
 from unittest.mock import patch
 
-from scripts.verify_dev_backfill import analyze_log, format_report, parse_backfill_summary, verify_database
+from scripts.verify_dev_backfill import (
+    analyze_log,
+    format_report,
+    parse_backfill_summary,
+    query_database,
+    verify_database,
+)
+
+VERIFY_SCRIPT = (
+    Path(__file__).resolve().parents[1] / "scripts" / "verify_dev_backfill.py"
+)
 
 
 def test_parse_backfill_summary_extracts_last_line() -> None:
@@ -10,7 +21,7 @@ def test_parse_backfill_summary_extracts_last_line() -> None:
         "noise\n"
         "Backfill summary: tickers=3 generated=10 inserted=8 "
         "skipped_existing=2 market_trading_dates=4 failed_batches=0\n"
-        "Backfill summary: tickers=3 generated=12 inserted=12 "
+        "Backfill summary: country=uk tickers=3 generated=12 inserted=12 "
         "skipped_existing=0 market_trading_dates=6 failed_batches=1\n"
     )
     summary = parse_backfill_summary(log)
@@ -33,7 +44,7 @@ def test_analyze_log_flags_missing_summary() -> None:
 def test_analyze_log_passes_clean_run() -> None:
     log = (
         "Seeded 2 ticker(s) from tickers.txt\n"
-        "Backfill summary: tickers=2 generated=20 inserted=20 "
+        "Backfill summary: country=us tickers=2 generated=20 inserted=20 "
         "skipped_existing=0 market_trading_dates=10 failed_batches=0\n"
     )
     issues, fields = analyze_log(log)
@@ -44,11 +55,13 @@ def test_analyze_log_passes_clean_run() -> None:
 
 def test_format_report_shows_pass_status() -> None:
     report = format_report(
+        "us",
         {"seed_count": 2, "generated": 20, "inserted": 20, "failed_batches": 0},
         {"ticker_count": 2, "metrics_ticker_count": 2, "metrics_row_count": 20},
         [],
     )
     assert "Status: PASS" in report
+    assert "Country: us" in report
     assert "tickers=2" in report
     assert "market_rows" not in report
 
@@ -60,7 +73,25 @@ def test_verify_database_passes_without_market_rows() -> None:
             "metrics_ticker_count": 2,
             "metrics_row_count": 20,
         }
-        issues, counts = verify_database("postgresql://example", expected_seed_count=2)
+        issues, counts = verify_database(
+            "postgresql://example",
+            "uk",
+            expected_seed_count=2,
+        )
 
+    mock_query.assert_called_once_with("postgresql://example", "uk")
     assert issues == []
     assert "market_row_count" not in counts
+
+
+def test_query_database_targets_selected_country_tables() -> None:
+    """RFC-011: verification SQL must scope to the selected country set."""
+    content = VERIFY_SCRIPT.read_text(encoding="utf-8")
+    assert 'COUNTRY_TABLES = {' in content
+    assert '"us": ("us_tickers", "us_metrics")' in content
+    assert '"swe": ("swe_tickers", "swe_metrics")' in content
+    assert '"uk": ("uk_tickers", "uk_metrics")' in content
+    assert "--country" in content
+    assert "FROM tickers" not in content
+    assert "FROM metrics" not in content
+    assert query_database.__doc__ is not None

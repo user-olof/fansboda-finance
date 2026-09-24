@@ -1,114 +1,94 @@
-# RFC-012: Normalized SMA Ratios & Market Aggregates
+# RFC-012: Momentum, Z-Score & Market Aggregates
 
 | Field | Value |
 |-------|-------|
 | **Priority** | P1 |
 | **Status** | Implemented |
 | **Depends on** | RFC-001, RFC-003, RFC-005 |
-| **PRD** | §6 |
+| **PRD** | §6, FR-5 |
 | **Feature** | [Market aggregates](../FEATURES.md#market-aggregates) |
 
 ## Summary
 
-Extend the weekly pipeline and backfill to store scale-free SMA ratios on each `metrics` row (`raw_50`, `raw_200`) and cross-sectional statistics in **`market_metrics`** — one row per (`trading_date`, listing `market`). Listing `market` comes from `tickers.market` (yfinance bucket, e.g. `us_market`, `se_market`; RFC-002, RFC-010).
+Weekly pipeline and backfill store **momentum** (`sma_50 / sma_200`) and a
+cross-sectional **`z_score`** on each metrics row, plus
+**`momentum_mean` / `momentum_std`** in
+**`us_market_metrics` / `swe_market_metrics` / `uk_market_metrics`** — one row
+per `(market, trading_date)` within each country set. Listing `market` comes
+from `*_tickers.market` (yfinance bucket; RFC-002, RFC-010).
 
-Supports unbiased heatmap coloring — ranking tickers relative to peers in the same listing market on each date rather than using raw SMA-distance signals.
+Supports unbiased heatmap coloring — ranking tickers relative to peers in the
+same country set on each date.
+
+Legacy `raw_50` / `raw_200` and `raw_mean_*` / `raw_std_*` columns are removed
+by `migrate_momentum_zscore.sql` (step 14); fresh installs use `schema.sql`.
 
 ## Requirements (PRD §6)
 
-### Per-ticker ratios (`metrics`)
+### Per-ticker fields (`us_metrics` / `swe_metrics` / `uk_metrics`)
 
 | Column | Formula | Notes |
 |--------|---------|-------|
-| `raw_50` | `sma_50 / current_price` | `NULL` when either operand is `NULL` or `current_price` is zero |
-| `raw_200` | `sma_200 / current_price` | Same guard as `raw_50` |
+| `momentum` | `sma_50 / sma_200` | `NULL` when either SMA is `NULL` or `sma_200` is zero |
+| `z_score` | `(momentum - momentum_mean) / momentum_std` | Uses that date's matching `*_market_metrics` row; `NULL` when `momentum` or aggregates missing, or `momentum_std` is zero |
 
-Computed at insert time in `fetch_sma.py` and `backfill_sma.py` alongside existing SMA fields.
+Computed in `fetch_sma.py` and `backfill_sma.py`. Typical order: compute
+`momentum` per ticker → upsert market aggregates for the `trading_date` → set
+`z_score` (two-pass or in-memory after aggregates).
 
-### Cross-sectional aggregates (`market_metrics`)
+### Cross-sectional aggregates (`us_market_metrics` / `swe_market_metrics` / `uk_market_metrics`)
 
-One row per (`trading_date`, listing `market`) present in the run:
+| Column | Definition |
+|--------|------------|
+| `momentum_mean` | Mean of `momentum` across tickers in that market bucket with non-null values on that date |
+| `momentum_std` | Population std dev of `momentum` in the bucket on that date |
 
-| Column | Formula |
-|--------|---------|
-| `market` | Listing market bucket; matches `tickers.market` |
-| `trading_date` | Snapshot date |
-| `updated_at` | When the row was written |
-| `raw_mean_50` | Mean of `raw_50` across tickers with the same `tickers.market` and non-null values on that date |
-| `raw_mean_200` | Mean of `raw_200` across tickers with the same `tickers.market` and non-null values on that date |
-| `raw_std_50` | Population std dev of `raw_50` in that `market` on that date |
-| `raw_std_200` | Population std dev of `raw_200` in that `market` on that date |
-
-Primary key on `(market, trading_date)`. Upsert on conflict (replace stats when the weekly job re-processes a date for that market).
-
-### Downstream use (out of scope for this RFC)
-
-Consumers may derive z-scores, e.g. `(raw_50 - raw_mean_50) / raw_std_50`, or percentile ranks within sector for heatmap cells. No UI or API in this repo.
+**Routing:** `us_market` → `us_market_metrics`; `se_market` → `swe_market_metrics`; `uk_market` → `uk_market_metrics` (`db.country.country_set_for`).
 
 ## Implementation
 
-### Schema
-
-| Artifact | Role |
-|----------|------|
-| `schema.sql` | `raw_50`, `raw_200` on `metrics`; `market_metrics` table |
-| `migrate_add_raw_ratios_and_market.sql` | Step 9 — ratios + legacy watchlist-wide `market` |
-| `migrate_tickers_market_and_market_metrics.sql` | Step 10 — `tickers.market`, `market_metrics` ([MIGRATIONS.md](../MIGRATIONS.md)) |
-| `scripts/verify_schema.sql` | Assert columns, `market_metrics`, retention indexes |
-| `tests/test_schema.py` | CI validation |
-
-### Domain & DB
+### Files
 
 | File | Role |
 |------|------|
-| `models.py` | `MetricRow.raw_50`, `MetricRow.raw_200`; `MarketRow.market` |
-| `db/metrics.py` | `insert_metrics`, `load_raw_ratios_by_market_for_date`, `load_distinct_trading_dates` |
-| `db/market.py` | `upsert_market_stats`, `purge_stale_market` → `market_metrics` table |
+| `schema.sql` | `momentum`, `z_score` on `*_metrics`; `momentum_mean`, `momentum_std` on `*_market_metrics` |
+| `migrate_momentum_zscore.sql` (step 14) | Drop `raw_*` columns; add `momentum` / `z_score` / `momentum_mean` / `momentum_std` |
+| `models.py` | `MetricRow.momentum`, `MetricRow.z_score`; `MarketRow.momentum_mean`, `MarketRow.momentum_std` |
+| `fetch_sma.py` | Compute momentum; aggregate market stats; update z_score after market upsert |
+| `backfill_sma.py` / `backfill_market.py` | Same formulas for history / recompute |
+| `db/metrics.py` / `db/market.py` | Persist new columns; `update_z_scores_for_trading_date` |
+| `tests/` | Momentum / z-score / market aggregation unit tests |
 
-### Pure logic
+### Key functions
 
 | Function | Module | Purpose |
 |----------|--------|---------|
-| `compute_raw_ratios(sma_50, sma_200, current_price)` | `fetch_sma.py` | Return `(raw_50, raw_200)` with divide-by-zero guards |
-| `aggregate_market_stats(...)` | `fetch_sma.py` | Population mean/std for one (`market`, `trading_date`) group |
-| `upsert_market_for_trading_dates(...)` | `fetch_sma.py` | Load ratios from DB grouped by `tickers.market`; upsert `market_metrics` |
-
-### Job integration
-
-**`fetch_sma.py` `main()`** — after `insert_metrics`:
-
-1. For each processed `trading_date`, load `raw_50` / `raw_200` from `metrics` joined to `tickers`.
-2. Group by `tickers.market`; compute mean/std per group → `upsert_market_stats`.
-
-**`backfill_sma.py`** — compute `raw_50` / `raw_200` on each generated row; after all batches, upsert `market_metrics` for every (`trading_date`, `market`) in the run.
-
-**`backfill_market.py`** — one-off manual script to recompute all `market_metrics` rows from distinct `metrics.trading_date` values (for legacy DBs or after schema upgrade).
-
-### Retention (RFC-004)
-
-Purge `market_metrics` rows where `trading_date` is older than `metrics_retention_days`, in the same `fetch_sma.py` run as `purge_stale_metrics`.
+| `compute_momentum(sma_50, sma_200)` | `fetch_sma.py` | Return `momentum` with divide-by-zero guards |
+| `compute_z_score(momentum, mean, std)` | `fetch_sma.py` | Return z-score with zero-std guards |
+| `aggregate_market_stats(...)` | `fetch_sma.py` | Mean/std of momentum → `MarketRow` |
+| `upsert_market_for_trading_dates(...)` | `fetch_sma.py` | Upsert country market rows; then set z_scores |
+| `load_momentum_by_market_for_date(...)` | `db/metrics.py` | Load persisted momentum grouped by listing market |
+| `update_z_scores_for_trading_date(...)` | `db/metrics.py` | SQL UPDATE joining metrics → tickers → market_metrics |
 
 ## Acceptance criteria
 
-- [x] `metrics.raw_50` and `metrics.raw_200` columns in `schema.sql` and migrations (RFC-001)
-- [x] `market_metrics` table with PK on `(market, trading_date)`; step 10 migration
-- [x] `MetricRow` includes `raw_50`, `raw_200`; `insert_metrics` persists them
-- [x] `MarketRow.market`; `db/market.py` upsert and purge helpers target `market_metrics`
-- [x] `fetch_sma.py` computes ratios on every new metrics row
-- [x] `fetch_sma.py` upserts `market_metrics` grouped by listing `market`
-- [x] `backfill_sma.py` populates `raw_50` and `raw_200` on backfilled rows
-- [x] `backfill_sma.py` upserts `market_metrics` for backfilled trading dates
-- [x] `backfill_market.py` recomputes historical `market_metrics` from stored metrics
-- [x] Retention purge deletes stale `market_metrics` rows (RFC-004)
-- [x] `tickers.market` populated by seed/refresh (RFC-002, RFC-010)
-- [x] Unit tests for ratio math, per-market aggregation, market upsert, and backfill integration
+- [x] Schema and migration: drop `raw_50`, `raw_200`, `raw_mean_*`, `raw_std_*`; add `momentum`, `z_score`, `momentum_mean`, `momentum_std`
+- [x] `MetricRow` / `MarketRow` and DB layer persist the new columns
+- [x] Weekly fetch computes `momentum`, upserts market aggregates, sets `z_score`
+- [x] Backfill and `backfill_market.py` use the same formulas
+- [x] Tests cover momentum, z-score, and market aggregation
+- [x] Docs (FEATURES, RFC-001 verification SQL) match PRD §6
+- [x] Country `*_market_metrics` tables with PK on `(market, trading_date)`
+- [x] Retention purge deletes stale aggregate rows (RFC-004)
+- [x] Listing `market` populated by seed/refresh (RFC-002, RFC-010)
+- [x] UK routing `uk_market` → `uk_market_metrics`
 
 ## Resolved decisions
 
-- **Backfill aggregate history:** `backfill_sma.py` upserts per run; `backfill_market.py` recomputes all dates from `metrics`.
-- **Std dev:** population std dev (`statistics.pstdev`) within each listing `market` group.
-- **Per-sector market stats:** defer to consumer queries joining `tickers.sector` — not separate tables in v1.
+- **Z-score storage:** Persist `z_score` on each metrics row (not compute-only at query time).
+- **Std definition:** Population standard deviation (same convention as prior `raw_std_*`).
+- **Backfill:** With FR-18 (`--country`), market upserts stay scoped to the selected set.
 
 ## Open questions
 
-- None.
+- Whether historical rows with only `raw_*` should be backfilled for `momentum`/`z_score` via `backfill_market.py` + metrics recompute, or truncated/re-backfilled per country — prefer recompute after migration when feasible.

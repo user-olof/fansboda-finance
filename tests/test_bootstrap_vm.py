@@ -53,6 +53,13 @@ def test_bootstrap_installs_cron_only_when_missing() -> None:
     assert "grep -v 'fetch_sma.py'" not in content
 
 
+def test_bootstrap_ensures_crontab_package_installed() -> None:
+    content = BOOTSTRAP_SH.read_text(encoding="utf-8")
+    assert "command -v crontab" in content
+    assert "apt-get install -y cron" in content
+    assert "systemctl enable --now cron" in content
+
+
 def test_bootstrap_does_not_clone_repo() -> None:
     content = BOOTSTRAP_SH.read_text(encoding="utf-8")
     assert "git clone" not in content
@@ -63,4 +70,27 @@ def test_bootstrap_does_not_write_env_file() -> None:
     content = BOOTSTRAP_SH.read_text(encoding="utf-8")
     assert "printf" not in content
     assert "DATABASE_URL=" not in content
-    assert "deploy workflow" in content.lower() or "deploy (push to main)" in content
+    assert "deploy (push to main)" in content
+
+
+def test_bootstrap_mentions_uk_and_market_metrics_verify() -> None:
+    content = BOOTSTRAP_SH.read_text(encoding="utf-8")
+    assert "uk_metrics" in content
+    assert "uk_market_metrics" in content
+    assert "exchange_name" in content
+
+
+def test_bootstrap_mentions_per_country_seed_and_backfill() -> None:
+    content = BOOTSTRAP_SH.read_text(encoding="utf-8")
+    assert "seed_tickers.py --country us" in content
+    assert "backfill_sma.py --country us" in content
+    assert "or swe / uk" in content
+    assert "do not re-run a completed set" in content
+
+
+def test_bootstrap_does_not_install_app_deps() -> None:
+    """Pipfile deps come from deploy; bootstrap may apt-install OS cron only."""
+    content = BOOTSTRAP_SH.read_text(encoding="utf-8")
+    assert "apt-get install -y pipenv" not in content
+    assert "apt-get install -y python3" not in content
+    assert "PIPENV_VENV_IN_PROJECT=1 pipenv install" not in content

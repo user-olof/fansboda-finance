@@ -17,8 +17,11 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
 
 ### Goals
 
-- Maintain a rolling one-year history of SMA-50, SMA-200, and current price for
-  a user-managed watchlist of symbols (one row per ticker per `trading_date`).
+- Maintain a rolling one-year history of SMA-50, SMA-200, current price,
+  **momentum** (`sma_50 / sma_200`), and cross-sectional **`z_score`** for a
+  user-managed watchlist of symbols (one row per ticker per `trading_date`).
+- Detect **Golden Cross** and **Death Cross** processes on that retained weekly
+  SMA history for the US, Swedish, and UK watchlists (see §5.6).
 - Run fully unattended on a weekly schedule (Thursdays).
 - Keep monthly operating cost at ~$0 within GCP Always Free and Neon free tiers.
 - Be resilient to transient data-provider failures (rate limits, timeouts).
@@ -27,22 +30,43 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
 
 ### Non-Goals
 
-- No user-facing UI or API — data is consumed directly from Postgres.
-- No intraday / real-time quotes; the job runs once weekly (Thursday).
-- No additional technical indicators beyond SMA-50, SMA-200, and current price.
+- No user-facing UI or API — data is consumed directly from Postgres (and from
+  ad-hoc detection output in §5.6).
+- No intraday / real-time quotes; the weekly job runs once weekly (Thursday).
+- No additional technical indicators beyond SMA-50, SMA-200, current price,
+  and the derived `momentum` / `z_score` fields in §6 — including no EMA, RSI,
+  MACD, and no alternate moving-average windows in v1.
+- No push notifications, alerting, or watchers for cross detections (or other
+  signals).
+- No dedicated detections table or persisted detection history in this product
+  pass — detection is computed on demand from retained `*_metrics` rows.
 - No portfolio, order, or transaction tracking.
 - No authentication/authorization layer (single-owner, infra-level access only).
 
 ## 3. Users & Use Cases
 
-- **Primary user:** the project owner, who maintains a personal watchlist
-  (Swedish `.ST` symbols and others) and queries the `metrics` table to see
-  which stocks are above/below their long-term moving averages.
-- **Primary use case:** identify golden-cross / death-cross style signals by
-  comparing `current_price`, `sma_50`, and `sma_200` for each watched symbol,
-  including trends over the retained history.
-- **Watchlist management:** add or remove symbols by editing the `tickers`
-  table (directly via SQL or by running the seeding script).
+- **Primary user:** the project owner, who maintains personal watchlists of
+  US, Swedish (`.ST`), and UK (`.L`) symbols and queries the country metrics
+  tables (`us_metrics` / `swe_metrics` / `uk_metrics`) to see which stocks are
+  above/below their long-term moving averages.
+- **Primary use case — Golden / Death Cross detection:** detect completed
+  **Golden Cross** and **Death Cross** processes from stored weekly
+  `sma_50` / `sma_200` history (no yfinance at detection time). Each pattern
+  is a three-stage process that may span multiple Thursday snapshots:
+
+  - **Golden Cross:** (1) downtrend or consolidation — SMA-50 below SMA-200;
+    (2) convergence — the gap narrows as recent prices strengthen; (3)
+    crossover — SMA-50 crosses **above** SMA-200.
+  - **Death Cross:** (1) uptrend or consolidation — SMA-50 above SMA-200;
+    (2) convergence — the gap narrows as recent prices weaken vs the longer
+    trend; (3) crossover — SMA-50 crosses **below** SMA-200.
+
+  Use **`momentum`** and **`z_score`** (vs peers in the same country set /
+  listing `market` on that date via `*_market_metrics`) to rank relative
+  strength for heatmaps; sector views via `*_tickers.sector`.
+- **Watchlist management:** add or remove symbols by editing `us_tickers`,
+  `swe_tickers`, or `uk_tickers` (directly via SQL or by running the seeding
+  script).
 
 ## 4. System Architecture
 
@@ -56,8 +80,12 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
                                                                  ▼
                                               +----------------------------------+
                                               |  Neon Postgres                   |
-                                              |   - tickers  (watchlist)         |
-                                              |   - metrics  (SMA history)       |
+                                              |   US: us_tickers, us_metrics,    |
+                                              |       us_market_metrics          |
+                                              |   SE: swe_tickers, swe_metrics,  |
+                                              |       swe_market_metrics         |
+                                              |   UK: uk_tickers, uk_metrics,    |
+                                              |       uk_market_metrics          |
                                               +----------------------------------+
 ```
 
@@ -71,23 +99,34 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
 
 ### 5.1 Weekly SMA fetch (`fetch_sma.py`)
 
-- **FR-1 Load watchlist:** Read all symbols and names from the `tickers` table
-  (`load_tickers_from_db`). Fail clearly if the table is empty.
-- **FR-2 Skip fresh data:** For each ticker, skip fetching if a `metrics` row
-  already exists for that ticker's latest `trading_date` (`filter_stale_tickers`),
-  reducing API load.
+- **FR-1 Load watchlist:** Read all symbols and names from `us_tickers`,
+  `swe_tickers`, and `uk_tickers` (`load_tickers_from_db`). Fail clearly if all
+  three are empty.
+- **FR-2 Skip fresh data:** For each ticker, skip fetching if a row already
+  exists in the matching country metrics table (`us_metrics` / `swe_metrics` /
+  `uk_metrics`) for that ticker's latest `trading_date`
+  (`filter_stale_tickers`), reducing API load.
 - **FR-3 Batch download:** Fetch ~300 days of OHLCV history in configurable
   batches (default 40 symbols/batch) with a delay between batches.
 - **FR-4 Retry/backoff:** Retry retryable failures (HTTP 429, rate, timeout,
   connection, empty frames) with exponential backoff (`download_batch`).
 - **FR-5 Compute metrics:** From daily closes compute SMA-50 and SMA-200; skip
   symbols with fewer than 200 valid closes. Capture the latest close as
-  `current_price` and the latest bar's date as `trading_date`.
-- **FR-6 Insert:** Append one new row per ticker into `metrics` for the
-  computed `trading_date` (`insert_metrics`). Do not overwrite prior rows; use
-  `ON CONFLICT (ticker, trading_date) DO NOTHING` so re-runs are idempotent.
-- **FR-7 Retention purge:** After inserts, delete `metrics` rows where
-  `trading_date` is older than one year (`purge_stale_metrics`).
+  `current_price` and the latest bar's date as `trading_date`. Compute
+  **`momentum`** = `sma_50 / sma_200` (NULL when either SMA is NULL or
+  `sma_200` is zero). After per-ticker values for a `trading_date` are known,
+  upsert cross-sectional **`momentum_mean`** / **`momentum_std`** into the
+  matching `*_market_metrics` row, then set each ticker's **`z_score`** =
+  `(momentum - momentum_mean) / momentum_std` (NULL when `momentum` or
+  aggregates are missing, or `momentum_std` is zero).
+- **FR-6 Insert:** Append one new row per ticker into `us_metrics`,
+  `swe_metrics`, or `uk_metrics` for the computed `trading_date`
+  (`insert_metrics`), including `momentum` and `z_score`. Do not overwrite
+  prior rows; use `ON CONFLICT (ticker, trading_date) DO NOTHING` so re-runs
+  are idempotent.
+- **FR-7 Retention purge:** After inserts, delete rows from `us_metrics` /
+  `swe_metrics` / `uk_metrics` (and the matching `*_market_metrics` tables)
+  where `trading_date` is older than one year (`purge_stale_metrics`).
 - **FR-8 Observability:** Log per-batch progress, per-ticker results, insert
   and purge counts, and a final summary (total / skipped / fetched / failed
   batches). Exit non-zero on fatal errors (missing `DATABASE_URL`, no metrics
@@ -99,15 +138,22 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
   comments and blanks ignored), uppercased.
 - **FR-10 Resolve names:** Fetch each company's name from yfinance metadata
   (`longName`, falling back to `shortName`), with a small rate-limit delay.
-- **FR-11 Upsert tickers:** Insert/update `(symbol, name)` rows into the
-  `tickers` table on conflict by `symbol`.
+- **FR-11 Upsert tickers:** Insert/update
+  `(symbol, company, sector, industry, market, exchange_name)` rows into
+  `us_tickers`, `swe_tickers`, or `uk_tickers` on conflict by `symbol`
+  (country chosen by listing market / symbol suffix — see §6). Resolve
+  `exchange_name` from yfinance `fullExchangeName`. Support an optional
+  `--country us|swe|uk` filter so only symbols that route to that country set
+  are resolved and upserted (required for per-country `dev-backfill` — §8.1).
 - **FR-12 Ad-hoc metadata refresh:** `refresh_tickers.py` updates watchlist
-  metadata on an ad-hoc basis — re-resolve `company`, `sector`, and `industry`
-  from yfinance and upsert them into `tickers`. It operates on both:
-  - **Existing symbols** already present in the `tickers` table (refresh their
-    metadata in place), and
-  - **New symbols** found in the symbol file that are not yet in `tickers`
-    (resolve their metadata and add them as new rows).
+  metadata on an ad-hoc basis — re-resolve `company`, `sector`, `industry`,
+  listing `market`, and `exchange_name` (`fullExchangeName`) from yfinance and
+  upsert them into `us_tickers` / `swe_tickers` / `uk_tickers`. It operates on
+  both:
+  - **Existing symbols** already present in a country tickers table (refresh
+    their metadata in place), and
+  - **New symbols** found in the symbol file that are not yet in any tickers
+    table (resolve their metadata and add them as new rows).
 
   It applies the same rate-limiting and upsert-on-conflict behavior as
   seeding. CLI: default file ∪ DB merge; `--from-db`; optional `--symbols` subset.
@@ -124,17 +170,29 @@ Thursday schedule.
   index 0, 1, 2, … counting forward in 7-day steps. Build rolling **52-week**
   windows (weeks 0–51, then 1–52, then 2–53, and so on). Each window produces
   one SMA snapshot at the last trading day in the window.
-- **FR-15 Insert history:** Append rows to `metrics` with
-  `ON CONFLICT (ticker, trading_date) DO NOTHING` so interrupted runs can
-  resume without duplicates.
+- **FR-15 Insert history:** Append rows to `us_metrics` / `swe_metrics` /
+  `uk_metrics` with `ON CONFLICT (ticker, trading_date) DO NOTHING` so
+  interrupted runs can resume without duplicates.
 - **FR-16 Skip existing:** Before insert, skip `(ticker, trading_date)` pairs
-  already present in the database.
+  already present in the matching country metrics table.
 - **FR-17 Observability:** Log per-batch generated, new, inserted, and
   skipped-existing counts plus a final summary.
+- **FR-18 Country-set scope:** Backfill must accept a required country-set
+  filter (`us` | `swe` | `uk`) so a run only loads tickers from that set's
+  `*_tickers` table and only writes that set's `*_metrics` /
+  `*_market_metrics`. Adding a new country later (e.g. UK) must not re-download
+  or re-touch an already-backfilled set (e.g. US) — even though inserts are
+  idempotent, a full multi-set run would still hit yfinance and upsert market
+  aggregates for the other sets.
 
-Run once after seeding `tickers` and applying `migrate_metrics_history.sql`:
+Default CLI (scoped example):
 
-`pipenv run python backfill_sma.py`
+`pipenv run python backfill_sma.py --country us`
+
+Run once per country set after seeding that set's tickers (and applying
+`migrate_metrics_history.sql` when upgrading a legacy DB). Prefer separate
+runs over one all-country backfill so production/dev history for an existing
+set is not re-processed when another set is added.
 
 ### 5.5 Configuration
 
@@ -159,7 +217,7 @@ object instead of calling `os.getenv` directly.
 | `yf_max_retries` | 3 | 3 | Max retries per batch |
 | `yf_retry_base_seconds` | 5.0 | 5.0 | Backoff base (doubles per attempt) |
 | `yf_name_delay_seconds` | 0.25 | 0.25 | Delay between name lookups when seeding |
-| `metrics_retention_days` | 365 | 365 | Delete `metrics` rows with `trading_date` older than this |
+| `metrics_retention_days` | 365 | 365 | Delete `us_metrics` / `swe_metrics` / `uk_metrics` (and matching `*_market_metrics`) rows with `trading_date` older than this |
 | `backfill_history_days` | 730 | 730 | Days of OHLCV history per backfill batch download |
 | `backfill_window_weeks` | 52 | 52 | Rolling window length (weeks 0–51, then 1–52, …) |
 | `backfill_batch_size` | 25 | 25 | Symbols per yfinance batch during backfill |
@@ -168,57 +226,120 @@ object instead of calling `os.getenv` directly.
 `DevConfig` and `ProdConfig` may override any of the shared defaults where
 environments differ (e.g. more conservative batch delays in production).
 
+### 5.6 Golden Cross & Death Cross detection
+
+Detection-only feature over retained weekly SMA history. Does **not** call
+yfinance; does **not** run on the Thursday cron schedule in v1.
+
+- **FR-19 Source of truth:** Read only from the country metrics tables
+  (`us_metrics` / `swe_metrics` / `uk_metrics`), using `sma_50`, `sma_200`, and
+  `trading_date` (ordered per ticker). Do not fetch prices at detection time.
+- **FR-20 MA pair:** Treat SMA-50 as the shorter moving average and SMA-200 as
+  the longer moving average for all stage checks.
+- **FR-21 Golden Cross stages:** A Golden Cross event is emitted only when a
+  ticker completes all three stages in order over retained weekly snapshots
+  (a full process may take multiple weeks):
+
+  1. **Downtrend or consolidation** — shorter MA (SMA-50) sits below longer MA
+     (SMA-200).
+  2. **Convergence** — the gap between them narrows as recent prices
+     strengthen.
+  3. **Crossover** — shorter MA crosses **above** the longer MA.
+
+- **FR-22 Death Cross stages:** A Death Cross event is emitted only when a
+  ticker completes all three stages in order (mirror of Golden Cross):
+
+  1. **Uptrend or consolidation** — shorter MA sits above longer MA.
+  2. **Convergence** — the gap narrows as recent prices weaken vs the longer
+     trend.
+  3. **Crossover** — shorter MA crosses **below** the longer MA.
+
+- **FR-23 Scope:** Support all three country sets. Allow filtering to one
+  country and/or a symbol subset for an ad-hoc run.
+- **FR-24 Consumption:** Provide an ad-hoc runnable entrypoint (CLI or
+  equivalent) that prints human-readable and machine-readable output of
+  completed Golden Cross and Death Cross detections. Do not schedule this on
+  cron in v1.
+- **FR-25 Gaps & incomplete sequences:** Skip rows where `sma_50` or `sma_200`
+  is NULL. Incomplete stage sequences (stages 1–2 without a completed stage 3,
+  or out-of-order history) must not emit an event.
+- **FR-26 Stage config:** Stage windows and numeric thresholds are
+  configurable. Exact default values are **not** frozen in this PRD — they
+  belong in application config and a later design RFC.
+
 ## 6. Data Model
 
-### Table `tickers` (watchlist)
+Data is partitioned by listing country into three parallel table sets with the
+same column layouts.
+
+| Set | Watchlist | SMA history | Cross-sectional aggregates |
+|-----|-----------|-------------|----------------------------|
+| US stocks | `us_tickers` | `us_metrics` | `us_market_metrics` |
+| Swedish stocks | `swe_tickers` | `swe_metrics` | `swe_market_metrics` |
+| UK stocks | `uk_tickers` | `uk_metrics` | `uk_market_metrics` |
+
+**Country routing (seed / refresh / insert):**
+
+| Set | Typical symbol suffix | Typical yfinance `market` |
+|-----|----------------------|---------------------------|
+| US | (none / other) | `us_market` |
+| Swedish | `.ST` | `se_market` |
+| UK | `.L` | `uk_market` |
+
+### Watchlist tables (`us_tickers` / `swe_tickers` / `uk_tickers`)
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `symbol` | TEXT | Primary key |
 | `company` | TEXT | Company name |
-| `sector` | TEXT | Sector from yfinance (using sectorKey) |
-| `industry` | TEXT | Industry from yfinance (using industryKey) |
-| `market` | TEXT | Listing market from yfinance (e.g. `us_market`, `se_market`) |
+| `sector` | TEXT | Sector from yfinance (using `sectorKey`) |
+| `industry` | TEXT | Industry from yfinance (using `industryKey`) |
+| `market` | TEXT | Listing market from yfinance (e.g. `us_market`, `se_market`, `uk_market`) |
+| `exchange_name` | TEXT | Exchange display name from yfinance `fullExchangeName` |
 | `updated_at` | TIMESTAMPTZ | When the row was written |
 
-### Table `metrics` (SMA history, one row per ticker per `trading_date`)
+### Metrics tables (`us_metrics` / `swe_metrics` / `uk_metrics`)
+
+One row per ticker per `trading_date` within that country set.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | BIGSERIAL | Primary key |
-| `ticker` | TEXT | FK → `tickers.symbol` `ON DELETE CASCADE` |
-| `company` | TEXT | Copied from `tickers` at fetch time |
+| `ticker` | TEXT | FK → matching `*_tickers.symbol` `ON DELETE CASCADE` |
+| `company` | TEXT | Copied from the matching tickers table at fetch time |
 | `trading_date` | DATE | Market session used for this snapshot |
 | `updated_at` | TIMESTAMPTZ | When the row was written |
 | `currency` | TEXT | Currency code |
 | `sma_50` | NUMERIC(18,6) | 50-day SMA of closes |
 | `sma_200` | NUMERIC(18,6) | 200-day SMA of closes |
 | `current_price` | NUMERIC(18,6) | Adjusted close on `trading_date` |
-| `raw_50` | NUMERIC(18,6) | 50-day SMA / current price |
-| `raw_200`| NUMERIC(18,6) | 200-day SMA / current price |
+| `momentum` | NUMERIC(18,6) | `sma_50 / sma_200` |
+| `z_score` | NUMERIC(18,6) | `(momentum - momentum_mean) / momentum_std` using that date's matching `*_market_metrics` aggregates |
 
 Unique constraint on `(ticker, trading_date)`. Multiple rows per ticker are
 expected; each weekly run appends a new snapshot. Rows with `trading_date`
 older than one year are deleted on each run.
 
-### Table `market_metrics` (cross-sectional SMA stats; one row per `trading_date` per `market`)
+### Market metrics tables (`us_market_metrics` / `swe_market_metrics` / `uk_market_metrics`)
 
-Aggregates `raw_50` / `raw_200` from `metrics` rows whose tickers share the same listing `market` (from `tickers.market`) on that date.
+Cross-sectional momentum stats for one country set; one row per
+`(market, trading_date)`. Aggregates `momentum` from that set's metrics rows
+on that date.
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `market` | TEXT | Listing market bucket (e.g. `us_market`, `se_market`); matches `tickers.market` |
+| `market` | TEXT | Listing market bucket (e.g. `us_market`, `se_market`, `uk_market`); matches the set's tickers `market` values |
 | `trading_date` | DATE | Market session used for this snapshot |
 | `updated_at` | TIMESTAMPTZ | When the row was written |
-| `raw_mean_50` | NUMERIC(18,6) | Mean of tickers' `raw_50` in this `market` on this date |
-| `raw_mean_200`| NUMERIC(18,6) | Mean of tickers' `raw_200` in this `market` on this date |
-| `raw_std_50` | NUMERIC(18,6) | St. dev. of tickers' `raw_50` in this `market` on this date |
-| `raw_std_200` | NUMERIC(18,6) | St. dev. of tickers' `raw_200` in this `market` on this date |
+| `momentum_mean` | NUMERIC(18,6) | Mean of tickers' `momentum` in this set on this date |
+| `momentum_std` | NUMERIC(18,6) | St. dev. of tickers' `momentum` in this set on this date |
 
 Unique constraint on `(market, trading_date)`. Rows with `trading_date` older
-than one year are deleted on each weekly run (same retention as `metrics`).
+than one year are deleted on each weekly run (same retention as the metrics
+tables).
 
-Deleting a row from `tickers` cascades to all of its `metrics` rows.
+Deleting a row from `us_tickers`, `swe_tickers`, or `uk_tickers` cascades to all
+of its rows in the matching metrics table.
 
 ## 7. Non-Functional Requirements
 
@@ -239,13 +360,35 @@ Deleting a row from `tickers` cascades to all of its `metrics` rows.
 
 ## 8. CI/CD
 
-### 8.1 Backfill
+### 8.1 Backfill (`.github/workflows/dev-backfill.yml`)
 
-- **Spin up a VM:** On push to `dev`, spins up a new VM (`data-fetcher-dev`) in GCP and create a firewall rule allowing GitHub Actions to access the VM via SSH 
-- **Deploy:** On `Spin up a VM` being successfully completed, deploys to the new Dev VM
-- **Data collection:** On `Deploy` being successfully completed; requests, retrieves and stores the data in the Neon database (dev branch)
-- **Verification:** On `Data collection` being completed without an interrupting error; analyze if there were any missing data, failed downloads etc and print the result 
-- **Delete VM:** Delete VM 
+Triggered **only by manual `workflow_dispatch`** — not on push to `dev` (or any
+other branch).
+
+Each dispatch must target **exactly one** country set so markets can be
+bootstrapped independently (US today, UK later, etc.) without re-running
+backfill for sets that already have history.
+
+- **Inputs:** required `country` = `us` | `swe` | `uk` (maps to the matching
+  `*_tickers` / `*_metrics` / `*_market_metrics` set in §6).
+- **Spin up a VM:** Create ephemeral `data-fetcher-dev` in GCP; firewall must
+  allow GitHub Actions SSH via IAP.
+- **Deploy:** On spin-up success, deploy code and write `.env` on the Dev VM;
+  apply schema / migrations against the Neon **dev** branch (full schema still;
+  data collection is scoped).
+- **Data collection:** On deploy success, seed and backfill **only** the
+  selected country set (e.g. `seed_tickers.py --country uk` then
+  `backfill_sma.py --country uk`). Do not process other country sets in that
+  run.
+- **Verification:** On data collection success without a fatal error; analyze
+  missing data, failed downloads, etc., for the selected country set, and print
+  the result.
+- **Delete VM:** Always tear down `data-fetcher-dev` (including on failure).
+
+**Rationale:** Country tables are isolated, but an unscoped seed/backfill still
+re-resolves and re-downloads every symbol in the tickers file. Scoping keeps a
+later UK (or SWE) bootstrap from polluting or re-touching production/dev US
+history and from burning yfinance quota on sets that are already complete.
 
 ### 8.2 Production  
 
@@ -342,13 +485,34 @@ Python 3.11+. Key libraries: `yfinance`, `pandas`, `psycopg2-binary`,
   `0 11 * * 4 cd /opt/fansboda-finance && pipenv run python fetch_sma.py >> /var/log/fansboda-finance/fetch_sma.log 2>&1`
 - First-time setup: run `schema.sql` in Neon, then `scripts/bootstrap-vm.sh` on
   the VM (as root/sudo). Existing databases upgrade via the `migrate_*.sql`
-  scripts. For historical SMA data, run `migrate_metrics_history.sql` in Neon,
-  then `pipenv run python backfill_sma.py` once (manual, not cron).
-- Verify data: `SELECT * FROM metrics ORDER BY trading_date DESC, ticker LIMIT 10;`
-- Check retention: `SELECT MIN(trading_date), MAX(trading_date), COUNT(*) FROM metrics;`
+  scripts. Seed **per country set** as needed (e.g.
+  `pipenv run python seed_tickers.py --country us`, and separately for `swe` /
+  `uk` when ready). For historical SMA data, run `migrate_metrics_history.sql`
+  in Neon when upgrading a legacy DB, then backfill **per country set** (manual,
+  not cron), e.g. `pipenv run python backfill_sma.py --country us` (and
+  separately for `swe` / `uk` when those watchlists are ready). Use the same
+  `--country` scope on the manual `dev-backfill` workflow (§8.1).
+- Verify data:
+  `SELECT * FROM us_metrics ORDER BY trading_date DESC, ticker LIMIT 10;`
+  (and the same against `swe_metrics` / `uk_metrics`)
+- Check retention:
+  `SELECT MIN(trading_date), MAX(trading_date), COUNT(*) FROM us_metrics;`
+  (and the same against `swe_metrics` / `uk_metrics`)
+- Market snapshot:
+  `SELECT * FROM us_market_metrics ORDER BY trading_date DESC, market LIMIT 10;`
+  (and the same against `swe_market_metrics` / `uk_market_metrics`)
 
 ## 11. Future Considerations (Out of Current Scope)
 
-- Additional indicators (EMA, RSI, MACD) or signal/alerting layer.
-- A read API or dashboard for the `metrics` data.
+- **Golden Cross / Death Cross detection** (stage semantics, ad-hoc
+  consumption, config knobs) is **in scope** via §5.6 — not a future idea.
+  Still out of current scope for that feature:
+  - Push notifications, alerting, or watchers when a cross completes.
+  - Persisting detections in a dedicated table / detection history store.
+  - Exact numeric stage windows and thresholds (defer to a design RFC /
+    config defaults; see FR-26).
+- Additional indicators (EMA, RSI, MACD) or alternate moving-average windows
+  beyond the SMA-50 / SMA-200 pair used by §5.6.
+- A read API or dashboard for the `us_metrics` / `swe_metrics` / `uk_metrics`
+  data.
 - Gap detection for missed weekly runs.

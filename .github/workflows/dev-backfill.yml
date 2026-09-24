@@ -2,11 +2,16 @@ name: Dev Backfill
 
 
 on:
-  push:
-    branches: [dev]
-
   workflow_dispatch:
-    branches: [dev]
+    inputs:
+      country:
+        description: Country set to seed and backfill (us, swe, or uk)
+        required: true
+        type: choice
+        options:
+          - us
+          - swe
+          - uk
 
 permissions:
   contents: read
@@ -120,7 +125,7 @@ jobs:
             --project="$GCP_PROJECT_ID" \
             --quiet \
             --tunnel-through-iap \
-            --command="sudo mkdir -p $APP_DIR && sudo tar xzf /tmp/fansboda-finance.tgz -C $APP_DIR && sudo rm -f /tmp/fansboda-finance.tgz && sudo chown -R fansboda:fansboda $APP_DIR && sudo -u fansboda bash -c 'cd $APP_DIR && PIPENV_VENV_IN_PROJECT=1 pipenv install --deploy'"
+            --command="sudo mkdir -p $APP_DIR && sudo tar xzf /tmp/fansboda-finance.tgz -C $APP_DIR && sudo rm -f /tmp/fansboda-finance.tgz && sudo chown -R fansboda:fansboda $APP_DIR && if ! command -v pipenv >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y pipenv python3-venv; fi && sudo -u fansboda bash -c 'cd $APP_DIR && PIPENV_VENV_IN_PROJECT=1 pipenv install --deploy'"
           rm -f /tmp/fansboda-finance.tgz
 
       - name: Write .env on dev VM
@@ -173,13 +178,14 @@ jobs:
         env:
           GCP_ZONE: ${{ secrets.GCP_ZONE }}
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          COUNTRY: ${{ inputs.country }}
         run: |
           gcloud compute ssh "$INSTANCE_NAME" \
             --zone="$GCP_ZONE" \
             --project="$GCP_PROJECT_ID" \
             --quiet \
             --tunnel-through-iap \
-            --command="sudo -u fansboda bash -c 'cd $APP_DIR && set -a && . ./.env && set +a && PIPENV_VENV_IN_PROJECT=1 pipenv run python seed_tickers.py && PIPENV_VENV_IN_PROJECT=1 pipenv run python backfill_sma.py'" \
+            --command="sudo -u fansboda bash -c 'cd $APP_DIR && set -a && . ./.env && set +a && PIPENV_VENV_IN_PROJECT=1 pipenv run python seed_tickers.py --country $COUNTRY && PIPENV_VENV_IN_PROJECT=1 pipenv run python backfill_sma.py --country $COUNTRY'" \
             2>&1 | tee collect-data.log
 
       - uses: actions/upload-artifact@v4
@@ -209,7 +215,7 @@ jobs:
       - name: Verify backfill log and dev database
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: python scripts/verify_dev_backfill.py collect-data.log
+        run: python scripts/verify_dev_backfill.py collect-data.log --country ${{ inputs.country }}
 
   delete-vm:
     needs: [spin-up-vm, deploy, collect-data, verify]
