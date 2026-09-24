@@ -96,9 +96,10 @@ Run once as root/sudo on a fresh Debian/Ubuntu instance:
 2. Create `/opt/fansboda-finance` owned by `fansboda`
 3. Set timezone UTC (`timedatectl`)
 4. Create `/var/log/fansboda-finance/` and `fetch_sma.log` with `fansboda` ownership
-5. Install Thursday cron for `fansboda` only if no `fetch_sma.py` line is already present
+5. Ensure the `cron` package / `crontab` CLI is installed and the service is enabled (minimal cloud images often omit it)
+6. Install Thursday cron for `fansboda` only if no `fetch_sma.py` line is already present
 
-Application code and Python deps are **not** installed here — the deploy workflow copies a tarball to `/opt/fansboda-finance` and runs `pipenv install --deploy`. OS packages (`python3`, `pipenv`, etc.) must already be available on the VM.
+Application code and Python deps are **not** installed here — the deploy workflow copies a tarball to `/opt/fansboda-finance` and runs `pipenv install --deploy`. Other OS packages (`python3`, `pipenv`, etc.) must already be available on the VM (or come from deploy).
 
 Bootstrap does **not** write `.env` — that comes from the deploy workflow or manual setup.
 

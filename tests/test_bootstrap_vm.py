@@ -53,6 +53,13 @@ def test_bootstrap_installs_cron_only_when_missing() -> None:
     assert "grep -v 'fetch_sma.py'" not in content
 
 
+def test_bootstrap_ensures_crontab_package_installed() -> None:
+    content = BOOTSTRAP_SH.read_text(encoding="utf-8")
+    assert "command -v crontab" in content
+    assert "apt-get install -y cron" in content
+    assert "systemctl enable --now cron" in content
+
+
 def test_bootstrap_does_not_clone_repo() -> None:
     content = BOOTSTRAP_SH.read_text(encoding="utf-8")
     assert "git clone" not in content
@@ -82,7 +89,8 @@ def test_bootstrap_mentions_per_country_seed_and_backfill() -> None:
 
 
 def test_bootstrap_does_not_install_app_deps() -> None:
-    """OS packages may be preinstalled; Pipfile deps come from deploy (RFC-008)."""
+    """Pipfile deps come from deploy; bootstrap may apt-install OS cron only."""
     content = BOOTSTRAP_SH.read_text(encoding="utf-8")
-    assert "apt-get install" not in content
+    assert "apt-get install -y pipenv" not in content
+    assert "apt-get install -y python3" not in content
     assert "PIPENV_VENV_IN_PROJECT=1 pipenv install" not in content
