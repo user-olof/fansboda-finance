@@ -404,8 +404,9 @@ history and from burning yfinance quota on sets that are already complete.
 ### 8.2 Production  
 
 - **Test (`.github/workflows/test.yml`):** Runs `pytest` on push/PR to `main`.
-- **Deploy (`.github/workflows/deploy.yml`):** On push to `main`, deploys to the
-  Production VM.
+- **Deploy (`.github/workflows/deploy.yml`):** Runs if and only if the test
+  workflow succeeds for a push to `main` (`workflow_run`), and deploys exactly
+  the tested commit to the Production VM. Failed tests or PR runs never deploy.
 - Branch protection on `main` should require the test workflow to pass.
 
 ### Production pipeline

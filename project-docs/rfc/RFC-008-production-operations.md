@@ -61,7 +61,7 @@ User `fansboda` owns `/opt/fansboda-finance`, the Pipenv venv, `.env`, and the j
 
 Production deploy is **not** part of this RFC's implementation, but operations depend on it:
 
-- Push to `main` → `.github/workflows/deploy.yml` SCPs a tarball to the Production VM (IAP), ensures `pipenv`, runs `pipenv install --deploy`, writes `.env` via `gcloud compute scp`.
+- Push to `main` → `test.yml` → on success `.github/workflows/deploy.yml` SCPs a tarball to the Production VM (IAP), ensures `pipenv`, runs `pipenv install --deploy`, writes `.env` via `gcloud compute scp`.
 - Auth: GitHub OIDC JWT + WIF — no `GCP_SA_KEY` (RFC-009).
 - `.env` contents: `DATABASE_URL` plus `APP_ENV` (RFC-006). **Temporary:** deploy currently writes `APP_ENV=dev` while validating the VM; cut over to `APP_ENV=production` when ready (RFC-007).
 
@@ -72,7 +72,7 @@ Production deploy is **not** part of this RFC's implementation, but operations d
 3. GCP: attach instance service account (no JSON key on disk) on the existing VM.
 4. VM: `sudo bash scripts/bootstrap-vm.sh` (user, UTC, logs, cron — not app code).
 5. GitHub: secrets + WIF + `production` environment (RFC-009).
-6. Push to `main` — deploy unpacks tarball, installs deps, writes `.env`.
+6. Push to `main` — once tests pass, deploy unpacks tarball, installs deps, writes `.env`.
 7. Seed per country set as needed: `pipenv run python seed_tickers.py --country us` (and `--country swe` / `--country uk` when ready).
 8. Optional history: `migrate_metrics_history.sql` in Neon when upgrading a legacy DB, then backfill **per country set** (manual, not cron), e.g. `pipenv run python backfill_sma.py --country us`. Do not re-run an already-complete set when adding another.
 9. Branch protection: `./scripts/configure-branch-protection.sh` (RFC-007).

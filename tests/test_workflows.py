@@ -45,10 +45,20 @@ def test_test_workflow_uses_python_311() -> None:
     assert 'python-version: "3.11"' in content
 
 
-def test_deploy_workflow_runs_on_main_push_only() -> None:
+def test_deploy_workflow_runs_only_after_successful_test_on_main_push() -> None:
     content = DEPLOY_YML.read_text(encoding="utf-8")
+    assert "on:\n  push:" not in content
+    assert "workflow_run:\n    workflows: [Test]\n    types: [completed]" in content
     assert "branches: [main]" in content
+    assert "github.event.workflow_run.conclusion == 'success'" in content
+    assert "github.event.workflow_run.event == 'push'" in content
+    assert "github.event.workflow_run.head_branch == 'main'" in content
+    assert "ref: ${{ github.event.workflow_run.head_sha }}" in content
     assert "environment: PROD" in content
+
+
+def test_deploy_trigger_matches_test_workflow_name() -> None:
+    assert "name: Test\n" in TEST_YML.read_text(encoding="utf-8")
 
 
 def test_deploy_workflow_uses_workload_identity_federation() -> None:

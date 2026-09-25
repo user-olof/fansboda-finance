@@ -70,7 +70,7 @@ workflow_dispatch (country=us|swe|uk)
 | Workflow | Trigger | Scope |
 |----------|---------|-------|
 | `test.yml` | Push / PR to `main` | `pytest` |
-| `deploy.yml` | Push to `main` | Production VM |
+| `deploy.yml` | After `test.yml` succeeds on a push to `main` | Production VM |
 | `dev-backfill.yml` | Manual `workflow_dispatch` only | Ephemeral `data-fetcher-dev` VM |
 
 ### Target design

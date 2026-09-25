@@ -264,7 +264,7 @@ Bootstrap installs an enhanced line that also sources `.env` and sets `PIPENV_VE
 | Workflow | Trigger | Action |
 |----------|---------|--------|
 | `test.yml` | Push / PR to `main` | `pipenv run pytest` (covers `us_*` / `swe_*` / `uk_*` schema and routing) |
-| `deploy.yml` | Push to `main` | SCP tarball to Production VM, `pipenv install --deploy`, write `.env` (temporary `APP_ENV=dev` while validating) |
+| `deploy.yml` | After `test.yml` succeeds on a push to `main` | SCP tarball to Production VM, `pipenv install --deploy`, write `.env` (temporary `APP_ENV=dev` while validating) |
 
 - GitHub **`PROD`** environment.
 - Branch protection on `main` should require tests (`scripts/configure-branch-protection.sh`).
@@ -298,7 +298,7 @@ Uses GitHub **`DEV`** environment and `DATABASE_URL` secret (dev branch). Deploy
 2. Create **one** GCP `e2-micro` in a free-tier US region; attach instance SA.
 3. Run `scripts/bootstrap-vm.sh` on the VM (sudo) — user, UTC, logs, cron (code via deploy).
 4. Configure GitHub secrets + WIF (PRD §8).
-5. Push to `main` — deploy unpacks tarball, installs deps, writes `.env` on VM.
+5. Push to `main` — once tests pass, deploy unpacks tarball, installs deps, writes `.env` on VM.
 6. `pipenv run python seed_tickers.py --country us` (and `--country swe` / `--country uk` when those watchlists are ready).
 7. Optionally `pipenv run python backfill_sma.py --country us` (repeat per country set; do not re-run an already-complete set when adding another).
 8. Enable branch protection.

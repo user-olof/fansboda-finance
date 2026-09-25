@@ -93,7 +93,7 @@ Scripts read from the config object — not scattered `os.getenv` calls. Key tun
 | Workflow | Trigger | Action |
 |----------|---------|--------|
 | `test.yml` | Push / PR to `main` | `pipenv install --dev`, `pipenv run pytest` |
-| `deploy.yml` | Push to `main` | SCP tarball to production VM, ensure pipenv, `pipenv install --deploy`, write `.env` (temporary `APP_ENV=dev` while validating) |
+| `deploy.yml` | After `test.yml` succeeds on a push to `main` (`workflow_run`) | SCP tarball to production VM, ensure pipenv, `pipenv install --deploy`, write `.env` (temporary `APP_ENV=dev` while validating) |
 | `dev-backfill.yml` | Manual `workflow_dispatch` only | Ephemeral `data-fetcher-dev` VM: tarball deploy, `apply_migrations.sh`, seed + backfill, verify `us_*`/`swe_*`/`uk_*`, tear down |
 
 - Production VM path: `/opt/fansboda-finance`; logs: `/var/log/fansboda-finance/fetch_sma.log`.
