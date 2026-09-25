@@ -6,9 +6,9 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 
 | Area | Description |
 |------|-------------|
-| Weekly SMA pipeline | Thursday job fetches prices, computes SMA-50/200, appends history |
+| Weekly SMA pipeline | Saturday job fetches prices, computes SMA-50/200, stores one snapshot per ticker per week |
 | Normalized momentum | Per-ticker `momentum` (`sma_50 / sma_200`) and cross-sectional `z_score` |
-| Market aggregates | Per-`(market, trading_date)` `momentum_mean` / `momentum_std` in `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics` |
+| Market aggregates | Per-`(market, week_start)` `momentum_mean` / `momentum_std` in `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics` |
 | Historical backfill | Bootstrap of rolling weekly SMA snapshots (~2 years), **scoped per country set** (`--country us|swe|uk`) so adding a market later does not re-process others |
 | Golden Cross & Death Cross detection | Ad-hoc detection of completed three-stage Golden / Death Cross processes over retained weekly SMA-50/200 (PRD §5.6; Shipped) |
 | Watchlist seeding | Load symbols from file, resolve company metadata, upsert into Postgres (optional `--country`) |
@@ -23,7 +23,7 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 ## Users & use cases
 
 - **Primary user:** project owner with personal watchlists of US, Swedish (`.ST`), and UK (`.L`) symbols; may also query country metrics tables to see which stocks are above/below their long-term moving averages.
-- **Primary use case — Golden / Death Cross detection:** detect completed **Golden Cross** and **Death Cross** three-stage processes from stored weekly `sma_50` / `sma_200` history (no yfinance at detection time; PRD §5.6). Use **`momentum`**, **`z_score`**, and `*_market_metrics` (`momentum_mean` / `momentum_std`) to rank tickers relative to peers in the same country set on each `trading_date` (cross-sectional normalization for heatmaps; sector views via `*_tickers.sector`).
+- **Primary use case — Golden / Death Cross detection:** detect completed **Golden Cross** and **Death Cross** three-stage processes from stored weekly `sma_50` / `sma_200` history (no yfinance at detection time; PRD §5.6). Use **`momentum`**, **`z_score`**, and `*_market_metrics` (`momentum_mean` / `momentum_std`) to rank tickers relative to peers in the same country set in each week (cross-sectional normalization for heatmaps; sector views via `*_tickers.sector`).
 - **Watchlist management:** add or remove symbols via SQL on `us_tickers` / `swe_tickers` / `uk_tickers`, or by running `seed_tickers.py` (optionally `--country us|swe|uk` to touch only one set).
 
 ---
@@ -39,12 +39,12 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
   `*_market_metrics` aggregates — for cross-sectional comparison across tickers.
 - Stores **currency** from yfinance at fetch/backfill time. **Company** is copied from the matching `*_tickers` table into each snapshot.
 - **Sector**, **industry**, listing **market**, and **exchange_name** are watchlist-level fields on `*_tickers`, not duplicated per metric row.
-- One row per `(ticker, trading_date)` within each country set — each weekly run appends a new snapshot.
-- Idempotent inserts: `ON CONFLICT (ticker, trading_date) DO NOTHING`.
+- One row per ticker per calendar week (`week_start` = Monday) within each country set; `trading_date` is the bar the row holds.
+- Idempotent week upserts: `ON CONFLICT (ticker, week_start) DO UPDATE … WHERE EXCLUDED.trading_date > existing` — a newer bar in the same week replaces the row.
 
 ### Market aggregates
 
-- **`us_market_metrics` / `swe_market_metrics` / `uk_market_metrics`:** one row per `(market, trading_date)` with cross-sectional stats over tickers in that listing-market bucket on that date (PRD §6).
+- **`us_market_metrics` / `swe_market_metrics` / `uk_market_metrics`:** one row per `(market, week_start)` with cross-sectional stats over tickers in that listing-market bucket in that week (PRD §6).
 - Aggregates **`momentum`** from the matching country `*_metrics` rows on that date.
 - **`momentum_mean`:** mean of tickers' `momentum` in the bucket on the date.
 - **`momentum_std`:** standard deviation of tickers' `momentum` in the bucket on the date.
@@ -62,7 +62,7 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 
 ### Data retention
 
-- After each weekly run, `us_metrics` / `swe_metrics` / `uk_metrics` and matching `*_market_metrics` rows with `trading_date` older than **365 days** are deleted (`db/retention.py`).
+- After each weekly run, `us_metrics` / `swe_metrics` / `uk_metrics` and matching `*_market_metrics` rows with `trading_date` / `week_start` older than **365 days** are deleted (`db/retention.py`).
 - Retention purge runs even when all tickers are already fresh (nothing to fetch).
 - Purge counts appear in the weekly job summary log.
 - Cutoff uses UTC date via `metrics_retention_days` (configurable).
@@ -86,10 +86,10 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 | Table role | Key columns |
 |------------|-------------|
 | `*_tickers` | `symbol` (PK), `company`, `sector`, `industry`, `market`, `exchange_name`, `updated_at` |
-| `*_metrics` | `id` (PK), `ticker` (FK → matching `*_tickers.symbol`), `company`, `trading_date`, `updated_at`, `currency`, `sma_50`, `sma_200`, `current_price`, `momentum`, `z_score` |
-| `*_market_metrics` | `market`, `trading_date`, `updated_at`, `momentum_mean`, `momentum_std` |
+| `*_metrics` | `id` (PK), `ticker` (FK → matching `*_tickers.symbol`), `company`, `week_start`, `trading_date`, `updated_at`, `currency`, `sma_50`, `sma_200`, `current_price`, `momentum`, `z_score` |
+| `*_market_metrics` | `market`, `week_start`, `updated_at`, `momentum_mean`, `momentum_std` |
 
-`company` on each metrics row is copied from the matching tickers table at fetch time. `currency` is the listing currency code captured per snapshot. Listing `market` lives on the tickers tables and is also stored on `*_market_metrics`. `exchange_name` is the human-readable exchange from yfinance `fullExchangeName`. **`momentum`** is `sma_50 / sma_200`; **`z_score`** is `(momentum - momentum_mean) / momentum_std` using that date's market aggregates. Price and derived columns use `NUMERIC(18, 6)`. Unique on `*_metrics (ticker, trading_date)` and `*_market_metrics (market, trading_date)`.
+`company` on each metrics row is copied from the matching tickers table at fetch time. `currency` is the listing currency code captured per snapshot. Listing `market` lives on the tickers tables and is also stored on `*_market_metrics`. `exchange_name` is the human-readable exchange from yfinance `fullExchangeName`. **`momentum`** is `sma_50 / sma_200`; **`z_score`** is `(momentum - momentum_mean) / momentum_std` using that week's market aggregates. Price and derived columns use `NUMERIC(18, 6)`. Unique on `*_metrics (week_start, ticker)` and `*_market_metrics (market, week_start)`.
 
 DDL: `schema.sql` for new databases; `migrate_*.sql` for upgrades ([MIGRATIONS.md](./MIGRATIONS.md)).
 
@@ -99,17 +99,17 @@ DDL: `schema.sql` for new databases; `migrate_*.sql` for upgrades ([MIGRATIONS.m
 
 ### Weekly SMA fetch (`fetch_sma.py`)
 
-Scheduled **Thursdays at 11:00 UTC** on the Production VM (FR-1 – FR-8).
+Scheduled **Saturdays at 11:00 UTC** on the Production VM (after every market's Friday close) (FR-1 – FR-8).
 
 | Capability | Detail |
 |------------|--------|
 | Load watchlist | Reads symbols and company names from `us_tickers`, `swe_tickers`, and `uk_tickers`; fails clearly if all three are empty |
-| Skip fresh data | Skips tickers that already have a row in the matching `*_metrics` table at their latest `trading_date` |
+| Skip fresh data | Skips tickers whose current-week row already holds the newest expected bar (Friday on weekends, otherwise today) |
 | Batch download | ~300 days OHLCV via yfinance (default 40 symbols/batch) |
 | Retry / backoff | Retries 429, rate limits, timeouts, connection errors, empty frames |
 | Compute SMAs | Requires ≥200 valid daily closes; captures latest close and `trading_date` |
 | Momentum | Computes `momentum` = `sma_50 / sma_200` per ticker |
-| Market stats | Aggregates `momentum_mean` / `momentum_std` into `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics` per `(market, trading_date)` |
+| Market stats | Aggregates `momentum_mean` / `momentum_std` into `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics` per `(market, week_start)` |
 | Z-score | Sets `z_score` = `(momentum - momentum_mean) / momentum_std` using that date's market aggregates |
 | yfinance metadata | Captures `currency` per snapshot; copies `company` from the matching `*_tickers` table |
 | Append metrics | Inserts new rows into `us_metrics` / `swe_metrics` / `uk_metrics` without overwriting history |
@@ -161,13 +161,13 @@ Bootstrap script for SMA history — **not** part of the weekly cron (FR-13 – 
 | Capability | Detail |
 |------------|--------|
 | Batch download | ~730 days daily OHLCV (default 25 symbols/batch) with retry and inter-batch delay |
-| Rolling 52-week windows | Week 0 anchored at oldest bar; windows 0–51, 1–52, 2–53, … |
+| Weekly snapshots | One SMA snapshot per calendar week at the week's last bar (normally Friday), using closes up to that bar — aligned with the Saturday job regardless of run day |
 | SMA snapshots | One metric row per window at the last trading day in the window |
 | Momentum / z-score | Populates `momentum` and `z_score` on each inserted country `*_metrics` row |
-| Market stats | Upserts matching `*_market_metrics` with `momentum_mean` / `momentum_std` for backfilled `trading_date` values |
+| Market stats | Upserts matching `*_market_metrics` with `momentum_mean` / `momentum_std` for backfilled weeks |
 | Currency | Resolves listing `currency` per ticker (same rate-limit pattern as weekly fetch) |
 | Skip existing | Skips `(ticker, trading_date)` pairs already in the matching country metrics table |
-| Resume-safe | `ON CONFLICT DO NOTHING`; interrupted runs can continue without duplicates |
+| Resume-safe | Week upsert; interrupted runs can continue without duplicates |
 | Country scope | **Required** `--country us|swe|uk` — only that set's tickers are loaded and only that set's tables are written (FR-18). Adding UK later must not re-download or re-touch US/SWE. |
 
 ```bash
@@ -221,7 +221,6 @@ All tunables live in **`config.py`** (PRD §5.5):
 | `yf_name_delay_seconds` | 0.25 | 0.25 | Delay between name lookups |
 | `metrics_retention_days` | 365 | 365 | Retention purge cutoff for `us_metrics` / `swe_metrics` / `uk_metrics` / `*_market_metrics` |
 | `backfill_history_days` | 730 | 730 | Backfill download window |
-| `backfill_window_weeks` | 52 | 52 | Rolling SMA window length |
 | `backfill_batch_size` | 25 | 25 | Backfill batch size |
 | `backfill_batch_delay_seconds` | 5.0 | 5.0 | Delay between backfill batches |
 | `cross_min_regime_weeks` | 4 | 4 | Min consecutive valid weeks in stage-1 regime before crossover (RFC-013) |
@@ -241,7 +240,7 @@ GCP e2-micro VM  ──cron Thu 11:00 UTC──▶  fetch_sma.py  ──▶  Neo
                                               metrics, market_metrics
 ```
 
-- **Compute:** one `e2-micro`, UTC, weekly on Thursdays.
+- **Compute:** one `e2-micro`, UTC, weekly on Saturdays.
 - **Storage:** Neon Postgres (free tier).
 - **Outbound only:** yfinance + Neon via `DATABASE_URL`; VM attached SA needs no GCP API roles.
 
@@ -255,7 +254,7 @@ GCP e2-micro VM  ──cron Thu 11:00 UTC──▶  fetch_sma.py  ──▶  Neo
 PRD §10 cron:
 
 ```
-0 11 * * 4 cd /opt/fansboda-finance && pipenv run python fetch_sma.py >> /var/log/fansboda-finance/fetch_sma.log 2>&1
+0 11 * * 6 cd /opt/fansboda-finance && pipenv run python fetch_sma.py >> /var/log/fansboda-finance/fetch_sma.log 2>&1
 ```
 
 Bootstrap installs an enhanced line that also sources `.env` and sets `PIPENV_VENV_IN_PROJECT=1` so `get_config()` receives `DATABASE_URL` and `APP_ENV` from the VM `.env`.
@@ -315,7 +314,7 @@ Uses GitHub **`DEV`** environment and `DATABASE_URL` secret (dev branch). Deploy
 | Dev backfill CI | Manual `workflow_dispatch` on `dev-backfill.yml` with `country=us\|swe\|uk` |
 | Verify data | `SELECT * FROM us_metrics ORDER BY trading_date DESC, ticker LIMIT 10;` (same for `swe_metrics` / `uk_metrics`) |
 | Check retention | `SELECT MIN(trading_date), MAX(trading_date), COUNT(*) FROM us_metrics;` (same for `swe_metrics` / `uk_metrics`) |
-| Market snapshot | `SELECT * FROM us_market_metrics ORDER BY trading_date DESC, market LIMIT 10;` (same for `swe_market_metrics` / `uk_market_metrics`) |
+| Market snapshot | `SELECT * FROM us_market_metrics ORDER BY week_start DESC, market LIMIT 10;` (same for `swe_market_metrics` / `uk_market_metrics`) |
 
 ---
 
@@ -351,7 +350,7 @@ Deploy SA IAM roles: `compute.instanceAdmin.v1`, `iam.serviceAccountUser`, `comp
 Explicitly **not** part of fansboda-finance (PRD §2, §11), except where noted:
 
 - User-facing UI or read API
-- Intraday or real-time quotes (weekly Thursday job only)
+- Intraday or real-time quotes (weekly Saturday job only)
 - Additional indicators (EMA, RSI, MACD) or alternate moving-average windows beyond the SMA-50 / SMA-200 pair used by §5.6
 - Push notifications, alerting, or watchers when a cross completes (or for other signals)
 - Dedicated detections table / persisted detection history in this product pass (detection is on-demand from `*_metrics`)

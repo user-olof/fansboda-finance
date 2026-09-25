@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-off backfill: download 2y history per batch and insert weekly SMA snapshots."""
+"""One-off backfill: download 2y history per batch and store one SMA snapshot per week."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 
-from config import DEFAULT_BACKFILL_WINDOW_WEEKS, get_config
+from config import get_config
 from db.country import CountrySet
 from db.metrics import insert_metrics, load_existing_metric_keys
 from db.tickers import load_tickers_from_db
@@ -22,9 +22,9 @@ from fetch_sma import (
     compute_momentum,
     compute_smas,
     trading_date_from_index,
-    upsert_market_for_trading_dates,
+    upsert_market_for_weeks,
 )
-from models import MetricRow
+from models import MetricRow, week_start_of
 from yfinance_client import download_batch, load_currency_for_tickers
 
 logging.basicConfig(
@@ -33,18 +33,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def week_index_series(index: pd.DatetimeIndex, anchor: pd.Timestamp) -> pd.Series:
-    """Map each bar to a week number counting forward from the anchor date."""
-    normalized = pd.to_datetime(index).normalize()
-    return ((normalized - anchor).days // 7).astype(int)
-
-
-def sample_start_weeks(max_week: int, window_weeks: int) -> list[int]:
-    """Return week-0 offsets for rolling windows [s, s + window_weeks - 1]."""
-    if max_week < window_weeks - 1:
-        return []
-    last_start = max_week - (window_weeks - 1)
-    return list(range(0, last_start + 1))
+def last_bar_positions_per_week(index: pd.DatetimeIndex) -> list[int]:
+    """Return positions of the last bar in each calendar week (Monday-based)."""
+    weeks = [week_start_of(pd.Timestamp(ts).date()) for ts in index]
+    return [
+        pos
+        for pos in range(len(weeks))
+        if pos == len(weeks) - 1 or weeks[pos + 1] != weeks[pos]
+    ]
 
 
 def metric_rows_from_weekly_samples(
@@ -53,9 +49,12 @@ def metric_rows_from_weekly_samples(
     *,
     company: str | None,
     currency: str | None = None,
-    window_weeks: int = DEFAULT_BACKFILL_WINDOW_WEEKS,
 ) -> list[MetricRow]:
-    """Build SMA snapshots from rolling week windows anchored at the oldest bar."""
+    """Build one SMA snapshot per calendar week from the week's last bar.
+
+    Each snapshot uses only closes up to and including that bar, so it matches
+    what the weekly job would have stored had it run after that bar.
+    """
     if history.empty or "Close" not in history.columns:
         return []
 
@@ -63,38 +62,23 @@ def metric_rows_from_weekly_samples(
     if close.empty:
         return []
 
-    anchor = pd.Timestamp(trading_date_from_index(pd.DatetimeIndex([close.index.min()])))
-    week_idx = week_index_series(close.index, anchor)
-    max_week = int(week_idx.max())
     rows: list[MetricRow] = []
-
-    for start_week in sample_start_weeks(max_week, window_weeks):
-        end_week = start_week + window_weeks - 1
-        window_close = close[(week_idx >= start_week) & (week_idx <= end_week)]
+    for pos in last_bar_positions_per_week(close.index):
+        window_close = close.iloc[: pos + 1]
         if len(window_close) < SMA_200_WINDOW:
-            logger.debug(
-                "Skipping %s window weeks %d-%d: only %d closes",
-                ticker,
-                start_week,
-                end_week,
-                len(window_close),
-            )
             continue
 
         sma_50, sma_200 = compute_smas(window_close)
-        trading_date = trading_date_from_index(window_close.index)
-        current_price = _to_decimal(window_close.iloc[-1])
-        momentum = compute_momentum(sma_50, sma_200)
         rows.append(
             MetricRow(
                 ticker=ticker,
                 company=company,
-                trading_date=trading_date,
+                trading_date=trading_date_from_index(window_close.index),
                 sma_50=sma_50,
                 sma_200=sma_200,
-                current_price=current_price,
+                current_price=_to_decimal(window_close.iloc[-1]),
                 currency=currency,
-                momentum=momentum,
+                momentum=compute_momentum(sma_50, sma_200),
                 z_score=None,
             )
         )
@@ -107,10 +91,8 @@ def metric_rows_from_backfill_batch(
     tickers: list[str],
     companies: dict[str, str | None],
     currencies: dict[str, str | None] | None = None,
-    *,
-    window_weeks: int = DEFAULT_BACKFILL_WINDOW_WEEKS,
 ) -> list[MetricRow]:
-    """Parse a batch download into backfill metric rows for all rolling windows."""
+    """Parse a batch download into weekly backfill metric rows."""
     if data.empty:
         return []
 
@@ -130,7 +112,6 @@ def metric_rows_from_backfill_batch(
                     ticker_data,
                     company=companies.get(ticker),
                     currency=currencies.get(ticker),
-                    window_weeks=window_weeks,
                 )
             )
     elif len(tickers) == 1:
@@ -141,7 +122,6 @@ def metric_rows_from_backfill_batch(
                 data,
                 company=companies.get(ticker),
                 currency=currencies.get(ticker),
-                window_weeks=window_weeks,
             )
         )
 
@@ -151,7 +131,11 @@ def metric_rows_from_backfill_batch(
 def filter_new_rows(
     rows: list[MetricRow], existing: set[tuple[str, object]]
 ) -> list[MetricRow]:
-    """Drop rows whose (ticker, trading_date) already exist in the database."""
+    """Drop rows whose (ticker, trading_date) already exist in the database.
+
+    Rows for a week that holds an older bar pass through; ``insert_metrics``
+    replaces the older bar.
+    """
     return [
         row
         for row in rows
@@ -193,7 +177,6 @@ def main(argv: list[str] | None = None) -> int:
     retry_base = config.yf_retry_base_seconds
     name_delay = config.yf_name_delay_seconds
     history_days = config.backfill_history_days
-    window_weeks = config.backfill_window_weeks
 
     try:
         watchlist = load_tickers_from_db(database_url, country=country)
@@ -213,16 +196,15 @@ def main(argv: list[str] | None = None) -> int:
     total_inserted = 0
     total_skipped_existing = 0
     failed_batches = 0
-    trading_dates: set[date] = set()
+    week_starts: set[date] = set()
 
     logger.info(
         "Backfill starting: country=%s tickers=%d batches=%d "
-        "history_days=%d window_weeks=%d",
+        "history_days=%d",
         country.value,
         len(all_tickers),
         len(batches),
         history_days,
-        window_weeks,
     )
 
     for i, batch in enumerate(batches):
@@ -251,12 +233,11 @@ def main(argv: list[str] | None = None) -> int:
                 batch,
                 companies,
                 batch_currencies,
-                window_weeks=window_weeks,
             )
             new_rows = filter_new_rows(batch_rows, existing)
             inserted = insert_metrics(database_url, new_rows)
             for row in batch_rows:
-                trading_dates.add(row.trading_date)
+                week_starts.add(row.week_start)
 
             total_generated += len(batch_rows)
             total_inserted += inserted
@@ -283,11 +264,11 @@ def main(argv: list[str] | None = None) -> int:
         if i < len(batches) - 1:
             time.sleep(batch_delay)
 
-    if trading_dates:
+    if week_starts:
         try:
-            upsert_market_for_trading_dates(
+            upsert_market_for_weeks(
                 database_url,
-                trading_dates,
+                week_starts,
                 country=country,
             )
         except Exception:
@@ -299,13 +280,13 @@ def main(argv: list[str] | None = None) -> int:
 
     logger.info(
         "Backfill summary: country=%s tickers=%d generated=%d inserted=%d "
-        "skipped_existing=%d market_trading_dates=%d failed_batches=%d",
+        "skipped_existing=%d market_weeks=%d failed_batches=%d",
         country.value,
         len(all_tickers),
         total_generated,
         total_inserted,
         total_skipped_existing,
-        len(trading_dates),
+        len(week_starts),
         failed_batches,
     )
 

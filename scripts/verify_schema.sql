@@ -29,9 +29,9 @@ SELECT table_name, column_name
 FROM information_schema.columns
 WHERE table_schema = 'public'
   AND table_name IN ('us_metrics', 'swe_metrics', 'uk_metrics')
-  AND column_name IN ('currency', 'company', 'momentum', 'z_score')
+  AND column_name IN ('currency', 'company', 'momentum', 'z_score', 'week_start')
 ORDER BY table_name, column_name;
--- expect 12 rows
+-- expect 15 rows
 
 -- us_market_metrics / swe_market_metrics / uk_market_metrics
 SELECT table_name, column_name, data_type, numeric_precision, numeric_scale
@@ -48,9 +48,9 @@ WHERE table_schema = 'public'
   AND table_name IN (
     'us_market_metrics', 'swe_market_metrics', 'uk_market_metrics'
   )
-  AND column_name IN ('momentum_mean', 'momentum_std')
+  AND column_name IN ('week_start', 'momentum_mean', 'momentum_std')
 ORDER BY table_name, column_name;
--- expect 6 rows
+-- expect 9 rows
 
 SELECT c.conrelid::regclass AS table_name, c.conname
 FROM pg_constraint c
@@ -62,7 +62,7 @@ WHERE c.conrelid IN (
   AND c.contype = 'p'
 ORDER BY 1;
 
--- unique (ticker, trading_date)
+-- unique (week_start, ticker): one row per ticker per calendar week
 SELECT c.conrelid::regclass AS table_name, c.conname
 FROM pg_constraint c
 WHERE c.conrelid IN (
@@ -71,8 +71,9 @@ WHERE c.conrelid IN (
     'public.uk_metrics'::regclass
   )
   AND c.contype = 'u'
-  AND c.conname LIKE '%_ticker_trading_date_key'
+  AND c.conname LIKE '%_metrics_week_start_ticker_key'
 ORDER BY 1;
+-- expect 3 rows
 
 -- FK metrics.ticker -> tickers.symbol ON DELETE CASCADE
 SELECT c.conrelid::regclass AS table_name, c.conname, c.confdeltype
@@ -93,10 +94,7 @@ WHERE schemaname = 'public'
   AND indexname IN (
     'idx_us_metrics_trading_date',
     'idx_swe_metrics_trading_date',
-    'idx_uk_metrics_trading_date',
-    'idx_us_market_metrics_trading_date',
-    'idx_swe_market_metrics_trading_date',
-    'idx_uk_market_metrics_trading_date'
+    'idx_uk_metrics_trading_date'
   )
 ORDER BY tablename, indexname;
 

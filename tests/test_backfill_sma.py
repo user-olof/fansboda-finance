@@ -11,15 +11,14 @@ from backfill_sma import (
     filter_new_rows,
     main,
     metric_rows_from_backfill_batch,
+    last_bar_positions_per_week,
     metric_rows_from_weekly_samples,
-    sample_start_weeks,
-    week_index_series,
 )
 from config import BaseConfig
 from db.country import CountrySet
 from db.metrics import INSERT_METRICS_SQL, load_existing_metric_keys
 from db.tickers import load_tickers_from_db
-from fetch_sma import compute_momentum, upsert_market_for_trading_dates
+from fetch_sma import compute_momentum, upsert_market_for_weeks
 from models import MetricRow, TickerEntry
 
 
@@ -29,7 +28,6 @@ def _mock_config(**overrides: object) -> BaseConfig:
         "backfill_batch_size": 25,
         "backfill_batch_delay_seconds": 5.0,
         "backfill_history_days": 730,
-        "backfill_window_weeks": 52,
         "yf_max_retries": 3,
         "yf_retry_base_seconds": 5.0,
         "yf_name_delay_seconds": 0.25,
@@ -38,20 +36,23 @@ def _mock_config(**overrides: object) -> BaseConfig:
     return BaseConfig(**values)  # type: ignore[arg-type]
 
 
-def test_sample_start_weeks() -> None:
-    assert sample_start_weeks(max_week=51, window_weeks=52) == [0]
-    assert sample_start_weeks(max_week=60, window_weeks=52) == list(range(10))
-    assert sample_start_weeks(max_week=10, window_weeks=52) == []
+def test_last_bar_positions_per_week_picks_last_bar_of_each_calendar_week() -> None:
+    # Wed 2024-01-03 .. Tue 2024-01-16; Friday 2024-01-12 is a holiday.
+    index = pd.to_datetime(
+        [
+            "2024-01-03",
+            "2024-01-04",
+            "2024-01-05",
+            "2024-01-08",
+            "2024-01-11",
+            "2024-01-15",
+            "2024-01-16",
+        ]
+    )
+    assert last_bar_positions_per_week(index) == [2, 4, 6]
 
 
-def test_week_index_series_counts_from_anchor() -> None:
-    index = pd.to_datetime(["2024-01-01", "2024-01-08", "2024-01-15"])
-    anchor = pd.Timestamp("2024-01-01")
-    weeks = week_index_series(index, anchor)
-    assert weeks.tolist() == [0, 1, 2]
-
-
-def test_metric_rows_from_weekly_samples_creates_rolling_windows() -> None:
+def test_metric_rows_from_weekly_samples_one_row_per_calendar_week() -> None:
     index = pd.date_range("2024-01-01", periods=280, freq="B")
     history = pd.DataFrame(
         {
@@ -68,7 +69,15 @@ def test_metric_rows_from_weekly_samples_creates_rolling_windows() -> None:
         "AAA.ST", history, company="Alpha AB", currency="SEK"
     )
 
-    assert len(rows) == len(sample_start_weeks(int(week_index_series(index, pd.Timestamp(index[0])).max()), 52))
+    # Bar 200 lands on Fri 2024-10-04; weekly rows follow from that week on.
+    assert rows[0].trading_date == date(2024, 10, 4)
+    assert rows[0].current_price == Decimal("200")
+    assert rows[0].sma_200 == Decimal("100.5")
+    assert rows[-1].trading_date == date(2025, 1, 24)
+    week_starts = [row.week_start for row in rows]
+    assert len(week_starts) == len(set(week_starts))
+    assert all(row.week_start.weekday() == 0 for row in rows)
+    assert all(row.trading_date.weekday() == 4 for row in rows[:-1])
     assert rows[0].ticker == "AAA.ST"
     assert rows[0].company == "Alpha AB"
     assert rows[0].currency == "SEK"
@@ -164,7 +173,7 @@ def test_main_backfill_inserts_new_rows() -> None:
                                 "backfill_sma.insert_metrics", return_value=1
                             ) as mock_insert:
                                 with patch(
-                                    "backfill_sma.upsert_market_for_trading_dates"
+                                    "backfill_sma.upsert_market_for_weeks"
                                 ) as mock_market:
                                     assert main(['--country', 'swe']) == 0
 
@@ -176,7 +185,7 @@ def test_main_backfill_inserts_new_rows() -> None:
     mock_insert.assert_called_once_with("postgresql://example", [metric_row])
     mock_market.assert_called_once_with(
         "postgresql://example",
-        {date(2025, 6, 6)},
+        {date(2025, 6, 2)},
         country=CountrySet.SWE,
     )
     inserted = mock_insert.call_args[0][1][0]
@@ -217,13 +226,13 @@ def test_main_succeeds_when_all_rows_already_exist() -> None:
                         ):
                             with patch("backfill_sma.insert_metrics", return_value=0):
                                 with patch(
-                                    "backfill_sma.upsert_market_for_trading_dates"
+                                    "backfill_sma.upsert_market_for_weeks"
                                 ) as mock_market:
                                     assert main(['--country', 'swe']) == 0
 
     mock_market.assert_called_once_with(
         "postgresql://example",
-        {date(2025, 6, 6)},
+        {date(2025, 6, 2)},
         country=CountrySet.SWE,
     )
 
@@ -258,23 +267,23 @@ def test_main_returns_failure_when_market_metrics_upsert_fails() -> None:
                         ):
                             with patch("backfill_sma.insert_metrics", return_value=1):
                                 with patch(
-                                    "backfill_sma.upsert_market_for_trading_dates",
+                                    "backfill_sma.upsert_market_for_weeks",
                                     side_effect=RuntimeError("db error"),
                                 ):
                                     assert main(['--country', 'swe']) == 1
 
 
-def test_upsert_market_for_trading_dates_groups_backfill_dates_by_listing_market() -> None:
+def test_upsert_market_for_weeks_groups_backfill_dates_by_listing_market() -> None:
     with patch(
-        "fetch_sma.load_momentum_by_market_for_date",
+        "fetch_sma.load_momentum_by_market_for_week",
         return_value={
             "se_market": [Decimal("0.5")],
             "us_market": [Decimal("0.6")],
         },
     ):
         with patch("fetch_sma.upsert_market_stats") as mock_upsert:
-            with patch("fetch_sma.update_z_scores_for_trading_date"):
-                upsert_market_for_trading_dates(
+            with patch("fetch_sma.update_z_scores_for_week"):
+                upsert_market_for_weeks(
                     "postgresql://example",
                     {date(2025, 6, 6)},
                 )
@@ -284,9 +293,9 @@ def test_upsert_market_for_trading_dates_groups_backfill_dates_by_listing_market
     assert markets == {"se_market", "us_market"}
 
 
-def test_upsert_market_for_trading_dates_scopes_to_country() -> None:
+def test_upsert_market_for_weeks_scopes_to_country() -> None:
     with patch(
-        "fetch_sma.load_momentum_by_market_for_date",
+        "fetch_sma.load_momentum_by_market_for_week",
         return_value={
             "se_market": [Decimal("0.5")],
             "us_market": [Decimal("0.6")],
@@ -294,8 +303,8 @@ def test_upsert_market_for_trading_dates_scopes_to_country() -> None:
         },
     ):
         with patch("fetch_sma.upsert_market_stats") as mock_upsert:
-            with patch("fetch_sma.update_z_scores_for_trading_date") as mock_z:
-                upsert_market_for_trading_dates(
+            with patch("fetch_sma.update_z_scores_for_week") as mock_z:
+                upsert_market_for_weeks(
                     "postgresql://example",
                     {date(2025, 6, 6)},
                     country=CountrySet.US,
@@ -343,7 +352,7 @@ def test_main_us_only_ignores_swe_and_uk_tickers() -> None:
                                 "backfill_sma.insert_metrics", return_value=1
                             ) as mock_insert:
                                 with patch(
-                                    "backfill_sma.upsert_market_for_trading_dates"
+                                    "backfill_sma.upsert_market_for_weeks"
                                 ) as mock_market:
                                     assert main(["--country", "us"]) == 0
 
@@ -361,7 +370,7 @@ def test_main_us_only_ignores_swe_and_uk_tickers() -> None:
     mock_insert.assert_called_once_with("postgresql://example", [metric_row])
     mock_market.assert_called_once_with(
         "postgresql://example",
-        {date(2025, 6, 6)},
+        {date(2025, 6, 2)},
         country=CountrySet.US,
     )
 
@@ -446,9 +455,9 @@ def test_load_existing_metric_keys_with_country_queries_only_that_table() -> Non
 
 def test_insert_metrics_sql_targets_uk_metrics() -> None:
     assert "INSERT INTO uk_metrics" in INSERT_METRICS_SQL[CountrySet.UK]
-    assert "ON CONFLICT (ticker, trading_date) DO NOTHING" in INSERT_METRICS_SQL[
-        CountrySet.UK
-    ]
+    sql = INSERT_METRICS_SQL[CountrySet.UK]
+    assert "ON CONFLICT (ticker, week_start) DO UPDATE" in sql
+    assert "WHERE EXCLUDED.trading_date > uk_metrics.trading_date" in sql
 
 
 def test_load_tickers_from_db_scopes_to_country() -> None:
@@ -514,7 +523,7 @@ def test_main_backfill_routes_uk_ticker() -> None:
                                 "backfill_sma.insert_metrics", return_value=1
                             ) as mock_insert:
                                 with patch(
-                                    "backfill_sma.upsert_market_for_trading_dates"
+                                    "backfill_sma.upsert_market_for_weeks"
                                 ) as mock_market:
                                     assert main(["--country", "uk"]) == 0
 
@@ -528,24 +537,24 @@ def test_main_backfill_routes_uk_ticker() -> None:
     mock_insert.assert_called_once_with("postgresql://example", [metric_row])
     mock_market.assert_called_once_with(
         "postgresql://example",
-        {date(2025, 6, 6)},
+        {date(2025, 6, 2)},
         country=CountrySet.UK,
     )
     assert mock_insert.call_args[0][1][0].ticker == "VOD.L"
     assert mock_insert.call_args[0][1][0].currency == "GBP"
 
 
-def test_upsert_market_for_trading_dates_includes_uk_market() -> None:
+def test_upsert_market_for_weeks_includes_uk_market() -> None:
     with patch(
-        "fetch_sma.load_momentum_by_market_for_date",
+        "fetch_sma.load_momentum_by_market_for_week",
         return_value={
             "uk_market": [Decimal("0.7")],
             "us_market": [Decimal("0.6")],
         },
     ):
         with patch("fetch_sma.upsert_market_stats") as mock_upsert:
-            with patch("fetch_sma.update_z_scores_for_trading_date"):
-                upsert_market_for_trading_dates(
+            with patch("fetch_sma.update_z_scores_for_week"):
+                upsert_market_for_weeks(
                     "postgresql://example",
                     {date(2025, 6, 6)},
                 )
@@ -555,9 +564,9 @@ def test_upsert_market_for_trading_dates_includes_uk_market() -> None:
     assert markets == {"uk_market", "us_market"}
 
 
-def test_upsert_market_for_trading_dates_scopes_to_uk_country() -> None:
+def test_upsert_market_for_weeks_scopes_to_uk_country() -> None:
     with patch(
-        "fetch_sma.load_momentum_by_market_for_date",
+        "fetch_sma.load_momentum_by_market_for_week",
         return_value={
             "uk_market": [Decimal("0.7")],
             "us_market": [Decimal("0.6")],
@@ -565,8 +574,8 @@ def test_upsert_market_for_trading_dates_scopes_to_uk_country() -> None:
         },
     ):
         with patch("fetch_sma.upsert_market_stats") as mock_upsert:
-            with patch("fetch_sma.update_z_scores_for_trading_date") as mock_z:
-                upsert_market_for_trading_dates(
+            with patch("fetch_sma.update_z_scores_for_week") as mock_z:
+                upsert_market_for_weeks(
                     "postgresql://example",
                     {date(2025, 6, 6)},
                     country=CountrySet.UK,

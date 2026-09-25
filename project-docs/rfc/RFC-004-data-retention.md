@@ -10,7 +10,7 @@
 
 ## Summary
 
-After each weekly `fetch_sma.py` run, delete rows from `us_metrics` / `swe_metrics` / `uk_metrics` and `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics` where `trading_date` is older than the configured retention window (default 365 days).
+After each weekly `fetch_sma.py` run, delete rows from `us_metrics` / `swe_metrics` / `uk_metrics` where `trading_date` (and `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics` where `week_start`) is older than the configured retention window (default 365 days).
 
 UK purge is included via the same `DELETE_STALE_*` lists in `db/metrics.py` and `db/market.py` (country sets from RFC-001); `db/retention.purge_stale_data` orchestrates all six tables.
 
@@ -23,7 +23,7 @@ UK purge is included via the same `DELETE_STALE_*` lists in `db/metrics.py` and 
 | — | Purge count included in job summary logs |
 | — | Parameterized SQL in `db/metrics.py` and `db/market.py` for all country history/aggregate tables |
 | — | Cutoff uses UTC date |
-| — | Purge aggregate rows with `trading_date` &lt; cutoff alongside metrics |
+| — | Purge aggregate rows with `week_start` &lt; cutoff alongside metrics |
 
 ## Implementation
 
@@ -53,12 +53,12 @@ SQL (all three country sets):
 DELETE FROM us_metrics WHERE trading_date < %s;
 DELETE FROM swe_metrics WHERE trading_date < %s;
 DELETE FROM uk_metrics WHERE trading_date < %s;
-DELETE FROM us_market_metrics WHERE trading_date < %s;
-DELETE FROM swe_market_metrics WHERE trading_date < %s;
-DELETE FROM uk_market_metrics WHERE trading_date < %s;
+DELETE FROM us_market_metrics WHERE week_start < %s;
+DELETE FROM swe_market_metrics WHERE week_start < %s;
+DELETE FROM uk_market_metrics WHERE week_start < %s;
 ```
 
-Indexes on each `*_metrics.trading_date` and `*_market_metrics.trading_date` (RFC-001) support efficient deletes. Each `*_market_metrics` table uses `(market, trading_date)` as primary key.
+Indexes on each `*_metrics.trading_date` (RFC-001) support efficient deletes. `*_market_metrics` rows are purged by `week_start` (a few rows per market per week, so no extra index); each uses `(market, week_start)` as primary key.
 
 ### Configuration
 

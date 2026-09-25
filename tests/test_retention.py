@@ -50,7 +50,7 @@ def test_delete_stale_market_sql_is_parameterized() -> None:
     assert len(DELETE_STALE_MARKET_SQL) == 3
     for sql in DELETE_STALE_MARKET_SQL:
         assert "%s" in sql
-        assert "trading_date <" in sql
+        assert "week_start <" in sql
     assert "DELETE FROM us_market_metrics" in DELETE_STALE_MARKET_SQL[0]
     assert "DELETE FROM swe_market_metrics" in DELETE_STALE_MARKET_SQL[1]
     assert "DELETE FROM uk_market_metrics" in DELETE_STALE_MARKET_SQL[2]
@@ -158,9 +158,9 @@ def test_purge_stale_data_deletes_from_all_country_tables() -> None:
     assert "DELETE FROM us_metrics WHERE trading_date < %s" in sqls
     assert "DELETE FROM swe_metrics WHERE trading_date < %s" in sqls
     assert "DELETE FROM uk_metrics WHERE trading_date < %s" in sqls
-    assert "DELETE FROM us_market_metrics WHERE trading_date < %s" in sqls
-    assert "DELETE FROM swe_market_metrics WHERE trading_date < %s" in sqls
-    assert "DELETE FROM uk_market_metrics WHERE trading_date < %s" in sqls
+    assert "DELETE FROM us_market_metrics WHERE week_start < %s" in sqls
+    assert "DELETE FROM swe_market_metrics WHERE week_start < %s" in sqls
+    assert "DELETE FROM uk_market_metrics WHERE week_start < %s" in sqls
     assert metrics_purged == 3
     assert market_purged == 3
 
@@ -264,7 +264,7 @@ def test_main_fetches_stale_tickers_and_inserts() -> None:
                                 "fetch_sma.insert_metrics", return_value=1
                             ) as mock_insert:
                                 with patch(
-                                    "fetch_sma.load_momentum_by_market_for_date",
+                                    "fetch_sma.load_momentum_by_market_for_week",
                                     return_value={
                                         "se_market": [Decimal("0.5")]
                                     },
@@ -273,7 +273,7 @@ def test_main_fetches_stale_tickers_and_inserts() -> None:
                                         "fetch_sma.upsert_market_stats"
                                     ) as mock_market:
                                         with patch(
-                                            "fetch_sma.update_z_scores_for_trading_date"
+                                            "fetch_sma.update_z_scores_for_week"
                                         ):
                                             with patch(
                                                 "fetch_sma.purge_stale_data",
@@ -288,7 +288,7 @@ def test_main_fetches_stale_tickers_and_inserts() -> None:
     mock_market.assert_called_once()
     market_row = mock_market.call_args[0][1]
     assert market_row.market == "se_market"
-    assert market_row.trading_date == date(2026, 6, 6)
+    assert market_row.week_start == date(2026, 6, 1)
     assert market_row.momentum_mean == Decimal("0.5")
     inserted_rows = mock_insert.call_args[0][1]
     assert inserted_rows[0].company == "Alpha"
@@ -337,7 +337,7 @@ def test_main_fetches_uk_ticker_and_upserts_uk_market() -> None:
                                 "fetch_sma.insert_metrics", return_value=1
                             ) as mock_insert:
                                 with patch(
-                                    "fetch_sma.load_momentum_by_market_for_date",
+                                    "fetch_sma.load_momentum_by_market_for_week",
                                     return_value={
                                         "uk_market": [Decimal("0.5")]
                                     },
@@ -346,7 +346,7 @@ def test_main_fetches_uk_ticker_and_upserts_uk_market() -> None:
                                         "fetch_sma.upsert_market_stats"
                                     ) as mock_market:
                                         with patch(
-                                            "fetch_sma.update_z_scores_for_trading_date"
+                                            "fetch_sma.update_z_scores_for_week"
                                         ):
                                             with patch(
                                                 "fetch_sma.purge_stale_data",
@@ -359,4 +359,4 @@ def test_main_fetches_uk_ticker_and_upserts_uk_market() -> None:
     mock_market.assert_called_once()
     market_row = mock_market.call_args[0][1]
     assert market_row.market == "uk_market"
-    assert market_row.trading_date == date(2026, 6, 6)
+    assert market_row.week_start == date(2026, 6, 1)

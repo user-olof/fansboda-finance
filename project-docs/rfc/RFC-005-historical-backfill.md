@@ -19,8 +19,8 @@ One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **N
 | ID | Requirement |
 |----|-------------|
 | FR-13 | Download ~730 days OHLCV per batch (default 25 symbols/batch); retry/backoff; inter-batch delay |
-| FR-14 | Rolling 52-week windows from oldest bar (weeks 0–51, 1–52, …); one snapshot per window |
-| FR-15 | Append into the selected country `*_metrics` with `ON CONFLICT (ticker, trading_date) DO NOTHING` |
+| FR-14 | One snapshot per calendar week (Monday-based `week_start`) at the week's last bar, using closes up to that bar; skip weeks with &lt;200 closes so far |
+| FR-15 | Upsert into the selected country `*_metrics` with the RFC-003 week upsert (`ON CONFLICT (ticker, week_start)`, newer bar wins) |
 | FR-16 | Skip `(ticker, trading_date)` pairs already in the matching country metrics table |
 | FR-17 | Log per-batch generated/new/inserted/skipped counts and final summary |
 | FR-18 | Required `--country us|swe|uk`: load only that set's `*_tickers`; write only that set's `*_metrics` / `*_market_metrics` |
@@ -32,23 +32,22 @@ One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **N
 
 | File | Role |
 |------|------|
-| `backfill_sma.py` | Week indexing, rolling windows, orchestration; required `--country` |
-| `fetch_sma.py` | Shared: `compute_smas`, `compute_momentum`, `chunked`, `_to_decimal`, `trading_date_from_index`, country-scoped `upsert_market_for_trading_dates` |
+| `backfill_sma.py` | Calendar-week sampling, orchestration; required `--country` |
+| `fetch_sma.py` | Shared: `compute_smas`, `compute_momentum`, `chunked`, `_to_decimal`, `trading_date_from_index`, country-scoped `upsert_market_for_weeks` |
 | `yfinance_client.py` | Shared: `download_batch`, `load_currency_for_tickers` |
 | `db/metrics.py` | `insert_metrics`, `load_existing_metric_keys` |
 | `db/tickers.py` | `load_tickers_from_db(..., country=)` loads one `*_tickers` table when set |
-| `config.py` | Backfill batch size, delays, history days, window weeks |
+| `config.py` | Backfill batch size, delays, history days |
 | `tests/test_backfill_sma.py` | Pure logic + scoped `--country` orchestration tests |
 
 ### Key functions (`backfill_sma.py`)
 
 | Function | Purpose |
 |----------|---------|
-| `week_index_series(index, anchor)` | Map bars to week numbers from anchor |
-| `sample_start_weeks(max_week, window_weeks)` | Rolling window start offsets |
-| `metric_rows_from_weekly_samples(...)` | SMA rows for one ticker’s windows |
+| `last_bar_positions_per_week(index)` | Position of each calendar week's last bar |
+| `metric_rows_from_weekly_samples(...)` | One SMA row per week for one ticker |
 | `metric_rows_from_backfill_batch(...)` | Parse batch download for all tickers |
-| `filter_new_rows(rows, existing)` | Drop already-stored keys |
+| `filter_new_rows(rows, existing)` | Drop rows whose `(ticker, trading_date)` is already stored |
 | `build_parser()` / `main()` | Required `--country`; scoped load + market upsert |
 
 ### Setup order
@@ -66,15 +65,14 @@ pipenv run python backfill_sma.py --country us
 | Setting | Dev default | Prod default |
 |---------|-------------|--------------|
 | `backfill_history_days` | 730 | 730 |
-| `backfill_window_weeks` | 52 | 52 |
 | `backfill_batch_size` | 25 | 25 |
 | `backfill_batch_delay_seconds` | 5.0 | 5.0 |
 
 ## Acceptance criteria
 
 - [x] Downloads ~730d history in configurable batches with retry
-- [x] Rolling 52-week SMA windows from oldest bar
-- [x] Appends with conflict-safe insert
+- [x] One SMA snapshot per calendar week, aligned with the Saturday job regardless of run day
+- [x] Week upsert (newer bar replaces an older mid-week row)
 - [x] Skips existing `(ticker, trading_date)` pairs
 - [x] Shares `db/metrics.py` insert logic with RFC-003
 - [x] Uses `get_config()` (RFC-006)

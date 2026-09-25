@@ -15,7 +15,7 @@ def test_upsert_market_stats_executes_upsert() -> None:
 
     row = MarketRow(
         market="us_market",
-        trading_date=date(2026, 6, 6),
+        week_start=date(2026, 6, 1),
         momentum_mean=Decimal("0.95"),
         momentum_std=Decimal("0.05"),
     )
@@ -28,10 +28,10 @@ def test_upsert_market_stats_executes_upsert() -> None:
     assert "INSERT INTO us_market_metrics" in sql
     assert "momentum_mean" in sql
     assert "momentum_std" in sql
-    assert "ON CONFLICT (market, trading_date) DO UPDATE" in sql
+    assert "ON CONFLICT (market, week_start) DO UPDATE" in sql
     values = mock_cursor.execute.call_args[0][1]
     assert values[0] == "us_market"
-    assert values[1] == date(2026, 6, 6)
+    assert values[1] == date(2026, 6, 1)
     assert values[3] == Decimal("0.95")
     assert values[4] == Decimal("0.05")
     mock_conn.commit.assert_called_once()
@@ -47,7 +47,7 @@ def test_upsert_market_stats_routes_se_market_to_swe_table() -> None:
 
     row = MarketRow(
         market="se_market",
-        trading_date=date(2026, 6, 6),
+        week_start=date(2026, 6, 1),
         momentum_mean=Decimal("0.88"),
         momentum_std=Decimal("0.03"),
     )
@@ -70,7 +70,7 @@ def test_upsert_market_stats_routes_uk_market_to_uk_table() -> None:
 
     row = MarketRow(
         market="uk_market",
-        trading_date=date(2026, 6, 6),
+        week_start=date(2026, 6, 1),
         momentum_mean=Decimal("0.91"),
         momentum_std=Decimal("0.04"),
     )
@@ -100,6 +100,6 @@ def test_purge_stale_market_executes_delete() -> None:
     assert "DELETE FROM us_market_metrics" in sqls[0]
     assert "DELETE FROM swe_market_metrics" in sqls[1]
     assert "DELETE FROM uk_market_metrics" in sqls[2]
-    assert all("trading_date <" in sql for sql in sqls)
+    assert all("week_start <" in sql for sql in sqls)
     mock_conn.commit.assert_called_once()
     assert deleted == 9

@@ -5,8 +5,8 @@ from unittest.mock import MagicMock, patch
 from backfill_market import build_parser, main
 from config import BaseConfig
 from db.country import CountrySet
-from db.metrics import load_distinct_trading_dates, recompute_momentum_from_smas
-from fetch_sma import upsert_market_for_trading_dates
+from db.metrics import load_distinct_week_starts, recompute_momentum_from_smas
+from fetch_sma import upsert_market_for_weeks
 
 
 def _mock_config(**overrides: object) -> BaseConfig:
@@ -15,7 +15,7 @@ def _mock_config(**overrides: object) -> BaseConfig:
     return BaseConfig(**values)  # type: ignore[arg-type]
 
 
-def test_load_distinct_trading_dates_returns_sorted_dates() -> None:
+def test_load_distinct_week_starts_returns_sorted_dates() -> None:
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = [
         (date(2025, 1, 3),),
@@ -26,17 +26,17 @@ def test_load_distinct_trading_dates_returns_sorted_dates() -> None:
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
     with patch("db.metrics.psycopg2.connect", return_value=mock_conn):
-        dates = load_distinct_trading_dates("postgresql://example")
+        dates = load_distinct_week_starts("postgresql://example")
 
     assert dates == [date(2025, 1, 3), date(2025, 1, 10)]
     sql = mock_cursor.execute.call_args[0][0]
-    assert "SELECT DISTINCT trading_date" in sql
+    assert "SELECT DISTINCT week_start" in sql
     assert "FROM us_metrics" in sql
     assert "FROM swe_metrics" in sql
     assert "FROM uk_metrics" in sql
 
 
-def test_load_distinct_trading_dates_scopes_to_country() -> None:
+def test_load_distinct_week_starts_scopes_to_country() -> None:
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = [(date(2025, 1, 3),)]
     mock_conn = MagicMock()
@@ -44,7 +44,7 @@ def test_load_distinct_trading_dates_scopes_to_country() -> None:
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
     with patch("db.metrics.psycopg2.connect", return_value=mock_conn):
-        dates = load_distinct_trading_dates(
+        dates = load_distinct_week_starts(
             "postgresql://example", country=CountrySet.SWE
         )
 
@@ -93,17 +93,17 @@ def test_recompute_momentum_from_smas_scopes_to_country() -> None:
     assert "UPDATE us_metrics" not in sql
 
 
-def test_upsert_market_for_trading_dates_loads_ratios_and_upserts() -> None:
+def test_upsert_market_for_weeks_loads_ratios_and_upserts() -> None:
     with patch(
-        "fetch_sma.load_momentum_by_market_for_date",
+        "fetch_sma.load_momentum_by_market_for_week",
         side_effect=[
             {"us_market": [Decimal("0.5")]},
             {"se_market": [Decimal("0.6")]},
         ],
     ) as mock_load:
         with patch("fetch_sma.upsert_market_stats") as mock_upsert:
-            with patch("fetch_sma.update_z_scores_for_trading_date"):
-                upsert_market_for_trading_dates(
+            with patch("fetch_sma.update_z_scores_for_week"):
+                upsert_market_for_weeks(
                     "postgresql://example",
                     {date(2026, 6, 6), date(2026, 6, 13)},
                 )
@@ -119,11 +119,11 @@ def test_main_backfill_market_recomputes_momentum_then_upserts() -> None:
             "backfill_market.recompute_momentum_from_smas", return_value=10
         ) as mock_momentum:
             with patch(
-                "backfill_market.load_distinct_trading_dates",
+                "backfill_market.load_distinct_week_starts",
                 return_value=[date(2025, 1, 3), date(2025, 1, 10)],
             ) as mock_dates:
                 with patch(
-                    "backfill_market.upsert_market_for_trading_dates"
+                    "backfill_market.upsert_market_for_weeks"
                 ) as mock_upsert:
                     assert main([]) == 0
 
@@ -142,11 +142,11 @@ def test_main_backfill_market_scopes_to_country() -> None:
             "backfill_market.recompute_momentum_from_smas", return_value=5
         ) as mock_momentum:
             with patch(
-                "backfill_market.load_distinct_trading_dates",
+                "backfill_market.load_distinct_week_starts",
                 return_value=[date(2025, 1, 3)],
             ) as mock_dates:
                 with patch(
-                    "backfill_market.upsert_market_for_trading_dates"
+                    "backfill_market.upsert_market_for_weeks"
                 ) as mock_upsert:
                     assert main(["--country", "swe"]) == 0
 
@@ -167,11 +167,11 @@ def test_main_backfill_market_returns_failure_on_upsert_error() -> None:
     with patch("backfill_market.get_config", return_value=_mock_config()):
         with patch("backfill_market.recompute_momentum_from_smas", return_value=1):
             with patch(
-                "backfill_market.load_distinct_trading_dates",
+                "backfill_market.load_distinct_week_starts",
                 return_value=[date(2025, 1, 3)],
             ):
                 with patch(
-                    "backfill_market.upsert_market_for_trading_dates",
+                    "backfill_market.upsert_market_for_weeks",
                     side_effect=RuntimeError("db error"),
                 ):
                     assert main([]) == 1
@@ -181,7 +181,7 @@ def test_main_backfill_market_returns_failure_when_no_dates() -> None:
     with patch("backfill_market.get_config", return_value=_mock_config()):
         with patch("backfill_market.recompute_momentum_from_smas", return_value=0):
             with patch(
-                "backfill_market.load_distinct_trading_dates", return_value=[]
+                "backfill_market.load_distinct_week_starts", return_value=[]
             ):
                 assert main([]) == 1
 

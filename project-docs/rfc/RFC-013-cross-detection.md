@@ -13,7 +13,7 @@
 Ad-hoc detection of **completed** Golden Cross and Death Cross processes from
 retained weekly `sma_50` / `sma_200` history in country `*_metrics` tables
 (`us_metrics` / `swe_metrics` / `uk_metrics`). Detection reads stored SMA
-snapshots only — **no yfinance**, **no Thursday cron**, **no alerting /
+snapshots only — **no yfinance**, **no Saturday cron**, **no alerting /
 watchers**, and **no dedicated detections table**.
 
 This RFC freezes the **pattern definitions** already owned by the PRD (§3 /

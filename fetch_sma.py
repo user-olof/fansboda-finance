@@ -23,8 +23,8 @@ from db.market import upsert_market_stats
 from db.metrics import (
     filter_stale_tickers,
     insert_metrics,
-    load_momentum_by_market_for_date,
-    update_z_scores_for_trading_date,
+    load_momentum_by_market_for_week,
+    update_z_scores_for_week,
 )
 from db.retention import purge_stale_data
 from db.tickers import load_tickers_from_db
@@ -116,17 +116,17 @@ def _population_std_decimal(values: list[Decimal]) -> Decimal | None:
 
 
 def aggregate_market_stats(
-    trading_date: date,
+    week_start: date,
     market: str,
     momentum_values: list[Decimal],
 ) -> MarketRow | None:
-    """Build cross-sectional market stats for one (market, trading_date)."""
+    """Build cross-sectional market stats for one (market, week_start)."""
     if not momentum_values:
         return None
 
     return MarketRow(
         market=market,
-        trading_date=trading_date,
+        week_start=week_start,
         momentum_mean=_mean_decimal(momentum_values),
         momentum_std=_population_std_decimal(momentum_values),
     )
@@ -214,22 +214,23 @@ def metric_rows_from_batch(
     return rows
 
 
-def upsert_market_for_trading_dates(
+def upsert_market_for_weeks(
     database_url: str,
-    trading_dates: set[date],
+    week_starts: set[date],
     *,
     country: CountrySet | None = None,
 ) -> None:
-    """Recompute market aggregates and z_scores for each date.
+    """Recompute market aggregates and z_scores for each week.
 
     When ``country`` is set, only upsert aggregates / z_scores for that
     country set (FR-18).
     """
-    for trading_date in sorted(trading_dates):
-        by_market = load_momentum_by_market_for_date(database_url, trading_date)
+    for week_start in sorted(week_starts):
+        by_market = load_momentum_by_market_for_week(database_url, week_start)
         if not by_market:
             logger.warning(
-                "No momentum values available for market stats on %s", trading_date
+                "No momentum values available for market stats in week %s",
+                week_start,
             )
             continue
 
@@ -239,8 +240,9 @@ def upsert_market_for_trading_dates(
         ):
             if market is None:
                 logger.warning(
-                    "Skipping market stats for tickers without listing market on %s",
-                    trading_date,
+                    "Skipping market stats for tickers without listing market "
+                    "in week %s",
+                    week_start,
                 )
                 continue
 
@@ -248,7 +250,7 @@ def upsert_market_for_trading_dates(
                 continue
 
             market_row = aggregate_market_stats(
-                trading_date,
+                week_start,
                 market,
                 momentum_values,
             )
@@ -257,17 +259,16 @@ def upsert_market_for_trading_dates(
 
             upsert_market_stats(database_url, market_row)
             logger.info(
-                "Market stats for %s %s: momentum_mean=%s momentum_std=%s (n=%d)",
+                "Market stats for %s week %s: momentum_mean=%s momentum_std=%s "
+                "(n=%d)",
                 market,
-                trading_date,
+                week_start,
                 market_row.momentum_mean,
                 market_row.momentum_std,
                 len(momentum_values),
             )
 
-        update_z_scores_for_trading_date(
-            database_url, trading_date, country=country
-        )
+        update_z_scores_for_week(database_url, week_start, country=country)
 
 
 def _run_retention_purge(database_url: str, retention_days: int) -> tuple[int, int]:
@@ -312,18 +313,18 @@ def main() -> int:
     companies = {entry.symbol: entry.company for entry in watchlist}
 
     try:
-        stale_tickers, skipped_count, max_date = filter_stale_tickers(
+        stale_tickers, skipped_count, week_start = filter_stale_tickers(
             database_url, all_tickers
         )
     except Exception:
         logger.exception("Failed to query stale tickers from database")
         return 1
 
-    if max_date is not None and skipped_count:
+    if skipped_count:
         logger.info(
-            "Skipping %d tickers already up to date (trading_date=%s)",
+            "Skipping %d tickers already holding the latest bar for week %s",
             skipped_count,
-            max_date,
+            week_start,
         )
 
     if not stale_tickers:
@@ -353,7 +354,7 @@ def main() -> int:
     fetched_count = 0
     inserted_count = 0
     failed_batches = 0
-    trading_dates: set[date] = set()
+    week_starts: set[date] = set()
 
     for i, batch in enumerate(batches):
         logger.info(
@@ -378,7 +379,7 @@ def main() -> int:
             )
             fetched_count += len(batch_rows)
             for row in batch_rows:
-                trading_dates.add(row.trading_date)
+                week_starts.add(row.week_start)
                 logger.info(
                     "Fetched %s (%s): trading_date=%s currency=%s current_price=%s "
                     "sma_50=%s sma_200=%s momentum=%s",
@@ -412,9 +413,9 @@ def main() -> int:
         if i < len(batches) - 1:
             time.sleep(batch_delay)
 
-    if trading_dates:
+    if week_starts:
         try:
-            upsert_market_for_trading_dates(database_url, trading_dates)
+            upsert_market_for_weeks(database_url, week_starts)
         except Exception:
             logger.exception("Failed to upsert market stats")
             return 1
