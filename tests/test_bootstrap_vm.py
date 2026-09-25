@@ -13,9 +13,9 @@ def test_bootstrap_requires_root() -> None:
     assert "Run as root or with sudo" in content
 
 
-def test_bootstrap_cron_runs_thursday_at_11_utc() -> None:
+def test_bootstrap_cron_runs_saturday_at_11_utc() -> None:
     content = BOOTSTRAP_SH.read_text(encoding="utf-8")
-    assert 'CRON_SCHEDULE="0 11 * * 4"' in content
+    assert 'CRON_SCHEDULE="0 11 * * 6"' in content
     assert "0 11 * * * cd" not in content
 
 

@@ -1,6 +1,8 @@
 -- fansboda-finance schema (RFC-001)
 -- Run once on a new Neon database. See project-docs/MIGRATIONS.md for upgrades.
 -- Country-partitioned table sets (PRD §6): US (us_*), Swedish (swe_*), UK (uk_*).
+-- Metrics hold one row per ticker per calendar week (week_start = Monday);
+-- trading_date is the actual bar date within that week.
 
 -- ---------------------------------------------------------------------------
 -- US stocks
@@ -21,6 +23,7 @@ CREATE TABLE IF NOT EXISTS us_metrics (
     ticker         TEXT            NOT NULL
                        REFERENCES us_tickers (symbol) ON DELETE CASCADE,
     company        TEXT,
+    week_start     DATE            NOT NULL,
     trading_date   DATE            NOT NULL,
     updated_at     TIMESTAMPTZ     NOT NULL,
     currency       TEXT,
@@ -29,22 +32,19 @@ CREATE TABLE IF NOT EXISTS us_metrics (
     current_price  NUMERIC(18, 6),
     momentum       NUMERIC(18, 6),
     z_score        NUMERIC(18, 6),
-    CONSTRAINT us_metrics_ticker_trading_date_key UNIQUE (ticker, trading_date)
+    CONSTRAINT us_metrics_week_start_ticker_key UNIQUE (week_start, ticker)
 );
 
 CREATE INDEX IF NOT EXISTS idx_us_metrics_trading_date ON us_metrics (trading_date);
 
 CREATE TABLE IF NOT EXISTS us_market_metrics (
     market          TEXT            NOT NULL,
-    trading_date    DATE            NOT NULL,
+    week_start      DATE            NOT NULL,
     updated_at      TIMESTAMPTZ     NOT NULL,
     momentum_mean   NUMERIC(18, 6),
     momentum_std    NUMERIC(18, 6),
-    PRIMARY KEY (market, trading_date)
+    PRIMARY KEY (market, week_start)
 );
-
-CREATE INDEX IF NOT EXISTS idx_us_market_metrics_trading_date
-    ON us_market_metrics (trading_date);
 
 -- ---------------------------------------------------------------------------
 -- Swedish stocks
@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS swe_metrics (
     ticker         TEXT            NOT NULL
                        REFERENCES swe_tickers (symbol) ON DELETE CASCADE,
     company        TEXT,
+    week_start     DATE            NOT NULL,
     trading_date   DATE            NOT NULL,
     updated_at     TIMESTAMPTZ     NOT NULL,
     currency       TEXT,
@@ -73,22 +74,19 @@ CREATE TABLE IF NOT EXISTS swe_metrics (
     current_price  NUMERIC(18, 6),
     momentum       NUMERIC(18, 6),
     z_score        NUMERIC(18, 6),
-    CONSTRAINT swe_metrics_ticker_trading_date_key UNIQUE (ticker, trading_date)
+    CONSTRAINT swe_metrics_week_start_ticker_key UNIQUE (week_start, ticker)
 );
 
 CREATE INDEX IF NOT EXISTS idx_swe_metrics_trading_date ON swe_metrics (trading_date);
 
 CREATE TABLE IF NOT EXISTS swe_market_metrics (
     market          TEXT            NOT NULL,
-    trading_date    DATE            NOT NULL,
+    week_start      DATE            NOT NULL,
     updated_at      TIMESTAMPTZ     NOT NULL,
     momentum_mean   NUMERIC(18, 6),
     momentum_std    NUMERIC(18, 6),
-    PRIMARY KEY (market, trading_date)
+    PRIMARY KEY (market, week_start)
 );
-
-CREATE INDEX IF NOT EXISTS idx_swe_market_metrics_trading_date
-    ON swe_market_metrics (trading_date);
 
 -- ---------------------------------------------------------------------------
 -- UK stocks
@@ -109,6 +107,7 @@ CREATE TABLE IF NOT EXISTS uk_metrics (
     ticker         TEXT            NOT NULL
                        REFERENCES uk_tickers (symbol) ON DELETE CASCADE,
     company        TEXT,
+    week_start     DATE            NOT NULL,
     trading_date   DATE            NOT NULL,
     updated_at     TIMESTAMPTZ     NOT NULL,
     currency       TEXT,
@@ -117,19 +116,16 @@ CREATE TABLE IF NOT EXISTS uk_metrics (
     current_price  NUMERIC(18, 6),
     momentum       NUMERIC(18, 6),
     z_score        NUMERIC(18, 6),
-    CONSTRAINT uk_metrics_ticker_trading_date_key UNIQUE (ticker, trading_date)
+    CONSTRAINT uk_metrics_week_start_ticker_key UNIQUE (week_start, ticker)
 );
 
 CREATE INDEX IF NOT EXISTS idx_uk_metrics_trading_date ON uk_metrics (trading_date);
 
 CREATE TABLE IF NOT EXISTS uk_market_metrics (
     market          TEXT            NOT NULL,
-    trading_date    DATE            NOT NULL,
+    week_start      DATE            NOT NULL,
     updated_at      TIMESTAMPTZ     NOT NULL,
     momentum_mean   NUMERIC(18, 6),
     momentum_std    NUMERIC(18, 6),
-    PRIMARY KEY (market, trading_date)
+    PRIMARY KEY (market, week_start)
 );
-
-CREATE INDEX IF NOT EXISTS idx_uk_market_metrics_trading_date
-    ON uk_market_metrics (trading_date);

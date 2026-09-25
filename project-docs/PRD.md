@@ -4,7 +4,7 @@
 
 `fansboda-finance` is a lightweight, scheduled data pipeline that tracks a
 watchlist of stock tickers and maintains their key moving-average indicators in
-a managed Postgres database. Once a week (Thursday) it fetches recent price history from
+a managed Postgres database. Once a week (Saturday, after the Friday close) it fetches recent price history from
 [yfinance](https://github.com/ranaroussi/yfinance), computes the 50-day and
 200-day simple moving averages (SMAs), records the latest close, and inserts a
 new row per ticker per `trading_date` into a [Neon](https://neon.tech) Postgres
@@ -22,7 +22,7 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
   user-managed watchlist of symbols (one row per ticker per `trading_date`).
 - Detect **Golden Cross** and **Death Cross** processes on that retained weekly
   SMA history for the US, Swedish, and UK watchlists (see §5.6).
-- Run fully unattended on a weekly schedule (Thursdays).
+- Run fully unattended on a weekly schedule (Saturdays).
 - Keep monthly operating cost at ~$0 within GCP Always Free and Neon free tiers.
 - Be resilient to transient data-provider failures (rate limits, timeouts).
 - Avoid redundant work by skipping symbols that already have a row for the
@@ -32,7 +32,7 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
 
 - No user-facing UI or API — data is consumed directly from Postgres (and from
   ad-hoc detection output in §5.6).
-- No intraday / real-time quotes; the weekly job runs once weekly (Thursday).
+- No intraday / real-time quotes; the weekly job runs once weekly (Saturday).
 - No additional technical indicators beyond SMA-50, SMA-200, current price,
   and the derived `momentum` / `z_score` fields in §6 — including no EMA, RSI,
   MACD, and no alternate moving-average windows in v1.
@@ -52,7 +52,7 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
 - **Primary use case — Golden / Death Cross detection:** detect completed
   **Golden Cross** and **Death Cross** processes from stored weekly
   `sma_50` / `sma_200` history (no yfinance at detection time). Each pattern
-  is a three-stage process that may span multiple Thursday snapshots:
+  is a three-stage process that may span multiple weekly snapshots:
 
   - **Golden Cross:** (1) downtrend or consolidation — SMA-50 below SMA-200;
     (2) convergence — the gap narrows as recent prices strengthen; (3)
@@ -89,7 +89,7 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
                                               +----------------------------------+
 ```
 
-- **Compute:** GCP `e2-micro` VM, timezone UTC, cron-scheduled weekly on Thursdays.
+- **Compute:** GCP `e2-micro` VM, timezone UTC, cron-scheduled weekly on Saturdays.
 - **Data source:** yfinance (Yahoo Finance), batched downloads with retry.
 - **Storage:** Neon Postgres (serverless free tier).
 - **CI/CD:** GitHub Actions for test (pytest) and deploy to the Production VM
@@ -102,10 +102,15 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
 - **FR-1 Load watchlist:** Read all symbols and names from `us_tickers`,
   `swe_tickers`, and `uk_tickers` (`load_tickers_from_db`). Fail clearly if all
   three are empty.
-- **FR-2 Skip fresh data:** For each ticker, skip fetching if a row already
-  exists in the matching country metrics table (`us_metrics` / `swe_metrics` /
-  `uk_metrics`) for that ticker's latest `trading_date`
-  (`filter_stale_tickers`), reducing API load.
+- **FR-2 Skip fresh data:** For each ticker, skip fetching if the matching
+  country metrics table (`us_metrics` / `swe_metrics` / `uk_metrics`) already
+  has its row for the current UTC week (`week_start` = Monday) and that row's
+  `trading_date` is on or after the newest bar the run can expect — Friday on
+  Saturday/Sunday, otherwise today (`filter_stale_tickers`). Re-runs after
+  the Saturday job are cheap, a mid-week manual run never blocks the Saturday
+  job from storing the full Friday close, and every ticker is re-fetched each
+  new week — freshness is never judged only against the newest date already
+  stored.
 - **FR-3 Batch download:** Fetch ~300 days of OHLCV history in configurable
   batches (default 40 symbols/batch) with a delay between batches.
 - **FR-4 Retry/backoff:** Retry retryable failures (HTTP 429, rate, timeout,
@@ -114,19 +119,21 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
   symbols with fewer than 200 valid closes. Capture the latest close as
   `current_price` and the latest bar's date as `trading_date`. Compute
   **`momentum`** = `sma_50 / sma_200` (NULL when either SMA is NULL or
-  `sma_200` is zero). After per-ticker values for a `trading_date` are known,
+  `sma_200` is zero). After per-ticker values for a week are known,
   upsert cross-sectional **`momentum_mean`** / **`momentum_std`** into the
   matching `*_market_metrics` row, then set each ticker's **`z_score`** =
   `(momentum - momentum_mean) / momentum_std` (NULL when `momentum` or
   aggregates are missing, or `momentum_std` is zero).
-- **FR-6 Insert:** Append one new row per ticker into `us_metrics`,
-  `swe_metrics`, or `uk_metrics` for the computed `trading_date`
-  (`insert_metrics`), including `momentum` and `z_score`. Do not overwrite
-  prior rows; use `ON CONFLICT (ticker, trading_date) DO NOTHING` so re-runs
-  are idempotent.
+- **FR-6 Insert:** Write one row per ticker per calendar week into
+  `us_metrics`, `swe_metrics`, or `uk_metrics` (`insert_metrics`), keyed by
+  `week_start` (Monday of `trading_date`), including `momentum` and `z_score`.
+  Use `ON CONFLICT (ticker, week_start) DO UPDATE … WHERE EXCLUDED.trading_date
+  > existing trading_date`: a newer bar in the same week replaces the row, an
+  equal or older bar is ignored, so re-runs are idempotent.
 - **FR-7 Retention purge:** After inserts, delete rows from `us_metrics` /
   `swe_metrics` / `uk_metrics` (and the matching `*_market_metrics` tables)
-  where `trading_date` is older than one year (`purge_stale_metrics`).
+  where `trading_date` (`week_start` for `*_market_metrics`) is older than
+  one year (`purge_stale_metrics`).
 - **FR-8 Observability:** Log per-batch progress, per-ticker results, insert
   and purge counts, and a final summary (total / skipped / fetched / failed
   batches). Exit non-zero on fatal errors (missing `DATABASE_URL`, no metrics
@@ -161,18 +168,20 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
 ### 5.4 Historical backfill (`backfill_sma.py`)
 
 One-off manual script to bootstrap SMA history. **Not** part of the recurring
-Thursday schedule.
+Saturday schedule.
 
 - **FR-13 Batch download:** Fetch two years (~730 days) of daily OHLCV per
   ticker batch (default 25 symbols/batch) with retry/backoff and a delay between
   batches.
-- **FR-14 Rolling week windows:** From each ticker's oldest bar, assign week
-  index 0, 1, 2, … counting forward in 7-day steps. Build rolling **52-week**
-  windows (weeks 0–51, then 1–52, then 2–53, and so on). Each window produces
-  one SMA snapshot at the last trading day in the window.
-- **FR-15 Insert history:** Append rows to `us_metrics` / `swe_metrics` /
-  `uk_metrics` with `ON CONFLICT (ticker, trading_date) DO NOTHING` so
-  interrupted runs can resume without duplicates.
+- **FR-14 Weekly snapshots:** Bucket each ticker's bars by calendar week
+  (Monday-based `week_start`). For every week, compute one SMA snapshot at the
+  week's last bar (normally Friday) using only closes up to and including that
+  bar; skip weeks with fewer than 200 closes so far. Snapshots therefore align
+  with what the Saturday job stores, regardless of the day the backfill runs.
+- **FR-15 Insert history:** Write rows to `us_metrics` / `swe_metrics` /
+  `uk_metrics` with the same week upsert as FR-6, so interrupted runs can
+  resume without duplicates and a week holding an older (mid-week) bar is
+  upgraded to the week's last bar.
 - **FR-16 Skip existing:** Before insert, skip `(ticker, trading_date)` pairs
   already present in the matching country metrics table.
 - **FR-17 Observability:** Log per-batch generated, new, inserted, and
@@ -217,9 +226,8 @@ object instead of calling `os.getenv` directly.
 | `yf_max_retries` | 3 | 3 | Max retries per batch |
 | `yf_retry_base_seconds` | 5.0 | 5.0 | Backoff base (doubles per attempt) |
 | `yf_name_delay_seconds` | 0.25 | 0.25 | Delay between name lookups when seeding |
-| `metrics_retention_days` | 365 | 365 | Delete `us_metrics` / `swe_metrics` / `uk_metrics` (and matching `*_market_metrics`) rows with `trading_date` older than this |
+| `metrics_retention_days` | 365 | 365 | Delete `us_metrics` / `swe_metrics` / `uk_metrics` rows with `trading_date` (and matching `*_market_metrics` rows with `week_start`) older than this |
 | `backfill_history_days` | 730 | 730 | Days of OHLCV history per backfill batch download |
-| `backfill_window_weeks` | 52 | 52 | Rolling window length (weeks 0–51, then 1–52, …) |
 | `backfill_batch_size` | 25 | 25 | Symbols per yfinance batch during backfill |
 | `backfill_batch_delay_seconds` | 5.0 | 5.0 | Delay between backfill batches |
 
@@ -229,7 +237,7 @@ environments differ (e.g. more conservative batch delays in production).
 ### 5.6 Golden Cross & Death Cross detection
 
 Detection-only feature over retained weekly SMA history. Does **not** call
-yfinance; does **not** run on the Thursday cron schedule in v1.
+yfinance; does **not** run on the Saturday cron schedule in v1.
 
 - **FR-19 Source of truth:** Read only from the country metrics tables
   (`us_metrics` / `swe_metrics` / `uk_metrics`), using `sma_50`, `sma_200`, and
@@ -300,41 +308,43 @@ same column layouts.
 
 ### Metrics tables (`us_metrics` / `swe_metrics` / `uk_metrics`)
 
-One row per ticker per `trading_date` within that country set.
+One row per ticker per calendar week (`week_start`) within that country set.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | BIGSERIAL | Primary key |
 | `ticker` | TEXT | FK → matching `*_tickers.symbol` `ON DELETE CASCADE` |
 | `company` | TEXT | Copied from the matching tickers table at fetch time |
-| `trading_date` | DATE | Market session used for this snapshot |
+| `week_start` | DATE | Monday of the calendar week containing `trading_date` |
+| `trading_date` | DATE | Market session used for this snapshot (the latest bar stored for the week) |
 | `updated_at` | TIMESTAMPTZ | When the row was written |
 | `currency` | TEXT | Currency code |
 | `sma_50` | NUMERIC(18,6) | 50-day SMA of closes |
 | `sma_200` | NUMERIC(18,6) | 200-day SMA of closes |
 | `current_price` | NUMERIC(18,6) | Adjusted close on `trading_date` |
 | `momentum` | NUMERIC(18,6) | `sma_50 / sma_200` |
-| `z_score` | NUMERIC(18,6) | `(momentum - momentum_mean) / momentum_std` using that date's matching `*_market_metrics` aggregates |
+| `z_score` | NUMERIC(18,6) | `(momentum - momentum_mean) / momentum_std` using that week's matching `*_market_metrics` aggregates |
 
-Unique constraint on `(ticker, trading_date)`. Multiple rows per ticker are
-expected; each weekly run appends a new snapshot. Rows with `trading_date`
-older than one year are deleted on each run.
+Unique constraint on `(week_start, ticker)`. Each week adds one row per
+ticker; a later bar in the same week replaces it (FR-6). Rows with
+`trading_date` older than one year are deleted on each run.
 
 ### Market metrics tables (`us_market_metrics` / `swe_market_metrics` / `uk_market_metrics`)
 
 Cross-sectional momentum stats for one country set; one row per
-`(market, trading_date)`. Aggregates `momentum` from that set's metrics rows
-on that date.
+`(market, week_start)`. Aggregates `momentum` from that set's metrics rows
+in that week, so every ticker's weekly snapshot contributes even when their
+bar dates differ (holidays, exchange calendars).
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `market` | TEXT | Listing market bucket (e.g. `us_market`, `se_market`, `uk_market`); matches the set's tickers `market` values |
-| `trading_date` | DATE | Market session used for this snapshot |
+| `week_start` | DATE | Monday of the snapshot week |
 | `updated_at` | TIMESTAMPTZ | When the row was written |
-| `momentum_mean` | NUMERIC(18,6) | Mean of tickers' `momentum` in this set on this date |
-| `momentum_std` | NUMERIC(18,6) | St. dev. of tickers' `momentum` in this set on this date |
+| `momentum_mean` | NUMERIC(18,6) | Mean of tickers' `momentum` in this set in this week |
+| `momentum_std` | NUMERIC(18,6) | St. dev. of tickers' `momentum` in this set in this week |
 
-Unique constraint on `(market, trading_date)`. Rows with `trading_date` older
+Primary key on `(market, week_start)`. Rows with `week_start` older
 than one year are deleted on each weekly run (same retention as the metrics
 tables).
 
@@ -346,8 +356,9 @@ of its rows in the matching metrics table.
 - **Cost:** ~$0/month within GCP Always Free (`e2-micro`) and Neon free tier.
 - **Reliability:** Transient provider errors must not abort the whole run; a
   failed batch is logged and counted, and the job still inserts what it has.
-- **Idempotency:** Re-running in the same week is a no-op for tickers that
-  already have a row for that `trading_date`; inserts use conflict-safe append.
+- **Idempotency:** Re-running in the same week is a no-op for tickers whose
+  week row already holds the newest expected bar; inserts upsert per
+  `(ticker, week_start)` and only replace a row with a newer bar.
   Retention purge is safe to repeat.
 - **Security:** No credentials in the repo. `.env` is git-ignored and local
   only; production `DATABASE_URL` lives in GitHub secrets and is written to the
@@ -481,8 +492,8 @@ Python 3.11+. Key libraries: `yfinance`, `pandas`, `psycopg2-binary`,
   (`crontab -u fansboda`). That user owns `/opt/fansboda-finance`, the Pipenv
   venv, `.env`, and the job log — not `root`. After deploy, `.env` must remain
   readable by `fansboda` (see deploy workflow `chown`).
-- Cron entry on the VM (`crontab -u fansboda -e`) — **Thursdays at 11:00 UTC**:
-  `0 11 * * 4 cd /opt/fansboda-finance && pipenv run python fetch_sma.py >> /var/log/fansboda-finance/fetch_sma.log 2>&1`
+- Cron entry on the VM (`crontab -u fansboda -e`) — **Saturdays at 11:00 UTC** (every market has closed for the week, so each row holds a full Friday close):
+  `0 11 * * 6 cd /opt/fansboda-finance && pipenv run python fetch_sma.py >> /var/log/fansboda-finance/fetch_sma.log 2>&1`
 - First-time setup: run `schema.sql` in Neon, then `scripts/bootstrap-vm.sh` on
   the VM (as root/sudo). Existing databases upgrade via the `migrate_*.sql`
   scripts. Seed **per country set** as needed (e.g.

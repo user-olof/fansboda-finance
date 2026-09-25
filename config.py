@@ -17,7 +17,6 @@ DEFAULT_YF_RETRY_BASE_SECONDS = 5.0
 DEFAULT_YF_NAME_DELAY_SECONDS = 0.25
 DEFAULT_METRICS_RETENTION_DAYS = 365
 DEFAULT_BACKFILL_HISTORY_DAYS = 730
-DEFAULT_BACKFILL_WINDOW_WEEKS = 52
 DEFAULT_BACKFILL_BATCH_SIZE = 25
 DEFAULT_BACKFILL_BATCH_DELAY_SECONDS = 5.0
 DEFAULT_CROSS_MIN_REGIME_WEEKS = 4
@@ -78,7 +77,6 @@ class BaseConfig:
     yf_name_delay_seconds: float = DEFAULT_YF_NAME_DELAY_SECONDS
     metrics_retention_days: int = DEFAULT_METRICS_RETENTION_DAYS
     backfill_history_days: int = DEFAULT_BACKFILL_HISTORY_DAYS
-    backfill_window_weeks: int = DEFAULT_BACKFILL_WINDOW_WEEKS
     backfill_batch_size: int = DEFAULT_BACKFILL_BATCH_SIZE
     backfill_batch_delay_seconds: float = DEFAULT_BACKFILL_BATCH_DELAY_SECONDS
     cross_min_regime_weeks: int = DEFAULT_CROSS_MIN_REGIME_WEEKS
@@ -117,9 +115,6 @@ class BaseConfig:
             ),
             backfill_history_days=_env_int(
                 "BACKFILL_HISTORY_DAYS", DEFAULT_BACKFILL_HISTORY_DAYS
-            ),
-            backfill_window_weeks=_env_int(
-                "BACKFILL_WINDOW_WEEKS", DEFAULT_BACKFILL_WINDOW_WEEKS
             ),
             backfill_batch_size=_env_int(
                 "BACKFILL_BATCH_SIZE", DEFAULT_BACKFILL_BATCH_SIZE

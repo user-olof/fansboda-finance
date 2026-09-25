@@ -49,7 +49,7 @@ PRD §8.1 (ephemeral dev VM via manual `workflow_dispatch`) is **out of scope** 
 | Timezone | UTC |
 | App path | `/opt/fansboda-finance` |
 | Cron user | `fansboda` (not `root`) |
-| Cron schedule | **Thursdays 11:00 UTC** (`0 11 * * 4`) |
+| Cron schedule | **Saturdays 11:00 UTC** (`0 11 * * 6`) — after every market's Friday close |
 | Log file | `/var/log/fansboda-finance/fetch_sma.log` |
 | `.env` | Owned by `fansboda`, mode `600`; readable after every deploy |
 
@@ -97,7 +97,7 @@ Run once as root/sudo on a fresh Debian/Ubuntu instance:
 3. Set timezone UTC (`timedatectl`)
 4. Create `/var/log/fansboda-finance/` and `fetch_sma.log` with `fansboda` ownership
 5. Ensure the `cron` package / `crontab` CLI is installed and the service is enabled (minimal cloud images often omit it)
-6. Install Thursday cron for `fansboda` only if no `fetch_sma.py` line is already present
+6. Install Saturday cron for `fansboda` only if no `fetch_sma.py` line is already present
 
 Application code and Python deps are **not** installed here — the deploy workflow copies a tarball to `/opt/fansboda-finance` and runs `pipenv install --deploy`. Other OS packages (`python3`, `pipenv`, etc.) must already be available on the VM (or come from deploy).
 
@@ -108,13 +108,13 @@ Bootstrap does **not** write `.env` — that comes from the deploy workflow or m
 PRD §10 documents the minimal cron line:
 
 ```
-0 11 * * 4 cd /opt/fansboda-finance && pipenv run python fetch_sma.py >> /var/log/fansboda-finance/fetch_sma.log 2>&1
+0 11 * * 6 cd /opt/fansboda-finance && pipenv run python fetch_sma.py >> /var/log/fansboda-finance/fetch_sma.log 2>&1
 ```
 
 Bootstrap installs an **enhanced** line so `get_config()` receives production settings (RFC-006):
 
 ```
-0 11 * * 4 cd /opt/fansboda-finance && set -a && [ -f .env ] && . ./.env && set +a && PIPENV_VENV_IN_PROJECT=1 pipenv run python fetch_sma.py >> /var/log/fansboda-finance/fetch_sma.log 2>&1
+0 11 * * 6 cd /opt/fansboda-finance && set -a && [ -f .env ] && . ./.env && set +a && PIPENV_VENV_IN_PROJECT=1 pipenv run python fetch_sma.py >> /var/log/fansboda-finance/fetch_sma.log 2>&1
 ```
 
 | Enhancement | Why |
@@ -137,7 +137,7 @@ Separate from the **deploy** service account (RFC-009). The instance SA is the r
 | Backfill one country set | `pipenv run python backfill_sma.py --country us` (or `swe` / `uk`) |
 | Verify data | `SELECT * FROM us_metrics ORDER BY trading_date DESC, ticker LIMIT 10;` (same for `swe_metrics` / `uk_metrics`) |
 | Check retention span | `SELECT MIN(trading_date), MAX(trading_date), COUNT(*) FROM us_metrics;` (same for `swe_metrics` / `uk_metrics`) |
-| Market snapshot | `SELECT * FROM us_market_metrics ORDER BY trading_date DESC LIMIT 10;` (same for `swe_market_metrics` / `uk_market_metrics`) |
+| Market snapshot | `SELECT * FROM us_market_metrics ORDER BY week_start DESC LIMIT 10;` (same for `swe_market_metrics` / `uk_market_metrics`) |
 
 ### First-time setup checklist
 
@@ -152,14 +152,14 @@ Separate from the **deploy** service account (RFC-009). The instance SA is the r
 [ ] Optional: migrate_metrics_history.sql + backfill_sma.py --country us  # one-off per set
 [ ] GitHub: ./scripts/configure-branch-protection.sh
 [ ] Verify: SELECT * FROM us_metrics ORDER BY trading_date DESC LIMIT 10; (same for swe_metrics / uk_metrics)
-[ ] Market: SELECT * FROM us_market_metrics ORDER BY trading_date DESC LIMIT 10; (same for swe_market_metrics / uk_market_metrics)
+[ ] Market: SELECT * FROM us_market_metrics ORDER BY week_start DESC LIMIT 10; (same for swe_market_metrics / uk_market_metrics)
 ```
 
 ## Acceptance criteria
 
 - [x] Bootstrap creates `fansboda` user, app dir, UTC timezone, and log path
 - [x] Bootstrap does not ship app code or run `pipenv install --deploy` (deploy owns that)
-- [x] Bootstrap cron uses Thursday schedule (`0 11 * * 4`) only when missing
+- [x] Bootstrap cron uses Saturday schedule (`0 11 * * 6`) only when missing
 - [x] Bootstrap cron sources `.env` and sets `PIPENV_VENV_IN_PROJECT=1`
 - [x] Runbook queries target country metrics tables (`us_*` / `swe_*` / `uk_*`)
 - [x] First-time and runbook steps documented

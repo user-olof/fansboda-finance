@@ -49,7 +49,6 @@ Replace scattered `os.getenv` / `os.environ` reads with `config.py` exposing `De
 | `yf_name_delay_seconds` | 0.25 | 0.25 | `YF_NAME_DELAY_SECONDS` | Seed/refresh name lookup delay |
 | `metrics_retention_days` | 365 | 365 | `METRICS_RETENTION_DAYS` | Purge cutoff for `us_metrics` / `swe_metrics` / `uk_metrics` / matching `*_market_metrics` |
 | `backfill_history_days` | 730 | 730 | `BACKFILL_HISTORY_DAYS` | Backfill OHLCV window |
-| `backfill_window_weeks` | 52 | 52 | `BACKFILL_WINDOW_WEEKS` | Rolling SMA window length |
 | `backfill_batch_size` | 25 | 25 | `BACKFILL_BATCH_SIZE` | Backfill batch size |
 | `backfill_batch_delay_seconds` | 5.0 | 5.0 | `BACKFILL_BATCH_DELAY_SECONDS` | Delay between backfill batches |
 

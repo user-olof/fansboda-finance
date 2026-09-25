@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Apply schema for Neon (dev-backfill CI and manual upgrades).
 #
-# Fresh / already country-partitioned DBs: schema.sql + steps 11–13 (idempotent).
-# Legacy single-set DBs: run pre-split migrations, then steps 11–13.
+# Country-partitioned DBs before step 14: schema.sql + steps 11–15 (idempotent).
+# DBs past step 14 (us_metrics has no raw_50; includes fresh schema.sql DBs):
+#   schema.sql + step 15 only — steps 11–13 copy raw_* columns step 14 dropped.
+# Legacy single-set DBs: run pre-split migrations, then steps 11–15.
 #
 # Skips destructive one-time migrations unsafe to re-run:
 #   - migrate_one_row_per_ticker.sql
@@ -53,6 +55,24 @@ LEGACY_MIGRATIONS=(
   migrate_tickers_market_and_market_metrics.sql
 )
 
+has_raw_ratios="$(
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -tAc \
+    "SELECT CASE WHEN EXISTS (
+               SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'public'
+                 AND table_name = 'us_metrics'
+                 AND column_name = 'raw_50'
+             )
+             THEN 'yes' ELSE 'no' END"
+)"
+
+if [[ "$has_legacy" == "no" && "$has_raw_ratios" == "no" ]]; then
+  echo "Schema already past step 14 — skipping steps 11–14."
+  run_sql "$REPO_DIR/migrate_week_buckets.sql"
+  echo "All migrations applied (us_* / swe_* / uk_*)."
+  exit 0
+fi
+
 if [[ "$has_legacy" == "yes" ]]; then
   echo "Legacy tickers/metrics detected — applying pre-split migrations..."
   for migration in "${LEGACY_MIGRATIONS[@]}"; do
@@ -73,5 +93,8 @@ run_sql "$REPO_DIR/migrate_add_uk_tables.sql"
 
 # Step 14: momentum / z_score (drop raw_* columns).
 run_sql "$REPO_DIR/migrate_momentum_zscore.sql"
+
+# Step 15: one metrics row per ticker per calendar week (week_start); re-key market_metrics.
+run_sql "$REPO_DIR/migrate_week_buckets.sql"
 
 echo "All migrations applied (us_* / swe_* / uk_*)."

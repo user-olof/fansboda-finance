@@ -3,7 +3,8 @@
 
 Derives ``momentum`` from ``sma_50 / sma_200`` on existing ``*_metrics`` rows,
 upserts ``*_market_metrics`` (``momentum_mean`` / ``momentum_std``), then sets
-``z_score``. No yfinance calls — safe after migrate_momentum_zscore.sql.
+``z_score`` per week. No yfinance calls — run after migrate_momentum_zscore.sql
+and migrate_week_buckets.sql.
 """
 
 from __future__ import annotations
@@ -14,8 +15,8 @@ import sys
 
 from config import get_config
 from db.country import CountrySet
-from db.metrics import load_distinct_trading_dates, recompute_momentum_from_smas
-from fetch_sma import upsert_market_for_trading_dates
+from db.metrics import load_distinct_week_starts, recompute_momentum_from_smas
+from fetch_sma import upsert_market_for_weeks
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,37 +66,33 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Recomputed momentum on %d %s metrics row(s)", momentum_updated, scope)
 
     try:
-        trading_dates = load_distinct_trading_dates(
-            database_url, country=country
-        )
+        week_starts = load_distinct_week_starts(database_url, country=country)
     except Exception:
-        logger.exception("Failed to load trading dates (%s)", scope)
+        logger.exception("Failed to load metrics weeks (%s)", scope)
         return 1
 
-    if not trading_dates:
-        logger.error("No metrics trading dates found for %s", scope)
+    if not week_starts:
+        logger.error("No metrics weeks found for %s", scope)
         return 1
 
     logger.info(
-        "Upserting market aggregates and z_scores for %d trading date(s) (%s)",
-        len(trading_dates),
+        "Upserting market aggregates and z_scores for %d week(s) (%s)",
+        len(week_starts),
         scope,
     )
 
     try:
-        upsert_market_for_trading_dates(
-            database_url, set(trading_dates), country=country
-        )
+        upsert_market_for_weeks(database_url, set(week_starts), country=country)
     except Exception:
         logger.exception("Failed to upsert market stats / z_scores (%s)", scope)
         return 1
 
     logger.info(
         "Derived-metrics recompute summary: scope=%s momentum_rows=%d "
-        "trading_dates=%d",
+        "weeks=%d",
         scope,
         momentum_updated,
-        len(trading_dates),
+        len(week_starts),
     )
     return 0
 

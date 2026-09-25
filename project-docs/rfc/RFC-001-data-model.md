@@ -29,7 +29,7 @@ Postgres schema for US, Swedish, and UK watchlists, SMA history, and cross-secti
 
 Listing **`market`** (yfinance bucket on `*_tickers`, e.g. `us_market`, `se_market`, `uk_market`) is also stored on `*_market_metrics`. Watchlist tables also store **`exchange_name`** from yfinance `fullExchangeName`.
 
-**Legacy note:** Steps 1–10 in [MIGRATIONS.md](../MIGRATIONS.md) build the single-set tables `tickers` / `metrics` / `market_metrics`. Step 11 (`migrate_split_us_swe_tables.sql`) splits those into the `us_*` / `swe_*` sets. Steps 12–13 add `exchange_name` and the UK table set.
+**Legacy note:** Steps 1–10 in [MIGRATIONS.md](../MIGRATIONS.md) build the single-set tables `tickers` / `metrics` / `market_metrics`. Step 11 (`migrate_split_us_swe_tables.sql`) splits those into the `us_*` / `swe_*` sets. Steps 12–13 add `exchange_name` and the UK table set. Step 14 adds `momentum` / `z_score`; step 15 buckets metrics by calendar week (`week_start`).
 
 ## Schema
 
@@ -52,14 +52,15 @@ Listing **`market`** (yfinance bucket on `*_tickers`, e.g. `us_market`, `se_mark
 | `id` | BIGSERIAL PK | |
 | `ticker` | TEXT FK | → matching `*_tickers.symbol` ON DELETE CASCADE |
 | `company` | TEXT | Copied from tickers at insert time |
-| `trading_date` | DATE | Session date for the snapshot |
+| `week_start` | DATE | Monday of the calendar week containing `trading_date` |
+| `trading_date` | DATE | Session date for the snapshot (latest bar stored for the week) |
 | `updated_at` | TIMESTAMPTZ | Insert time |
 | `currency` | TEXT | From yfinance |
 | `sma_50` / `sma_200` / `current_price` | NUMERIC(18,6) | |
 | `momentum` / `z_score` | NUMERIC(18,6) | `sma_50/sma_200`; cross-sectional z-score vs market aggregates |
 
-- One row per `(ticker, trading_date)` within each set (`*_metrics_ticker_trading_date_key`)
-- Append-only: `ON CONFLICT (ticker, trading_date) DO NOTHING`
+- One row per ticker per calendar week within each set (`*_metrics_week_start_ticker_key UNIQUE (week_start, ticker)`; column order lets the same index serve per-week lookups)
+- Week upsert: `ON CONFLICT (ticker, week_start) DO UPDATE … WHERE EXCLUDED.trading_date > existing trading_date` — a newer bar replaces the week's row; equal/older bars are ignored
 - Deleting a row from `us_tickers`, `swe_tickers`, or `uk_tickers` cascades to all of its rows in the matching metrics table.
 
 ### Market metrics tables (`us_market_metrics` / `swe_market_metrics` / `uk_market_metrics`)
@@ -67,10 +68,10 @@ Listing **`market`** (yfinance bucket on `*_tickers`, e.g. `us_market`, `se_mark
 | Column | Type | Notes |
 |--------|------|-------|
 | `market` | TEXT | Listing market bucket |
-| `trading_date` | DATE | |
+| `week_start` | DATE | Monday of the snapshot week |
 | `updated_at` | TIMESTAMPTZ | |
-| `momentum_mean` / `momentum_std` | NUMERIC(18,6) | Cross-sectional mean/std of `momentum` |
-| PK | `(market, trading_date)` | |
+| `momentum_mean` / `momentum_std` | NUMERIC(18,6) | Cross-sectional mean/std of `momentum` over the week's rows |
+| PK | `(market, week_start)` | |
 
 ## Implementation
 
@@ -83,6 +84,8 @@ Listing **`market`** (yfinance bucket on `*_tickers`, e.g. `us_market`, `se_mark
 | `migrate_split_us_swe_tables.sql` | Step 11 — US/SWE country partition — **done** |
 | `migrate_add_exchange_name.sql` | Step 12 — add `exchange_name` to `*_tickers` — **done** |
 | `migrate_add_uk_tables.sql` | Step 13 — create `uk_*` table set — **done** |
+| `migrate_momentum_zscore.sql` | Step 14 — `momentum` / `z_score` — **done** |
+| `migrate_week_buckets.sql` | Step 15 — `week_start` buckets; market metrics keyed by week |
 | `project-docs/MIGRATIONS.md` | Migration order and paths by starting state |
 | `scripts/verify_schema.sql` | Asserts US/SWE/UK sets and `exchange_name` |
 | `tests/test_schema.py` | CI validation of DDL files |
@@ -110,6 +113,8 @@ Listing **`market`** (yfinance bucket on `*_tickers`, e.g. `us_market`, `se_mark
 | `migrate_split_us_swe_tables.sql` | Split into `us_*` / `swe_*` sets (step 11 — **done**) |
 | `migrate_add_exchange_name.sql` | Step 12 — add `exchange_name` to `*_tickers` |
 | `migrate_add_uk_tables.sql` | Step 13 — create `uk_*` sets |
+| `migrate_momentum_zscore.sql` | Step 14 — replace `raw_*` with `momentum` / `z_score` |
+| `migrate_week_buckets.sql` | Step 15 — add `week_start`, one row per `(ticker, week_start)`, re-key `*_market_metrics` |
 | `models.py` | `TickerEntry` (incl. `exchange_name`), `MetricRow`, `MarketRow` |
 | `db/metrics.py` | `insert_metrics` persists metrics including `momentum` / `z_score` (RFC-012) |
 | `db/market.py` | `upsert_market_stats`, `purge_stale_market` for `momentum_mean` / `momentum_std` |
@@ -132,26 +137,26 @@ SELECT symbol, company, sector, industry, market, exchange_name FROM us_tickers 
 SELECT symbol, company, sector, industry, market, exchange_name FROM swe_tickers LIMIT 5;
 SELECT symbol, company, sector, industry, market, exchange_name FROM uk_tickers LIMIT 5;
 
-SELECT ticker, trading_date, company, currency,
+SELECT ticker, week_start, trading_date, company, currency,
        sma_50, sma_200, current_price, momentum, z_score
-FROM us_metrics ORDER BY trading_date DESC LIMIT 5;
+FROM us_metrics ORDER BY week_start DESC LIMIT 5;
 
-SELECT ticker, trading_date, company, currency,
+SELECT ticker, week_start, trading_date, company, currency,
        sma_50, sma_200, current_price, momentum, z_score
-FROM swe_metrics ORDER BY trading_date DESC LIMIT 5;
+FROM swe_metrics ORDER BY week_start DESC LIMIT 5;
 
-SELECT ticker, trading_date, company, currency,
+SELECT ticker, week_start, trading_date, company, currency,
        sma_50, sma_200, current_price, momentum, z_score
-FROM uk_metrics ORDER BY trading_date DESC LIMIT 5;
+FROM uk_metrics ORDER BY week_start DESC LIMIT 5;
 
-SELECT market, trading_date, momentum_mean, momentum_std
-FROM us_market_metrics ORDER BY trading_date DESC, market LIMIT 5;
+SELECT market, week_start, momentum_mean, momentum_std
+FROM us_market_metrics ORDER BY week_start DESC, market LIMIT 5;
 
-SELECT market, trading_date, momentum_mean, momentum_std
-FROM swe_market_metrics ORDER BY trading_date DESC, market LIMIT 5;
+SELECT market, week_start, momentum_mean, momentum_std
+FROM swe_market_metrics ORDER BY week_start DESC, market LIMIT 5;
 
-SELECT market, trading_date, momentum_mean, momentum_std
-FROM uk_market_metrics ORDER BY trading_date DESC, market LIMIT 5;
+SELECT market, week_start, momentum_mean, momentum_std
+FROM uk_market_metrics ORDER BY week_start DESC, market LIMIT 5;
 ```
 
 ## Acceptance criteria
@@ -178,6 +183,7 @@ FROM uk_market_metrics ORDER BY trading_date DESC, market LIMIT 5;
 - [x] Step 12 migration (`migrate_add_exchange_name.sql`) adds `exchange_name` on `*_tickers`
 - [x] Step 13 migration (`migrate_add_uk_tables.sql`) creates UK set and moves `.L` / `uk_market` rows from `us_*`
 - [x] `scripts/verify_schema.sql` asserts all three country sets and `exchange_name`
+- [x] Step 15 migration (`migrate_week_buckets.sql`): `week_start`, `UNIQUE (week_start, ticker)`, `*_market_metrics` PK `(market, week_start)`
 - [x] DB access layer targets `us_*`, `swe_*`, and `uk_*` tables (`db/country.py`, `db/tickers.py`, `db/metrics.py`, `db/market.py`)
 - [x] `TickerEntry.exchange_name` and upsert rows include `exchange_name`
 

@@ -14,7 +14,7 @@ Weekly pipeline and backfill store **momentum** (`sma_50 / sma_200`) and a
 cross-sectional **`z_score`** on each metrics row, plus
 **`momentum_mean` / `momentum_std`** in
 **`us_market_metrics` / `swe_market_metrics` / `uk_market_metrics`** — one row
-per `(market, trading_date)` within each country set. Listing `market` comes
+per `(market, week_start)` within each country set. Listing `market` comes
 from `*_tickers.market` (yfinance bucket; RFC-002, RFC-010).
 
 Supports unbiased heatmap coloring — ranking tickers relative to peers in the
@@ -33,7 +33,7 @@ by `migrate_momentum_zscore.sql` (step 14); fresh installs use `schema.sql`.
 | `z_score` | `(momentum - momentum_mean) / momentum_std` | Uses that date's matching `*_market_metrics` row; `NULL` when `momentum` or aggregates missing, or `momentum_std` is zero |
 
 Computed in `fetch_sma.py` and `backfill_sma.py`. Typical order: compute
-`momentum` per ticker → upsert market aggregates for the `trading_date` → set
+`momentum` per ticker → upsert market aggregates for the week (`week_start`) → set
 `z_score` (two-pass or in-memory after aggregates).
 
 ### Cross-sectional aggregates (`us_market_metrics` / `swe_market_metrics` / `uk_market_metrics`)
@@ -56,7 +56,7 @@ Computed in `fetch_sma.py` and `backfill_sma.py`. Typical order: compute
 | `models.py` | `MetricRow.momentum`, `MetricRow.z_score`; `MarketRow.momentum_mean`, `MarketRow.momentum_std` |
 | `fetch_sma.py` | Compute momentum; aggregate market stats; update z_score after market upsert |
 | `backfill_sma.py` / `backfill_market.py` | Same formulas for history / recompute |
-| `db/metrics.py` / `db/market.py` | Persist new columns; `update_z_scores_for_trading_date` |
+| `db/metrics.py` / `db/market.py` | Persist new columns; `update_z_scores_for_week` |
 | `tests/` | Momentum / z-score / market aggregation unit tests |
 
 ### Key functions
@@ -66,9 +66,9 @@ Computed in `fetch_sma.py` and `backfill_sma.py`. Typical order: compute
 | `compute_momentum(sma_50, sma_200)` | `fetch_sma.py` | Return `momentum` with divide-by-zero guards |
 | `compute_z_score(momentum, mean, std)` | `fetch_sma.py` | Return z-score with zero-std guards |
 | `aggregate_market_stats(...)` | `fetch_sma.py` | Mean/std of momentum → `MarketRow` |
-| `upsert_market_for_trading_dates(...)` | `fetch_sma.py` | Upsert country market rows; then set z_scores |
-| `load_momentum_by_market_for_date(...)` | `db/metrics.py` | Load persisted momentum grouped by listing market |
-| `update_z_scores_for_trading_date(...)` | `db/metrics.py` | SQL UPDATE joining metrics → tickers → market_metrics |
+| `upsert_market_for_weeks(...)` | `fetch_sma.py` | Upsert country market rows; then set z_scores |
+| `load_momentum_by_market_for_week(...)` | `db/metrics.py` | Load persisted momentum grouped by listing market |
+| `update_z_scores_for_week(...)` | `db/metrics.py` | SQL UPDATE joining metrics → tickers → market_metrics |
 
 ## Acceptance criteria
 
@@ -78,7 +78,7 @@ Computed in `fetch_sma.py` and `backfill_sma.py`. Typical order: compute
 - [x] Backfill and `backfill_market.py` use the same formulas
 - [x] Tests cover momentum, z-score, and market aggregation
 - [x] Docs (FEATURES, RFC-001 verification SQL) match PRD §6
-- [x] Country `*_market_metrics` tables with PK on `(market, trading_date)`
+- [x] Country `*_market_metrics` tables with PK on `(market, week_start)` (step 15; originally `trading_date`)
 - [x] Retention purge deletes stale aggregate rows (RFC-004)
 - [x] Listing `market` populated by seed/refresh (RFC-002, RFC-010)
 - [x] UK routing `uk_market` → `uk_market_metrics`

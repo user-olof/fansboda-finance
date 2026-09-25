@@ -13,7 +13,7 @@ fi
 APP_DIR="/opt/fansboda-finance"
 APP_USER="fansboda"
 LOG_DIR="/var/log/fansboda-finance"
-CRON_SCHEDULE="0 11 * * 4"  # Thursdays 11:00 UTC (PRD §10)
+CRON_SCHEDULE="0 11 * * 6"  # Saturdays 11:00 UTC (PRD §10)
 
 
 if ! id "$APP_USER" &>/dev/null; then

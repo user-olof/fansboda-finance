@@ -6,9 +6,11 @@ import pandas as pd
 import pytest
 
 from db.metrics import (
+    current_week_start,
+    expected_latest_bar,
     filter_stale_tickers,
     insert_metrics,
-    load_momentum_by_market_for_date,
+    load_momentum_by_market_for_week,
 )
 from db.tickers import load_tickers_from_db
 from fetch_sma import (
@@ -20,7 +22,7 @@ from fetch_sma import (
     metric_row_from_history,
     metric_rows_from_batch,
     trading_date_from_index,
-    upsert_market_for_trading_dates,
+    upsert_market_for_weeks,
 )
 from models import MarketRow, MetricRow, TickerEntry
 
@@ -121,14 +123,14 @@ def test_compute_z_score() -> None:
 
 def test_aggregate_market_stats_uses_population_std() -> None:
     row = aggregate_market_stats(
-        date(2026, 6, 6),
+        date(2026, 6, 1),
         "us_market",
         [Decimal("1"), Decimal("3")],
     )
 
     assert row == MarketRow(
         market="us_market",
-        trading_date=date(2026, 6, 6),
+        week_start=date(2026, 6, 1),
         momentum_mean=Decimal("2"),
         momentum_std=Decimal("1"),
     )
@@ -138,7 +140,7 @@ def test_aggregate_market_stats_returns_none_when_empty() -> None:
     assert aggregate_market_stats(date(2026, 6, 6), "us_market", []) is None
 
 
-def test_load_momentum_by_market_for_date_groups_by_tickers_market() -> None:
+def test_load_momentum_by_market_for_week_groups_by_tickers_market() -> None:
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = [
         ("us_market", Decimal("0.5")),
@@ -153,7 +155,7 @@ def test_load_momentum_by_market_for_date_groups_by_tickers_market() -> None:
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
     with patch("db.metrics.psycopg2.connect", return_value=mock_conn):
-        grouped = load_momentum_by_market_for_date(
+        grouped = load_momentum_by_market_for_week(
             "postgresql://example",
             date(2026, 6, 6),
         )
@@ -176,10 +178,10 @@ def test_load_momentum_by_market_for_date_groups_by_tickers_market() -> None:
     }
 
 
-def test_upsert_market_for_trading_dates_upserts_per_listing_market() -> None:
-    trading_date = date(2026, 6, 6)
+def test_upsert_market_for_weeks_upserts_per_listing_market() -> None:
+    week_start = date(2026, 6, 1)
     with patch(
-        "fetch_sma.load_momentum_by_market_for_date",
+        "fetch_sma.load_momentum_by_market_for_week",
         return_value={
             "us_market": [Decimal("1"), Decimal("3")],
             "se_market": [Decimal("0.6")],
@@ -187,15 +189,15 @@ def test_upsert_market_for_trading_dates_upserts_per_listing_market() -> None:
         },
     ):
         with patch("fetch_sma.upsert_market_stats") as mock_upsert:
-            with patch("fetch_sma.update_z_scores_for_trading_date") as mock_z:
-                upsert_market_for_trading_dates(
+            with patch("fetch_sma.update_z_scores_for_week") as mock_z:
+                upsert_market_for_weeks(
                     "postgresql://example",
-                    {trading_date},
+                    {week_start},
                 )
 
     assert mock_upsert.call_count == 3
     mock_z.assert_called_once_with(
-        "postgresql://example", trading_date, country=None
+        "postgresql://example", week_start, country=None
     )
     rows_by_market = {
         call.args[1].market: call.args[1]
@@ -204,7 +206,7 @@ def test_upsert_market_for_trading_dates_upserts_per_listing_market() -> None:
     us_row = rows_by_market["us_market"]
     se_row = rows_by_market["se_market"]
     uk_row = rows_by_market["uk_market"]
-    assert us_row.trading_date == trading_date
+    assert us_row.week_start == week_start
     assert us_row.momentum_mean == Decimal("2")
     assert us_row.momentum_std == Decimal("1")
     assert se_row.market == "se_market"
@@ -213,17 +215,17 @@ def test_upsert_market_for_trading_dates_upserts_per_listing_market() -> None:
     assert uk_row.momentum_mean == Decimal("0.8")
 
 
-def test_upsert_market_for_trading_dates_skips_null_market_bucket() -> None:
+def test_upsert_market_for_weeks_skips_null_market_bucket() -> None:
     with patch(
-        "fetch_sma.load_momentum_by_market_for_date",
+        "fetch_sma.load_momentum_by_market_for_week",
         return_value={
             None: [Decimal("0.9")],
             "se_market": [Decimal("0.6")],
         },
     ):
         with patch("fetch_sma.upsert_market_stats") as mock_upsert:
-            with patch("fetch_sma.update_z_scores_for_trading_date"):
-                upsert_market_for_trading_dates(
+            with patch("fetch_sma.update_z_scores_for_week"):
+                upsert_market_for_weeks(
                     "postgresql://example",
                     {date(2026, 6, 6)},
                 )
@@ -330,137 +332,100 @@ def test_metric_rows_from_batch_parses_multiindex() -> None:
     assert by_ticker["BBB.ST"].currency == "USD"
 
 
-def test_filter_stale_tickers_skips_fresh_within_country() -> None:
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.side_effect = [(date(2026, 6, 6),)]
-    mock_cursor.fetchall.return_value = [("AAA.ST",), ("BBB.ST",)]
-
+def _mock_metrics_conn(mock_cursor: MagicMock) -> MagicMock:
     mock_conn = MagicMock()
     mock_conn.__enter__.return_value = mock_conn
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+    return mock_conn
 
-    with patch("db.metrics.psycopg2.connect", return_value=mock_conn):
-        stale, skipped, max_date = filter_stale_tickers(
+
+def test_current_week_start_returns_monday() -> None:
+    assert current_week_start(today=date(2026, 9, 24)) == date(2026, 9, 21)  # Thu
+    assert current_week_start(today=date(2026, 9, 21)) == date(2026, 9, 21)  # Mon
+    assert current_week_start(today=date(2026, 9, 27)) == date(2026, 9, 21)  # Sun
+
+
+def test_expected_latest_bar_is_friday_on_weekends() -> None:
+    assert expected_latest_bar(today=date(2026, 9, 26)) == date(2026, 9, 25)  # Sat
+    assert expected_latest_bar(today=date(2026, 9, 27)) == date(2026, 9, 25)  # Sun
+    assert expected_latest_bar(today=date(2026, 9, 24)) == date(2026, 9, 24)  # Thu
+
+
+def test_filter_stale_tickers_skips_tickers_with_row_this_week() -> None:
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = [("AAA.ST",), ("BBB.ST",)]
+
+    with patch(
+        "db.metrics.psycopg2.connect", return_value=_mock_metrics_conn(mock_cursor)
+    ):
+        stale, skipped, week_start = filter_stale_tickers(
             "postgresql://example",
             ["AAA.ST", "BBB.ST", "CCC.ST"],
+            today=date(2026, 9, 24),
         )
 
     assert stale == ["CCC.ST"]
     assert skipped == 2
-    assert max_date == date(2026, 6, 6)
-    assert mock_cursor.execute.call_count == 2
-    max_sql = mock_cursor.execute.call_args_list[0][0][0]
-    fresh_sql = mock_cursor.execute.call_args_list[1][0][0]
-    assert "FROM swe_metrics" in max_sql
-    assert "MAX(trading_date) AS latest_trading_date" in fresh_sql
-    assert "FROM swe_metrics" in fresh_sql
-    assert "GROUP BY ticker" in fresh_sql
+    assert week_start == date(2026, 9, 21)
+    mock_cursor.execute.assert_called_once()
+    sql, params = mock_cursor.execute.call_args[0]
+    assert "FROM swe_metrics" in sql
+    assert "week_start = %s" in sql
+    assert "trading_date >= %s" in sql
+    assert params == (
+        ["AAA.ST", "BBB.ST", "CCC.ST"],
+        date(2026, 9, 21),
+        date(2026, 9, 24),
+    )
 
 
-def test_filter_stale_tickers_marks_ticker_stale_when_behind_country_latest() -> None:
-    """Ticker whose own latest row is older than country max needs fetch (FR-2)."""
+def test_filter_stale_tickers_refetches_when_whole_table_is_behind() -> None:
+    """Rows from a previous week are stale even if every ticker shares that date."""
     mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = (date(2026, 6, 6),)
-    mock_cursor.fetchall.return_value = [("AAA.ST",)]
+    mock_cursor.fetchall.return_value = []
 
-    mock_conn = MagicMock()
-    mock_conn.__enter__.return_value = mock_conn
-    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-
-    with patch("db.metrics.psycopg2.connect", return_value=mock_conn):
-        stale, skipped, max_date = filter_stale_tickers(
-            "postgresql://example",
-            ["AAA.ST", "BBB.ST"],
-        )
-
-    assert stale == ["BBB.ST"]
-    assert skipped == 1
-    assert max_date == date(2026, 6, 6)
-
-
-def test_filter_stale_tickers_returns_all_when_country_metrics_empty() -> None:
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = (None,)
-
-    mock_conn = MagicMock()
-    mock_conn.__enter__.return_value = mock_conn
-    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-
-    tickers = ["AAA.ST", "BBB.ST"]
-    with patch("db.metrics.psycopg2.connect", return_value=mock_conn):
-        stale, skipped, max_date = filter_stale_tickers(
+    tickers = ["AAPL", "MSFT"]
+    with patch(
+        "db.metrics.psycopg2.connect", return_value=_mock_metrics_conn(mock_cursor)
+    ):
+        stale, skipped, _week_start = filter_stale_tickers(
             "postgresql://example",
             tickers,
+            today=date(2026, 9, 24),
         )
 
     assert stale == tickers
     assert skipped == 0
-    assert max_date is None
 
 
-def test_filter_stale_tickers_evaluates_us_and_swe_separately() -> None:
-    """US freshness uses us_metrics max; SWE uses swe_metrics max (RFC-003)."""
-    mock_cursor = MagicMock()
-    # Order of country iteration follows first-seen ticker country (US then SWE).
-    mock_cursor.fetchone.side_effect = [
-        (date(2026, 6, 6),),  # us max
-        (date(2026, 6, 5),),  # swe max
-    ]
-    mock_cursor.fetchall.side_effect = [
-        [("AAPL",)],  # fresh US
-        [("VOLV-B.ST",)],  # fresh SWE
-    ]
-
-    mock_conn = MagicMock()
-    mock_conn.__enter__.return_value = mock_conn
-    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-
-    with patch("db.metrics.psycopg2.connect", return_value=mock_conn):
-        stale, skipped, max_date = filter_stale_tickers(
-            "postgresql://example",
-            ["AAPL", "MSFT", "VOLV-B.ST", "ERIC-B.ST"],
-        )
-
-    assert stale == ["MSFT", "ERIC-B.ST"]
-    assert skipped == 2
-    assert max_date == date(2026, 6, 6)
-    sqls = [call.args[0] for call in mock_cursor.execute.call_args_list]
-    assert any("FROM us_metrics" in sql for sql in sqls)
-    assert any("FROM swe_metrics" in sql for sql in sqls)
-
-
-def test_filter_stale_tickers_evaluates_uk_separately() -> None:
-    """UK freshness uses uk_metrics max independently of US/SWE (RFC-003)."""
+def test_filter_stale_tickers_evaluates_each_country_table() -> None:
     mock_cursor = MagicMock()
     # First-seen order: US, SWE, UK.
-    mock_cursor.fetchone.side_effect = [
-        (date(2026, 6, 6),),  # us max
-        (date(2026, 6, 5),),  # swe max
-        (date(2026, 6, 4),),  # uk max
-    ]
     mock_cursor.fetchall.side_effect = [
-        [("AAPL",)],  # fresh US
-        [("VOLV-B.ST",)],  # fresh SWE
-        [("VOD.L",)],  # fresh UK
+        [("AAPL",)],
+        [("VOLV-B.ST",)],
+        [("VOD.L",)],
     ]
 
-    mock_conn = MagicMock()
-    mock_conn.__enter__.return_value = mock_conn
-    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-
-    with patch("db.metrics.psycopg2.connect", return_value=mock_conn):
-        stale, skipped, max_date = filter_stale_tickers(
+    with patch(
+        "db.metrics.psycopg2.connect", return_value=_mock_metrics_conn(mock_cursor)
+    ):
+        stale, skipped, _week_start = filter_stale_tickers(
             "postgresql://example",
             ["AAPL", "MSFT", "VOLV-B.ST", "ERIC-B.ST", "VOD.L", "BP.L"],
+            today=date(2026, 9, 24),
         )
 
     assert stale == ["MSFT", "ERIC-B.ST", "BP.L"]
     assert skipped == 3
-    assert max_date == date(2026, 6, 6)
-    sqls = [call.args[0] for call in mock_cursor.execute.call_args_list]
-    assert any("FROM us_metrics" in sql for sql in sqls)
-    assert any("FROM swe_metrics" in sql for sql in sqls)
-    assert any("FROM uk_metrics" in sql for sql in sqls)
+    calls = mock_cursor.execute.call_args_list
+    assert "FROM us_metrics" in calls[0][0][0]
+    week = (date(2026, 9, 21), date(2026, 9, 24))
+    assert calls[0][0][1] == (["AAPL", "MSFT"], *week)
+    assert "FROM swe_metrics" in calls[1][0][0]
+    assert calls[1][0][1] == (["VOLV-B.ST", "ERIC-B.ST"], *week)
+    assert "FROM uk_metrics" in calls[2][0][0]
+    assert calls[2][0][1] == (["VOD.L", "BP.L"], *week)
 
 
 def test_insert_metrics_executes_values() -> None:
@@ -497,10 +462,13 @@ def test_insert_metrics_executes_values() -> None:
     assert "raw_200" not in sql
     assert "sector" not in sql
     assert "industry" not in sql
-    assert "ON CONFLICT (ticker, trading_date) DO NOTHING" in sql
+    assert "ON CONFLICT (ticker, week_start) DO UPDATE" in sql
+    assert "WHERE EXCLUDED.trading_date > swe_metrics.trading_date" in sql
     values = mock_execute.call_args[0][2]
     assert values[0][1] == "Alpha"  # company
-    assert values[0][4] is None  # currency
+    assert values[0][2] == date(2026, 6, 1)  # week_start
+    assert values[0][3] == date(2026, 6, 6)  # trading_date
+    assert values[0][5] is None  # currency
 
 
 def test_insert_metrics_routes_uk_ticker_to_uk_metrics() -> None:
@@ -533,8 +501,8 @@ def test_insert_metrics_routes_uk_ticker_to_uk_metrics() -> None:
     assert "INSERT INTO uk_metrics" in sql
     assert "INSERT INTO us_metrics" not in sql
     assert "INSERT INTO swe_metrics" not in sql
-    assert "ON CONFLICT (ticker, trading_date) DO NOTHING" in sql
+    assert "ON CONFLICT (ticker, week_start) DO UPDATE" in sql
     values = mock_execute.call_args[0][2]
     assert values[0][0] == "VOD.L"
     assert values[0][1] == "Vodafone"
-    assert values[0][4] == "GBp"
+    assert values[0][5] == "GBp"

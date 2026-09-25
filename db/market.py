@@ -18,11 +18,11 @@ from models import MarketRow
 UPSERT_MARKET_SQL = sql_for_countries(
     """
 INSERT INTO {market_metrics} (
-    market, trading_date, updated_at,
+    market, week_start, updated_at,
     momentum_mean, momentum_std
 )
 VALUES (%s, %s, %s, %s, %s)
-ON CONFLICT (market, trading_date) DO UPDATE SET
+ON CONFLICT (market, week_start) DO UPDATE SET
     updated_at = EXCLUDED.updated_at,
     momentum_mean = EXCLUDED.momentum_mean,
     momentum_std = EXCLUDED.momentum_std
@@ -30,13 +30,13 @@ ON CONFLICT (market, trading_date) DO UPDATE SET
 )
 
 DELETE_STALE_MARKET_SQL = tuple(
-    f"DELETE FROM {MARKET_METRICS_TABLE[country]} WHERE trading_date < %s"
+    f"DELETE FROM {MARKET_METRICS_TABLE[country]} WHERE week_start < %s"
     for country in CountrySet
 )
 
 
 def upsert_market_stats(database_url: str, row: MarketRow) -> int:
-    """Insert or update cross-sectional stats for one (market, trading_date)."""
+    """Insert or update cross-sectional stats for one (market, week_start)."""
     country = country_set_for(market=row.market)
     now = datetime.now(timezone.utc)
     with psycopg2.connect(database_url) as conn:
@@ -45,7 +45,7 @@ def upsert_market_stats(database_url: str, row: MarketRow) -> int:
                 UPSERT_MARKET_SQL[country],
                 (
                     row.market,
-                    row.trading_date,
+                    row.week_start,
                     now,
                     row.momentum_mean,
                     row.momentum_std,

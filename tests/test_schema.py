@@ -20,6 +20,7 @@ MIGRATIONS = [
     REPO_ROOT / "migrate_add_exchange_name.sql",
     REPO_ROOT / "migrate_add_uk_tables.sql",
     REPO_ROOT / "migrate_momentum_zscore.sql",
+    REPO_ROOT / "migrate_week_buckets.sql",
 ]
 APPLY_MIGRATIONS_SH = REPO_ROOT / "scripts" / "apply_migrations.sh"
 COUNTRY_TABLES = (
@@ -59,10 +60,11 @@ def test_schema_defines_country_table_sets() -> None:
 
 def test_schema_enforces_history_unique_constraint() -> None:
     sql = SCHEMA_SQL.read_text(encoding="utf-8")
-    assert "us_metrics_ticker_trading_date_key" in sql
-    assert "swe_metrics_ticker_trading_date_key" in sql
-    assert "uk_metrics_ticker_trading_date_key" in sql
-    assert "UNIQUE (ticker, trading_date)" in sql
+    assert "us_metrics_week_start_ticker_key" in sql
+    assert "swe_metrics_week_start_ticker_key" in sql
+    assert "uk_metrics_week_start_ticker_key" in sql
+    assert "UNIQUE (week_start, ticker)" in sql
+    assert "UNIQUE (ticker, trading_date)" not in sql
 
 
 def test_schema_cascade_delete_from_tickers() -> None:
@@ -94,9 +96,9 @@ def test_schema_retention_indexes() -> None:
     assert "ON swe_metrics (trading_date)" in sql
     assert "idx_uk_metrics_trading_date" in sql
     assert "ON uk_metrics (trading_date)" in sql
-    assert "idx_us_market_metrics_trading_date" in sql
-    assert "idx_swe_market_metrics_trading_date" in sql
-    assert "idx_uk_market_metrics_trading_date" in sql
+    assert "idx_us_market_metrics_trading_date" not in sql
+    assert "idx_swe_market_metrics_trading_date" not in sql
+    assert "idx_uk_market_metrics_trading_date" not in sql
 
 
 def test_schema_tickers_updated_at() -> None:
@@ -132,7 +134,7 @@ def test_schema_market_metrics_primary_key() -> None:
     for table in ("us_market_metrics", "swe_market_metrics", "uk_market_metrics"):
         section = sql.split(f"CREATE TABLE IF NOT EXISTS {table}", 1)[1]
         assert re.search(r"\bmarket\s+TEXT\s+NOT NULL", section)
-        assert "PRIMARY KEY (market, trading_date)" in section
+        assert "PRIMARY KEY (market, week_start)" in section
 
 
 def test_migrate_add_exchange_name() -> None:
@@ -174,6 +176,32 @@ def test_migrate_momentum_zscore() -> None:
         assert table in sql
     for table in ("us_market_metrics", "swe_market_metrics", "uk_market_metrics"):
         assert table in sql
+
+
+def test_apply_migrations_skips_steps_11_to_14_once_raw_ratios_are_gone() -> None:
+    script = APPLY_MIGRATIONS_SH.read_text(encoding="utf-8")
+    assert "column_name = 'raw_50'" in script
+    skip_block = script.split('"$has_raw_ratios" == "no"', 1)[1].split("fi\n", 1)[0]
+    assert "migrate_week_buckets.sql" in skip_block
+    assert "exit 0" in skip_block
+    assert script.index('"$has_raw_ratios" == "no"') < script.index(
+        "migrate_split_us_swe_tables.sql"
+    )
+
+
+def test_migrate_week_buckets() -> None:
+    sql = (REPO_ROOT / "migrate_week_buckets.sql").read_text(encoding="utf-8")
+    assert "ARRAY['us', 'swe', 'uk']" in sql
+    assert "ADD COLUMN week_start DATE" in sql
+    assert "date_trunc(''week'', trading_date)::date" in sql
+    assert "older.trading_date < newer.trading_date" in sql
+    assert "ALTER COLUMN week_start SET NOT NULL" in sql
+    assert "_metrics_ticker_trading_date_key" in sql
+    assert "UNIQUE (week_start, ticker)" in sql
+    assert "_metrics_week_start_ticker_key" in sql
+    assert "PRIMARY KEY (market, week_start)" in sql
+    assert "column_name = 'week_start'" in sql
+    assert "column_name = 'trading_date'" in sql
 
 
 def test_migrate_tickers_market_and_market_metrics() -> None:
@@ -252,6 +280,9 @@ def test_apply_migrations_script_lists_ci_safe_migrations_in_order() -> None:
     )
     assert script.index("migrate_momentum_zscore.sql") > script.index(
         "migrate_add_uk_tables.sql"
+    )
+    assert script.rindex("migrate_week_buckets.sql") > script.index(
+        "migrate_momentum_zscore.sql"
     )
     assert "migrate_one_row_per_ticker.sql" not in script.split("LEGACY_MIGRATIONS=", 1)[
         1
