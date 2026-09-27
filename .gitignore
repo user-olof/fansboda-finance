@@ -46,7 +46,6 @@ Thumbs.db
 
 .vscode/
 README.md
-all-tickers.txt
-small-tickers.txt
+tickers*.txt
 
 /secrets
