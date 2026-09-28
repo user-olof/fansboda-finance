@@ -21,6 +21,7 @@ MIGRATIONS = [
     REPO_ROOT / "migrate_add_uk_tables.sql",
     REPO_ROOT / "migrate_momentum_zscore.sql",
     REPO_ROOT / "migrate_week_buckets.sql",
+    REPO_ROOT / "migrate_add_business_summary.sql",
 ]
 APPLY_MIGRATIONS_SH = REPO_ROOT / "scripts" / "apply_migrations.sh"
 COUNTRY_TABLES = (
@@ -186,6 +187,30 @@ def test_apply_migrations_skips_steps_11_to_14_once_raw_ratios_are_gone() -> Non
     assert "exit 0" in skip_block
     assert script.index('"$has_raw_ratios" == "no"') < script.index(
         "migrate_split_us_swe_tables.sql"
+    )
+
+
+def test_schema_tickers_have_business_summary() -> None:
+    sql = SCHEMA_SQL.read_text(encoding="utf-8")
+    for table in ("us_tickers", "swe_tickers", "uk_tickers"):
+        section = sql.split(f"CREATE TABLE IF NOT EXISTS {table}", 1)[1].split(");", 1)[0]
+        assert re.search(r"\bbusiness_summary\s+TEXT", section), table
+
+
+def test_migrate_add_business_summary() -> None:
+    sql = (REPO_ROOT / "migrate_add_business_summary.sql").read_text(encoding="utf-8")
+    for table in ("us_tickers", "swe_tickers", "uk_tickers"):
+        assert f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS business_summary TEXT" in sql
+
+
+def test_apply_migrations_runs_business_summary_after_week_buckets() -> None:
+    script = APPLY_MIGRATIONS_SH.read_text(encoding="utf-8")
+    skip_block = script.split('"$has_raw_ratios" == "no"', 1)[1].split("fi\n", 1)[0]
+    assert skip_block.index("migrate_week_buckets.sql") < skip_block.index(
+        "migrate_add_business_summary.sql"
+    )
+    assert script.rindex("migrate_add_business_summary.sql") > script.rindex(
+        "migrate_week_buckets.sql"
     )
 
 

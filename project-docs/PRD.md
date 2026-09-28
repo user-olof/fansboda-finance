@@ -146,15 +146,22 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
 - **FR-10 Resolve names:** Fetch each company's name from yfinance metadata
   (`longName`, falling back to `shortName`), with a small rate-limit delay.
 - **FR-11 Upsert tickers:** Insert/update
-  `(symbol, company, sector, industry, market, exchange_name)` rows into
-  `us_tickers`, `swe_tickers`, or `uk_tickers` on conflict by `symbol`
-  (country chosen by listing market / symbol suffix — see §6). Resolve
-  `exchange_name` from yfinance `fullExchangeName`. Support an optional
+  `(symbol, company, sector, industry, market, exchange_name, business_summary)`
+  rows into `us_tickers`, `swe_tickers`, or `uk_tickers` on conflict by
+  `symbol` (country chosen by listing market / symbol suffix — see §6). Resolve
+  `exchange_name` from yfinance `fullExchangeName` and `business_summary` from
+  `longBusinessSummary`. Support an optional
   `--country us|swe|uk` filter so only symbols that route to that country set
   are resolved and upserted (required for per-country `dev-backfill` — §8.1).
+- **FR-11a One-off business summary fill:** `seed_tickers.py
+  --update-business-summary [--country us|swe|uk]` resolves
+  `business_summary` for every ticker already in the tickers tables and
+  updates only that column (and `updated_at`); the symbol file is ignored and
+  tickers whose yfinance lookup fails are left unchanged.
 - **FR-12 Ad-hoc metadata refresh:** `refresh_tickers.py` updates watchlist
   metadata on an ad-hoc basis — re-resolve `company`, `sector`, `industry`,
-  listing `market`, and `exchange_name` (`fullExchangeName`) from yfinance and
+  listing `market`, `exchange_name` (`fullExchangeName`), and
+  `business_summary` (`longBusinessSummary`) from yfinance and
   upsert them into `us_tickers` / `swe_tickers` / `uk_tickers`. It operates on
   both:
   - **Existing symbols** already present in a country tickers table (refresh
@@ -304,6 +311,7 @@ same column layouts.
 | `industry` | TEXT | Industry from yfinance (using `industryKey`) |
 | `market` | TEXT | Listing market from yfinance (e.g. `us_market`, `se_market`, `uk_market`) |
 | `exchange_name` | TEXT | Exchange display name from yfinance `fullExchangeName` |
+| `business_summary` | TEXT | Company description from yfinance `longBusinessSummary` |
 | `updated_at` | TIMESTAMPTZ | When the row was written |
 
 ### Metrics tables (`us_metrics` / `swe_metrics` / `uk_metrics`)

@@ -2,6 +2,7 @@ from unittest.mock import MagicMock, patch
 
 from yfinance_client import (
     load_currency_for_tickers,
+    resolve_business_summary,
     resolve_currency,
     resolve_metadata,
     resolve_name,
@@ -78,6 +79,7 @@ def test_resolve_watchlist_fields_uses_single_yfinance_lookup() -> None:
             "consumer-electronics",
             "us_market",
             "NasdaqGS",
+            None,
         )
 
     mock_ctor.assert_called_once_with("AAPL")
@@ -98,6 +100,7 @@ def test_resolve_watchlist_fields_infers_us_market_when_missing(caplog) -> None:
             "software",
             "us_market",
             None,
+            None,
         )
 
     assert "No listing market found for UNKNOWN; inferring us_market" in caplog.text
@@ -117,6 +120,7 @@ def test_resolve_watchlist_fields_infers_se_market_for_st_suffix(caplog) -> None
             "industrials",
             "machinery",
             "se_market",
+            None,
             None,
         )
 
@@ -139,6 +143,7 @@ def test_resolve_watchlist_fields_infers_uk_market_for_l_suffix(caplog) -> None:
             "telecom",
             "uk_market",
             "LSE",
+            None,
         )
 
     assert "No listing market found for VOD.L; inferring uk_market" in caplog.text
@@ -159,6 +164,7 @@ def test_resolve_watchlist_fields_exchange_name_none_when_missing() -> None:
             "technology",
             "consumer-electronics",
             "us_market",
+            None,
             None,
         )
 
@@ -196,3 +202,23 @@ def test_load_currency_for_tickers_records_none_on_failure() -> None:
             currencies = load_currency_for_tickers(["AAA.ST"], name_delay=0.25)
 
     assert currencies == {"AAA.ST": None}
+
+
+def test_resolve_watchlist_fields_includes_business_summary() -> None:
+    mock_ticker = MagicMock()
+    mock_ticker.info = {
+        "longName": "Apple Inc.",
+        "market": "us_market",
+        "longBusinessSummary": "  Apple Inc. designs smartphones.  ",
+    }
+
+    with patch("yfinance_client.yf.Ticker", return_value=mock_ticker):
+        assert resolve_watchlist_fields("AAPL")[5] == "Apple Inc. designs smartphones."
+
+
+def test_resolve_business_summary_returns_none_when_missing_or_blank() -> None:
+    for info in ({}, {"longBusinessSummary": ""}, {"longBusinessSummary": "   "}):
+        mock_ticker = MagicMock()
+        mock_ticker.info = info
+        with patch("yfinance_client.yf.Ticker", return_value=mock_ticker):
+            assert resolve_business_summary("AAA.ST") is None

@@ -205,6 +205,7 @@ def test_main_refresh_resolves_listing_market_and_exchange_name() -> None:
                     "consumer-electronics",
                     "us_market",
                     "NasdaqGS",
+                    "Apple designs smartphones.",
                 ),
             ):
                 with patch("seed_tickers.upsert_tickers", return_value=1) as mock_upsert:
@@ -220,6 +221,7 @@ def test_main_refresh_resolves_listing_market_and_exchange_name() -> None:
                 "consumer-electronics",
                 "us_market",
                 "NasdaqGS",
+                "Apple designs smartphones.",
             )
         ],
     )
@@ -249,6 +251,7 @@ def test_main_refresh_uk_symbol_passes_exchange_name() -> None:
                     "telecom",
                     "uk_market",
                     "LSE",
+                    "Vodafone provides telecoms.",
                 ),
             ):
                 with patch("seed_tickers.upsert_tickers", return_value=1) as mock_upsert:
@@ -264,6 +267,7 @@ def test_main_refresh_uk_symbol_passes_exchange_name() -> None:
                 "telecom",
                 "uk_market",
                 "LSE",
+                "Vodafone provides telecoms.",
             )
         ],
     )

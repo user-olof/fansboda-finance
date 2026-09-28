@@ -38,11 +38,11 @@ tickers.txt  →  load_tickers()  →  [--country filter]  →  resolve_watchlis
 
 | File | Role |
 |------|------|
-| `seed_tickers.py` | CLI, orchestration, `resolve_and_upsert_symbols` |
+| `seed_tickers.py` | CLI, orchestration, `resolve_and_upsert_symbols`; one-off `update_business_summaries_from_db` (`--update-business-summary`) |
 | `symbols.py` | `load_tickers(path)` — shared file parsing |
-| `yfinance_client.py` | `resolve_watchlist_fields`, metadata lookups |
+| `yfinance_client.py` | `resolve_watchlist_fields` (incl. `business_summary`), `resolve_business_summary`, metadata lookups |
 | `db/country.py` | `country_set_for`, `infer_listing_market` |
-| `db/tickers.py` | `upsert_tickers`, `load_tickers_from_db` |
+| `db/tickers.py` | `upsert_tickers`, `load_tickers_from_db`, `update_business_summaries` |
 | `config.py` | `tickers_file`, `yf_name_delay_seconds`, `database_url` |
 | `tickers.txt` | Default symbol list |
 | `tests/test_seed_tickers.py`, `tests/test_symbols.py`, `tests/test_yfinance_client.py` | Unit tests |

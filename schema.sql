@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS us_tickers (
     industry       TEXT,
     market         TEXT,
     exchange_name  TEXT,
+    business_summary TEXT,
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -57,6 +58,7 @@ CREATE TABLE IF NOT EXISTS swe_tickers (
     industry       TEXT,
     market         TEXT,
     exchange_name  TEXT,
+    business_summary TEXT,
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -99,6 +101,7 @@ CREATE TABLE IF NOT EXISTS uk_tickers (
     industry       TEXT,
     market         TEXT,
     exchange_name  TEXT,
+    business_summary TEXT,
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

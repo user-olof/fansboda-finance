@@ -34,7 +34,9 @@ ORDER BY symbol
 
 UPSERT_TICKER_SQL = sql_for_countries(
     """
-INSERT INTO {tickers} (symbol, company, sector, industry, market, exchange_name)
+INSERT INTO {tickers} (
+    symbol, company, sector, industry, market, exchange_name, business_summary
+)
 VALUES %s
 ON CONFLICT (symbol) DO UPDATE SET
     company = EXCLUDED.company,
@@ -42,12 +44,21 @@ ON CONFLICT (symbol) DO UPDATE SET
     industry = EXCLUDED.industry,
     market = EXCLUDED.market,
     exchange_name = EXCLUDED.exchange_name,
+    business_summary = EXCLUDED.business_summary,
     updated_at = NOW();
 """
 )
 
+UPDATE_BUSINESS_SUMMARY_SQL = sql_for_countries(
+    """
+UPDATE {tickers}
+SET business_summary = %s, updated_at = NOW()
+WHERE symbol = %s
+"""
+)
+
 TickerUpsertRow = tuple[
-    str, str | None, str | None, str | None, str | None, str | None
+    str, str | None, str | None, str | None, str | None, str | None, str | None
 ]
 
 
@@ -95,7 +106,7 @@ def upsert_tickers(database_url: str, rows: list[TickerUpsertRow]) -> int:
 
     by_country: dict[CountrySet, list[TickerUpsertRow]] = defaultdict(list)
     for row in rows:
-        symbol, _company, _sector, _industry, market, _exchange_name = row
+        symbol, _company, _sector, _industry, market, _exchange_name, _summary = row
         country = country_set_for(market=market, symbol=symbol)
         by_country[country].append(row)
 
@@ -108,3 +119,28 @@ def upsert_tickers(database_url: str, rows: list[TickerUpsertRow]) -> int:
         conn.commit()
 
     return affected
+
+
+def update_business_summaries(
+    database_url: str,
+    summaries: list[tuple[TickerEntry, str | None]],
+) -> int:
+    """Set ``business_summary`` on existing tickers rows. Returns rows updated."""
+    if not summaries:
+        return 0
+
+    by_country: dict[CountrySet, list[tuple[str | None, str]]] = defaultdict(list)
+    for entry, summary in summaries:
+        country = country_set_for(market=entry.market, symbol=entry.symbol)
+        by_country[country].append((summary, entry.symbol))
+
+    updated = 0
+    with psycopg2.connect(database_url) as conn:
+        with conn.cursor() as cur:
+            for country, params in by_country.items():
+                for values in params:
+                    cur.execute(UPDATE_BUSINESS_SUMMARY_SQL[country], values)
+                    updated += cur.rowcount
+        conn.commit()
+
+    return updated

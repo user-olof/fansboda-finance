@@ -43,6 +43,7 @@ Listing **`market`** (yfinance bucket on `*_tickers`, e.g. `us_market`, `se_mark
 | `industry` | TEXT | From yfinance `industryKey` |
 | `market` | TEXT | Listing market from yfinance (e.g. `us_market`, `se_market`, `uk_market`) |
 | `exchange_name` | TEXT | Exchange display name from yfinance `fullExchangeName` |
+| `business_summary` | TEXT | Company description from yfinance `longBusinessSummary` |
 | `updated_at` | TIMESTAMPTZ | Seed / refresh timestamp |
 
 ### Metrics tables (`us_metrics` / `swe_metrics` / `uk_metrics`)
@@ -115,6 +116,7 @@ Listing **`market`** (yfinance bucket on `*_tickers`, e.g. `us_market`, `se_mark
 | `migrate_add_uk_tables.sql` | Step 13 — create `uk_*` sets |
 | `migrate_momentum_zscore.sql` | Step 14 — replace `raw_*` with `momentum` / `z_score` |
 | `migrate_week_buckets.sql` | Step 15 — add `week_start`, one row per `(ticker, week_start)`, re-key `*_market_metrics` |
+| `migrate_add_business_summary.sql` | Step 16 — add `business_summary` to `*_tickers` |
 | `models.py` | `TickerEntry` (incl. `exchange_name`), `MetricRow`, `MarketRow` |
 | `db/metrics.py` | `insert_metrics` persists metrics including `momentum` / `z_score` (RFC-012) |
 | `db/market.py` | `upsert_market_stats`, `purge_stale_market` for `momentum_mean` / `momentum_std` |

@@ -13,10 +13,11 @@ FROM information_schema.columns
 WHERE table_schema = 'public'
   AND table_name IN ('us_tickers', 'swe_tickers', 'uk_tickers')
   AND column_name IN (
-    'sector', 'industry', 'company', 'market', 'exchange_name', 'updated_at'
+    'sector', 'industry', 'company', 'market', 'exchange_name',
+    'business_summary', 'updated_at'
   )
 ORDER BY table_name, column_name;
--- expect 18 rows (6 columns × 3 tables)
+-- expect 21 rows (7 columns × 3 tables)
 
 -- us_metrics / swe_metrics / uk_metrics columns and numeric precision
 SELECT table_name, column_name, data_type, numeric_precision, numeric_scale

@@ -54,9 +54,9 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 
 ### Watchlist
 
-- **`us_tickers` / `swe_tickers` / `uk_tickers`:** `symbol` (primary key), `company`, `sector`, `industry`, `market`, `exchange_name`, `updated_at`.
+- **`us_tickers` / `swe_tickers` / `uk_tickers`:** `symbol` (primary key), `company`, `sector`, `industry`, `market`, `exchange_name`, `business_summary`, `updated_at`.
 - `sector`, `industry`, and `market` come from yfinance (`sectorKey`, `industryKey`, and listing `market`).
-- `exchange_name` comes from yfinance `fullExchangeName`.
+- `exchange_name` comes from yfinance `fullExchangeName`; `business_summary` from `longBusinessSummary` (fill existing rows once with `seed_tickers.py --update-business-summary`).
 - US symbols live in `us_tickers`; Swedish `.ST` listings in `swe_tickers`; UK `.L` listings in `uk_tickers`.
 - Deleting a row from a country tickers table cascades to all of its rows in the matching metrics table.
 
@@ -85,7 +85,7 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 
 | Table role | Key columns |
 |------------|-------------|
-| `*_tickers` | `symbol` (PK), `company`, `sector`, `industry`, `market`, `exchange_name`, `updated_at` |
+| `*_tickers` | `symbol` (PK), `company`, `sector`, `industry`, `market`, `exchange_name`, `business_summary`, `updated_at` |
 | `*_metrics` | `id` (PK), `ticker` (FK → matching `*_tickers.symbol`), `company`, `week_start`, `trading_date`, `updated_at`, `currency`, `sma_50`, `sma_200`, `current_price`, `momentum`, `z_score` |
 | `*_market_metrics` | `market`, `week_start`, `updated_at`, `momentum_mean`, `momentum_std` |
 
