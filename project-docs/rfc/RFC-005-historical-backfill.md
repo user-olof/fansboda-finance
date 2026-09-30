@@ -24,6 +24,7 @@ One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **N
 | FR-16 | Skip `(ticker, trading_date)` pairs already in the matching country metrics table |
 | FR-17 | Log per-batch generated/new/inserted/skipped counts and final summary |
 | FR-18 | Required `--country us|swe|uk`: load only that set's `*_tickers`; write only that set's `*_metrics` / `*_market_metrics` |
+| FR-18a | Optional, repeatable `--exchange NAME`: keep only tickers whose `exchange_name` matches (case-insensitive); fail with the available names when none match |
 | — | Set `momentum`, `z_score` on each inserted metrics row; upsert `momentum_mean` / `momentum_std` (RFC-012) |
 
 ## Implementation
@@ -32,7 +33,7 @@ One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **N
 
 | File | Role |
 |------|------|
-| `backfill_sma.py` | Calendar-week sampling, orchestration; required `--country` |
+| `backfill_sma.py` | Calendar-week sampling, orchestration; required `--country`, optional `--exchange` |
 | `fetch_sma.py` | Shared: `compute_smas`, `compute_momentum`, `chunked`, `_to_decimal`, `trading_date_from_index`, country-scoped `upsert_market_for_weeks` |
 | `yfinance_client.py` | Shared: `download_batch`, `load_currency_for_tickers` |
 | `db/metrics.py` | `insert_metrics`, `load_existing_metric_keys` |
@@ -47,6 +48,7 @@ One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **N
 | `last_bar_positions_per_week(index)` | Position of each calendar week's last bar |
 | `metric_rows_from_weekly_samples(...)` | One SMA row per week for one ticker |
 | `metric_rows_from_backfill_batch(...)` | Parse batch download for all tickers |
+| `filter_by_exchange(entries, exchanges)` | Keep tickers on the requested exchange(s) |
 | `filter_new_rows(rows, existing)` | Drop rows whose `(ticker, trading_date)` is already stored |
 | `build_parser()` / `main()` | Required `--country`; scoped load + market upsert |
 

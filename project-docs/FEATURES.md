@@ -169,6 +169,7 @@ Bootstrap script for SMA history — **not** part of the weekly cron (FR-13 – 
 | Skip existing | Skips `(ticker, trading_date)` pairs already in the matching country metrics table |
 | Resume-safe | Week upsert; interrupted runs can continue without duplicates |
 | Country scope | **Required** `--country us|swe|uk` — only that set's tickers are loaded and only that set's tables are written (FR-18). Adding UK later must not re-download or re-touch US/SWE. |
+| Exchange scope | Optional, repeatable `--exchange NAME` (e.g. `NasdaqGS`, `NYSE`) limits the run to tickers with that `exchange_name` (FR-18a) |
 
 ```bash
 pipenv run python backfill_sma.py --country us

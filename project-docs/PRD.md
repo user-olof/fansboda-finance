@@ -200,10 +200,19 @@ Saturday schedule.
   or re-touch an already-backfilled set (e.g. US) — even though inserts are
   idempotent, a full multi-set run would still hit yfinance and upsert market
   aggregates for the other sets.
+- **FR-18a Exchange scope (optional):** `--exchange NAME` further limits the
+  run to tickers whose `exchange_name` matches `NAME` (case-insensitive exact
+  match on yfinance `fullExchangeName`, e.g. `NasdaqGS`, `NYSE`, `Stockholm`,
+  `LSE`); repeat the flag to include several exchanges. If no ticker matches,
+  the run fails and logs the exchange names present in that set. Market
+  aggregates and z_scores for the touched weeks are still recomputed from
+  every ticker stored for that country set and week.
 
-Default CLI (scoped example):
+Default CLI (scoped examples):
 
 `pipenv run python backfill_sma.py --country us`
+
+`pipenv run python backfill_sma.py --country us --exchange NasdaqGS --exchange NYSE`
 
 Run once per country set after seeding that set's tickers (and applying
 `migrate_metrics_history.sql` when upgrading a legacy DB). Prefer separate

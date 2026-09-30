@@ -8,6 +8,7 @@ import pytest
 
 from backfill_sma import (
     build_parser,
+    filter_by_exchange,
     filter_new_rows,
     main,
     metric_rows_from_backfill_batch,
@@ -598,3 +599,68 @@ def test_build_parser_requires_country() -> None:
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
         assert exc.code == 2
+
+
+def _exchange_watchlist() -> list[TickerEntry]:
+    return [
+        TickerEntry(symbol="AAPL", company="Apple", market="us_market", exchange_name="NasdaqGS"),
+        TickerEntry(symbol="IBM", company="IBM", market="us_market", exchange_name="NYSE"),
+        TickerEntry(symbol="ABCL", company="AbCellera", market="us_market", exchange_name="NasdaqGM"),
+        TickerEntry(symbol="NEW", company="New", market="us_market", exchange_name=None),
+    ]
+
+
+def test_filter_by_exchange_matches_case_insensitively() -> None:
+    entries = _exchange_watchlist()
+    assert [e.symbol for e in filter_by_exchange(entries, ["nasdaqgs"])] == ["AAPL"]
+    assert [e.symbol for e in filter_by_exchange(entries, ["NasdaqGS", "NasdaqGM"])] == [
+        "AAPL",
+        "ABCL",
+    ]
+    assert filter_by_exchange(entries, ["Nasdaq"]) == []
+    assert filter_by_exchange(entries, None) == entries
+    assert filter_by_exchange(entries, []) == entries
+
+
+def test_build_parser_exchange_is_optional_and_repeatable() -> None:
+    parser = build_parser()
+    assert parser.parse_args(["--country", "us"]).exchange is None
+    args = parser.parse_args(
+        ["--country", "us", "--exchange", "NasdaqGS", "--exchange", "NYSE"]
+    )
+    assert args.exchange == ["NasdaqGS", "NYSE"]
+
+
+def test_main_backfills_only_selected_exchange() -> None:
+    with patch("backfill_sma.get_config", return_value=_mock_config()):
+        with patch(
+            "backfill_sma.load_tickers_from_db", return_value=_exchange_watchlist()
+        ):
+            with patch(
+                "backfill_sma.load_existing_metric_keys", return_value=set()
+            ) as mock_existing:
+                with patch("backfill_sma.load_currency_for_tickers", return_value={}):
+                    with patch("backfill_sma.download_batch") as mock_download:
+                        with patch(
+                            "backfill_sma.metric_rows_from_backfill_batch",
+                            return_value=[],
+                        ):
+                            with patch("backfill_sma.insert_metrics", return_value=0):
+                                main(["--country", "us", "--exchange", "NYSE"])
+
+    mock_existing.assert_called_once_with(
+        "postgresql://example", ["IBM"], country=CountrySet.US
+    )
+    assert mock_download.call_args.args[0] == ["IBM"]
+
+
+def test_main_fails_when_no_ticker_on_exchange(caplog) -> None:
+    with patch("backfill_sma.get_config", return_value=_mock_config()):
+        with patch(
+            "backfill_sma.load_tickers_from_db", return_value=_exchange_watchlist()
+        ):
+            with patch("backfill_sma.download_batch") as mock_download:
+                assert main(["--country", "us", "--exchange", "Stockholm"]) == 1
+
+    mock_download.assert_not_called()
+    assert "available: NYSE, NasdaqGM, NasdaqGS" in caplog.text

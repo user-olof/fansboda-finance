@@ -24,7 +24,7 @@ from fetch_sma import (
     trading_date_from_index,
     upsert_market_for_weeks,
 )
-from models import MetricRow, week_start_of
+from models import MetricRow, TickerEntry, week_start_of
 from yfinance_client import download_batch, load_currency_for_tickers
 
 logging.basicConfig(
@@ -143,6 +143,26 @@ def filter_new_rows(
     ]
 
 
+def filter_by_exchange(
+    entries: list[TickerEntry],
+    exchanges: list[str] | None,
+) -> list[TickerEntry]:
+    """Keep tickers whose ``exchange_name`` matches one of ``exchanges``.
+
+    Matching is exact but case-insensitive. Returns all entries when
+    ``exchanges`` is empty or None.
+    """
+    if not exchanges:
+        return entries
+    wanted = {exchange.strip().casefold() for exchange in exchanges}
+    return [
+        entry
+        for entry in entries
+        if entry.exchange_name is not None
+        and entry.exchange_name.casefold() in wanted
+    ]
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -155,6 +175,16 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[c.value for c in CountrySet],
         required=True,
         help="Country set to backfill (us, swe, or uk)",
+    )
+    parser.add_argument(
+        "--exchange",
+        action="append",
+        metavar="NAME",
+        help=(
+            "Only backfill tickers whose exchange_name matches NAME "
+            "(case-insensitive, e.g. NasdaqGS, NYSE, Stockholm, LSE); "
+            "repeat to include several exchanges"
+        ),
     )
     return parser
 
@@ -187,6 +217,22 @@ def main(argv: list[str] | None = None) -> int:
         logger.exception("Failed to load tickers from database")
         return 1
 
+    if args.exchange:
+        selected = filter_by_exchange(watchlist, args.exchange)
+        if not selected:
+            available = sorted(
+                {entry.exchange_name for entry in watchlist if entry.exchange_name}
+            )
+            logger.error(
+                "No %s tickers on exchange(s) %s; available: %s",
+                country.value,
+                ", ".join(args.exchange),
+                ", ".join(available) or "none",
+            )
+            return 1
+        watchlist = selected
+
+    exchange_scope = ",".join(args.exchange) if args.exchange else "all"
     all_tickers = [entry.symbol for entry in watchlist]
     companies = {entry.symbol: entry.company for entry in watchlist}
     start = datetime.now(timezone.utc).date() - timedelta(days=history_days)
@@ -199,9 +245,10 @@ def main(argv: list[str] | None = None) -> int:
     week_starts: set[date] = set()
 
     logger.info(
-        "Backfill starting: country=%s tickers=%d batches=%d "
+        "Backfill starting: country=%s exchange=%s tickers=%d batches=%d "
         "history_days=%d",
         country.value,
+        exchange_scope,
         len(all_tickers),
         len(batches),
         history_days,
