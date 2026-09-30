@@ -50,6 +50,11 @@ MARKET_METRICS_TABLE = {
     CountrySet.SWE: "swe_market_metrics",
     CountrySet.UK: "uk_market_metrics",
 }
+BY_SECTOR_TABLE = {
+    CountrySet.US: "us_by_sector",
+    CountrySet.SWE: "swe_by_sector",
+    CountrySet.UK: "uk_by_sector",
+}
 
 
 def _table_placeholders(country: CountrySet) -> dict[str, str]:
@@ -58,13 +63,15 @@ def _table_placeholders(country: CountrySet) -> dict[str, str]:
         "tickers": TICKERS_TABLE[country],
         "metrics": METRICS_TABLE[country],
         "market_metrics": MARKET_METRICS_TABLE[country],
+        "by_sector": BY_SECTOR_TABLE[country],
     }
 
 
 def sql_for_countries(template: str) -> dict[CountrySet, str]:
     """Format ``template`` once per country set.
 
-    Placeholders: ``{tickers}``, ``{metrics}``, ``{market_metrics}``.
+    Placeholders: ``{tickers}``, ``{metrics}``, ``{market_metrics}``,
+    ``{by_sector}``.
     """
     return {
         country: template.format(**_table_placeholders(country))

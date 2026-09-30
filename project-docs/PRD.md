@@ -86,6 +86,7 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
                                               |       swe_market_metrics         |
                                               |   UK: uk_tickers, uk_metrics,    |
                                               |       uk_market_metrics          |
+                                              |   + us_/swe_/uk_by_sector        |
                                               +----------------------------------+
 ```
 
@@ -134,6 +135,10 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
   `swe_metrics` / `uk_metrics` (and the matching `*_market_metrics` tables)
   where `trading_date` (`week_start` for `*_market_metrics`) is older than
   one year (`purge_stale_metrics`).
+- **FR-7a Sector trends:** After the retention purge, recompute the
+  `*_by_sector` rows for every week written in this run and prune sector weeks
+  that no longer exist in the metrics tables (§5.7, `refresh_sector_trends`).
+  A failure here is logged and exits non-zero.
 - **FR-8 Observability:** Log per-batch progress, per-ticker results, insert
   and purge counts, and a final summary (total / skipped / fetched / failed
   batches). Exit non-zero on fatal errors (missing `DATABASE_URL`, no metrics
@@ -291,16 +296,50 @@ yfinance; does **not** run on the Saturday cron schedule in v1.
   configurable. Exact default values are **not** frozen in this PRD — they
   belong in application config and a later design RFC.
 
+### 5.7 Sector trend averages (`compute_sector_trends.py`)
+
+Equal-weighted weekly trend summary per sector, from an investor's
+perspective: every company counts once regardless of market cap. Derived
+entirely from stored data — no yfinance calls.
+
+- **FR-27 Source:** Join each country metrics table to its tickers table
+  (`us_metrics` ⋈ `us_tickers`, etc.) and group by `tickers.sector` and
+  `week_start`. Only rows with non-NULL `momentum` and a non-blank `sector`
+  contribute.
+- **FR-28 Sector key:** Normalize `sector` to the yfinance `sectorKey` form
+  (`lower`, trimmed, spaces → `-`) so a display-name fallback such as
+  "Financial Services" merges with `financial-services`.
+- **FR-29 Measures:** Per sector and week store `ticker_count`,
+  `momentum_mean` (average `sma_50 / sma_200`), `momentum_median`,
+  `z_score_mean` (average cross-sectional `z_score`), and `pct_uptrend`
+  (percentage 0–100 of companies with `sma_50 > sma_200`). All averages are
+  equal-weighted. Every sector is stored regardless of size; consumers filter
+  on `ticker_count` when they need a minimum sample.
+- **FR-30 Write semantics:** Each `(country, week)` is replaced atomically
+  (delete the week's rows, insert fresh aggregates, one transaction), so
+  re-runs are idempotent and sectors that lose all tickers disappear.
+- **FR-31 Retention:** Each run deletes `*_by_sector` weeks with no remaining
+  rows in the matching metrics table, so sector history follows the metrics
+  retention window (FR-7) without its own cutoff.
+- **FR-32 Invocation:** Runs as part of the weekly job (FR-7a) for the weeks
+  just written, and standalone via
+  `pipenv run python compute_sector_trends.py [--country us|swe|uk] [--week YYYY-MM-DD]`
+  — default recomputes every stored week for all three country sets; `--week`
+  is normalized to that week's Monday. Run it standalone after
+  `backfill_sma.py` / `backfill_market.py`, which do not refresh sector rows.
+- **FR-33 Observability:** Log scope and a summary line with rows written and
+  rows pruned. Exit non-zero on DB failure.
+
 ## 6. Data Model
 
 Data is partitioned by listing country into three parallel table sets with the
 same column layouts.
 
-| Set | Watchlist | SMA history | Cross-sectional aggregates |
-|-----|-----------|-------------|----------------------------|
-| US stocks | `us_tickers` | `us_metrics` | `us_market_metrics` |
-| Swedish stocks | `swe_tickers` | `swe_metrics` | `swe_market_metrics` |
-| UK stocks | `uk_tickers` | `uk_metrics` | `uk_market_metrics` |
+| Set | Watchlist | SMA history | Cross-sectional aggregates | Sector trends |
+|-----|-----------|-------------|----------------------------|---------------|
+| US stocks | `us_tickers` | `us_metrics` | `us_market_metrics` | `us_by_sector` |
+| Swedish stocks | `swe_tickers` | `swe_metrics` | `swe_market_metrics` | `swe_by_sector` |
+| UK stocks | `uk_tickers` | `uk_metrics` | `uk_market_metrics` | `uk_by_sector` |
 
 **Country routing (seed / refresh / insert):**
 
@@ -364,6 +403,25 @@ bar dates differ (holidays, exchange calendars).
 Primary key on `(market, week_start)`. Rows with `week_start` older
 than one year are deleted on each weekly run (same retention as the metrics
 tables).
+
+### Sector trend tables (`us_by_sector` / `swe_by_sector` / `uk_by_sector`)
+
+Equal-weighted weekly trend averages per sector (§5.7); one row per
+`(sector, week_start)`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `sector` | TEXT | Normalized `tickers.sector` (`sectorKey` form, e.g. `technology`) |
+| `week_start` | DATE | Monday of the snapshot week |
+| `updated_at` | TIMESTAMPTZ | When the row was written |
+| `ticker_count` | INTEGER | Companies contributing (non-NULL `momentum`) |
+| `momentum_mean` | NUMERIC(18,6) | Average `momentum` |
+| `momentum_median` | NUMERIC(18,6) | Median `momentum` |
+| `z_score_mean` | NUMERIC(18,6) | Average `z_score` (NULL z-scores ignored) |
+| `pct_uptrend` | NUMERIC(18,6) | % of companies with `sma_50 > sma_200` (0–100) |
+
+Primary key on `(sector, week_start)`. Weeks absent from the matching metrics
+table are pruned on each run (FR-31).
 
 Deleting a row from `us_tickers`, `swe_tickers`, or `uk_tickers` cascades to all
 of its rows in the matching metrics table.
@@ -530,6 +588,9 @@ Python 3.11+. Key libraries: `yfinance`, `pandas`, `psycopg2-binary`,
 - Market snapshot:
   `SELECT * FROM us_market_metrics ORDER BY trading_date DESC, market LIMIT 10;`
   (and the same against `swe_market_metrics` / `uk_market_metrics`)
+- Sector trends (after migration step 17, fill history once with
+  `pipenv run python compute_sector_trends.py`):
+  `SELECT * FROM us_by_sector WHERE week_start = (SELECT MAX(week_start) FROM us_by_sector) ORDER BY z_score_mean DESC;`
 
 ## 11. Future Considerations (Out of Current Scope)
 

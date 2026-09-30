@@ -88,6 +88,7 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 | `*_tickers` | `symbol` (PK), `company`, `sector`, `industry`, `market`, `exchange_name`, `business_summary`, `updated_at` |
 | `*_metrics` | `id` (PK), `ticker` (FK → matching `*_tickers.symbol`), `company`, `week_start`, `trading_date`, `updated_at`, `currency`, `sma_50`, `sma_200`, `current_price`, `momentum`, `z_score` |
 | `*_market_metrics` | `market`, `week_start`, `updated_at`, `momentum_mean`, `momentum_std` |
+| `*_by_sector` | `sector`, `week_start` (PK together), `updated_at`, `ticker_count`, `momentum_mean`, `momentum_median`, `z_score_mean`, `pct_uptrend` |
 
 `company` on each metrics row is copied from the matching tickers table at fetch time. `currency` is the listing currency code captured per snapshot. Listing `market` lives on the tickers tables and is also stored on `*_market_metrics`. `exchange_name` is the human-readable exchange from yfinance `fullExchangeName`. **`momentum`** is `sma_50 / sma_200`; **`z_score`** is `(momentum - momentum_mean) / momentum_std` using that week's market aggregates. Price and derived columns use `NUMERIC(18, 6)`. Unique on `*_metrics (week_start, ticker)` and `*_market_metrics (market, week_start)`.
 
@@ -197,6 +198,20 @@ Detection-only feature over retained weekly SMA history (PRD §5.6, FR-19 – FR
 | Gaps | Rows with NULL SMAs are skipped; incomplete stage sequences do not emit events |
 | Stage config | `CROSS_MIN_REGIME_WEEKS=4`, `CROSS_CONVERGENCE_WEEKS=3` on `BaseConfig` ([RFC-013](./rfc/RFC-013-cross-detection.md) FR-26) |
 | Persistence | No dedicated detections table in this product pass — computed on demand from retained `*_metrics` |
+
+### Sector trend averages
+
+Equal-weighted weekly trend per sector (PRD §5.7, FR-27 – FR-33).
+
+| Capability | Detail |
+|------------|--------|
+| Status | **Shipped** — [RFC-014](./rfc/RFC-014-sector-trends.md) |
+| Tables | `us_by_sector` / `swe_by_sector` / `uk_by_sector`, one row per `(sector, week_start)` |
+| Grouping | `*_tickers.sector`, normalized to `sectorKey` form (`Financial Services` → `financial-services`) |
+| Measures | `ticker_count`, `momentum_mean`, `momentum_median`, `z_score_mean`, `pct_uptrend` (% with SMA-50 > SMA-200); every company weighted equally |
+| Weekly job | `fetch_sma.py` refreshes the weeks it wrote after the retention purge |
+| Standalone | `compute_sector_trends.py [--country us|swe|uk] [--week YYYY-MM-DD]` — default: all stored weeks, all sets; no yfinance |
+| Retention | Weeks no longer present in `*_metrics` are pruned each run |
 
 ---
 

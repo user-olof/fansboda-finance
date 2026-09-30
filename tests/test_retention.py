@@ -5,6 +5,8 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from config import BaseConfig
 from db.market import DELETE_STALE_MARKET_SQL, purge_stale_market
 from db.metrics import DELETE_STALE_SQL, purge_stale_metrics, retention_cutoff
@@ -21,6 +23,12 @@ def _mock_config(**overrides: object) -> BaseConfig:
     }
     values.update(overrides)
     return BaseConfig(**values)  # type: ignore[arg-type]
+
+
+@pytest.fixture(autouse=True)
+def _stub_sector_trends():
+    with patch("fetch_sma.refresh_sector_trends", return_value=(0, 0)) as mock:
+        yield mock
 
 
 def test_retention_cutoff_subtracts_days_from_utc_today() -> None:
@@ -203,6 +211,45 @@ def test_main_purges_when_all_tickers_already_fresh(caplog) -> None:
     assert "purged_market_metrics=1" in caplog.text
 
 
+def test_main_refreshes_sector_trends_after_purge(_stub_sector_trends) -> None:
+    calls: list[str] = []
+    _stub_sector_trends.side_effect = lambda *a, **k: calls.append("sector") or (0, 0)
+
+    def _purge(*_args):
+        calls.append("purge")
+        return (0, 0)
+
+    with patch("fetch_sma.get_config", return_value=_mock_config()):
+        with patch(
+            "fetch_sma.load_tickers_from_db",
+            return_value=[TickerEntry(symbol="AAA.ST", company="Alpha")],
+        ):
+            with patch(
+                "fetch_sma.filter_stale_tickers",
+                return_value=([], 1, date(2026, 6, 15)),
+            ):
+                with patch("fetch_sma.purge_stale_data", side_effect=_purge):
+                    assert main() == 0
+
+    assert calls == ["purge", "sector"]
+    _stub_sector_trends.assert_called_once_with("postgresql://example", [])
+
+
+def test_main_returns_1_when_sector_trends_fail(_stub_sector_trends) -> None:
+    _stub_sector_trends.side_effect = RuntimeError("db down")
+    with patch("fetch_sma.get_config", return_value=_mock_config()):
+        with patch(
+            "fetch_sma.load_tickers_from_db",
+            return_value=[TickerEntry(symbol="AAA.ST", company="Alpha")],
+        ):
+            with patch(
+                "fetch_sma.filter_stale_tickers",
+                return_value=([], 1, date(2026, 6, 15)),
+            ):
+                with patch("fetch_sma.purge_stale_data", return_value=(0, 0)):
+                    assert main() == 1
+
+
 def test_main_purges_after_fetch_even_when_no_metrics_collected() -> None:
     with patch("fetch_sma.get_config", return_value=_mock_config()):
         with patch(
@@ -229,7 +276,7 @@ def test_main_purges_after_fetch_even_when_no_metrics_collected() -> None:
     mock_purge.assert_called_once_with("postgresql://example", 365)
 
 
-def test_main_fetches_stale_tickers_and_inserts() -> None:
+def test_main_fetches_stale_tickers_and_inserts(_stub_sector_trends) -> None:
     metric_row = MetricRow(
         ticker="AAA.ST",
         company="Alpha",
@@ -290,6 +337,9 @@ def test_main_fetches_stale_tickers_and_inserts() -> None:
     assert market_row.market == "se_market"
     assert market_row.week_start == date(2026, 6, 1)
     assert market_row.momentum_mean == Decimal("0.5")
+    _stub_sector_trends.assert_called_once_with(
+        "postgresql://example", [date(2026, 6, 1)]
+    )
     inserted_rows = mock_insert.call_args[0][1]
     assert inserted_rows[0].company == "Alpha"
     assert inserted_rows[0].currency == "SEK"

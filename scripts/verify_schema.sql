@@ -63,6 +63,18 @@ WHERE c.conrelid IN (
   AND c.contype = 'p'
 ORDER BY 1;
 
+-- us_by_sector / swe_by_sector / uk_by_sector (step 17)
+SELECT table_name, column_name
+FROM information_schema.columns
+WHERE table_schema = 'public'
+  AND table_name IN ('us_by_sector', 'swe_by_sector', 'uk_by_sector')
+  AND column_name IN (
+    'sector', 'week_start', 'ticker_count', 'momentum_mean',
+    'momentum_median', 'z_score_mean', 'pct_uptrend'
+  )
+ORDER BY table_name, column_name;
+-- expect 21 rows
+
 -- unique (week_start, ticker): one row per ticker per calendar week
 SELECT c.conrelid::regclass AS table_name, c.conname
 FROM pg_constraint c

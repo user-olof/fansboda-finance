@@ -22,6 +22,7 @@ MIGRATIONS = [
     REPO_ROOT / "migrate_momentum_zscore.sql",
     REPO_ROOT / "migrate_week_buckets.sql",
     REPO_ROOT / "migrate_add_business_summary.sql",
+    REPO_ROOT / "migrate_add_by_sector_tables.sql",
 ]
 APPLY_MIGRATIONS_SH = REPO_ROOT / "scripts" / "apply_migrations.sh"
 COUNTRY_TABLES = (
@@ -315,3 +316,39 @@ def test_apply_migrations_script_lists_ci_safe_migrations_in_order() -> None:
     assert "migrate_add_tickers_table.sql" not in script.split("LEGACY_MIGRATIONS=", 1)[
         1
     ].split(")", 1)[0]
+
+
+BY_SECTOR_TABLES = ("us_by_sector", "swe_by_sector", "uk_by_sector")
+BY_SECTOR_COLUMNS = (
+    r"\bsector\s+TEXT\s+NOT NULL",
+    r"\bweek_start\s+DATE\s+NOT NULL",
+    r"\bupdated_at\s+TIMESTAMPTZ\s+NOT NULL",
+    r"\bticker_count\s+INTEGER\s+NOT NULL",
+    r"\bmomentum_mean\s+NUMERIC\(18, 6\)",
+    r"\bmomentum_median\s+NUMERIC\(18, 6\)",
+    r"\bz_score_mean\s+NUMERIC\(18, 6\)",
+    r"\bpct_uptrend\s+NUMERIC\(18, 6\)",
+    r"PRIMARY KEY \(sector, week_start\)",
+)
+
+
+def test_schema_and_migration_define_by_sector_tables() -> None:
+    for path in (SCHEMA_SQL, REPO_ROOT / "migrate_add_by_sector_tables.sql"):
+        sql = path.read_text(encoding="utf-8")
+        for table in BY_SECTOR_TABLES:
+            section = sql.split(f"CREATE TABLE IF NOT EXISTS {table} (", 1)[1].split(
+                ");", 1
+            )[0]
+            for pattern in BY_SECTOR_COLUMNS:
+                assert re.search(pattern, section), (path.name, table, pattern)
+
+
+def test_apply_migrations_runs_by_sector_last_in_both_paths() -> None:
+    script = APPLY_MIGRATIONS_SH.read_text(encoding="utf-8")
+    skip_block = script.split('"$has_raw_ratios" == "no"', 1)[1].split("fi\n", 1)[0]
+    assert skip_block.index("migrate_add_business_summary.sql") < skip_block.index(
+        "migrate_add_by_sector_tables.sql"
+    )
+    assert script.rindex("migrate_add_by_sector_tables.sql") > script.rindex(
+        "migrate_add_business_summary.sql"
+    )

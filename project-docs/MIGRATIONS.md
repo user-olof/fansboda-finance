@@ -50,8 +50,9 @@ Steps 1–10 upgrade the **legacy** single-set tables (`tickers` / `metrics` / `
 | 14 | `migrate_momentum_zscore.sql` | Drop `raw_50` / `raw_200` / `raw_mean_*` / `raw_std_*`; add `momentum` / `z_score` on `*_metrics` and `momentum_mean` / `momentum_std` on `*_market_metrics` (PRD §6 / RFC-012) |
 | 15 | `migrate_week_buckets.sql` | Add `week_start` (Monday of `trading_date`) to `*_metrics`, keep only the latest bar per `(ticker, week_start)`, replace `UNIQUE (ticker, trading_date)` with `*_metrics_week_start_ticker_key UNIQUE (week_start, ticker)`; recreate `*_market_metrics` keyed by `(market, week_start)` (PRD §6) |
 | 16 | `migrate_add_business_summary.sql` | Add `business_summary TEXT` to `us_tickers` / `swe_tickers` / `uk_tickers` (yfinance `longBusinessSummary`) |
+| 17 | `migrate_add_by_sector_tables.sql` | Create `us_by_sector` / `swe_by_sector` / `uk_by_sector` — equal-weighted weekly trend averages per sector, PK `(sector, week_start)` (PRD §5.7) |
 
-**Golden Cross / Death Cross detection (PRD §5.6):** Requires **no schema migration**. Detection reads existing `*_metrics` columns (`sma_50`, `sma_200`, `trading_date`) on demand. This product pass adds no detections table and no new columns. Steps 1–16 and an up-to-date `schema.sql` remain sufficient for the data model the feature reads.
+**Golden Cross / Death Cross detection (PRD §5.6):** Requires **no schema migration**. Detection reads existing `*_metrics` columns (`sma_50`, `sma_200`, `trading_date`) on demand. This product pass adds no detections table and no new columns. Steps 1–17 and an up-to-date `schema.sql` remain sufficient for the data model the feature reads.
 
 See [RFC-001](./rfc/RFC-001-data-model.md) and [RFC-012](./rfc/RFC-012-normalized-ratios-market.md).
 
@@ -119,6 +120,14 @@ Run step 14 (`migrate_momentum_zscore.sql`), then
    `pipenv run python seed_tickers.py --update-business-summary` (optional
    `--country us|swe|uk`; one yfinance lookup per ticker).
 
+**After step 16, before sector trends:**
+
+1. Run step 17 (`migrate_add_by_sector_tables.sql`) — safe to repeat.
+2. Deploy code that writes `*_by_sector` (the weekly job fails against a
+   pre-step-17 schema).
+3. Fill history once: `pipenv run python compute_sector_trends.py` (DB only,
+   no yfinance; optional `--country us|swe|uk`).
+
 ## Dev-backfill CI (`scripts/apply_migrations.sh`)
 
 Used by `.github/workflows/dev-backfill.yml` (manual `workflow_dispatch`) against the Neon **dev** branch:
@@ -126,9 +135,9 @@ Used by `.github/workflows/dev-backfill.yml` (manual `workflow_dispatch`) agains
 1. Apply `schema.sql` (country baseline, `CREATE IF NOT EXISTS`).
 2. If legacy `tickers` / `metrics` still exist, run pre-split migrations (steps 1, 4–10; skips destructive steps 2–3).
 3. If `us_metrics` still has `raw_50` (pre-step-14), run steps 11–14 (`migrate_split_us_swe_tables.sql`, `exchange_name`, UK tables, momentum/z_score). Otherwise skip them — they copy `raw_*` columns that step 14 dropped.
-4. Always run steps 15–16 (`migrate_week_buckets.sql`, `migrate_add_business_summary.sql`; no-ops once applied).
+4. Always run steps 15–17 (`migrate_week_buckets.sql`, `migrate_add_business_summary.sql`, `migrate_add_by_sector_tables.sql`; no-ops once applied).
 
-Fresh databases get the target layout from `schema.sql`, so only steps 15–16 run (as no-ops).
+Fresh databases get the target layout from `schema.sql`, so only steps 15–17 run (as no-ops).
 
 ## Verify schema
 

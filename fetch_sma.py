@@ -17,6 +17,7 @@ from decimal import Decimal
 
 import pandas as pd
 
+from compute_sector_trends import refresh_sector_trends
 from config import get_config
 from db.country import CountrySet, country_set_for
 from db.market import upsert_market_stats
@@ -285,6 +286,17 @@ def _run_retention_purge(database_url: str, retention_days: int) -> tuple[int, i
     return metrics_purged, market_metrics_purged
 
 
+def _run_sector_trends(database_url: str, week_starts: set[date]) -> None:
+    written, pruned = refresh_sector_trends(database_url, sorted(week_starts))
+    logger.info(
+        "Sector trends: wrote %d us_/swe_/uk_ by_sector row(s) for %d week(s), "
+        "pruned %d orphan row(s)",
+        written,
+        len(week_starts),
+        pruned,
+    )
+
+
 def main() -> int:
     try:
         config = get_config()
@@ -338,6 +350,11 @@ def main() -> int:
             )
         except Exception:
             logger.exception("Retention purge failed")
+            return 1
+        try:
+            _run_sector_trends(database_url, set())
+        except Exception:
+            logger.exception("Failed to compute sector trends")
             return 1
         logger.info(
             "Summary: total=%d skipped=%d fetched=0 inserted=0 "
@@ -426,6 +443,12 @@ def main() -> int:
         )
     except Exception:
         logger.exception("Retention purge failed")
+        return 1
+
+    try:
+        _run_sector_trends(database_url, week_starts)
+    except Exception:
+        logger.exception("Failed to compute sector trends")
         return 1
 
     logger.info(
