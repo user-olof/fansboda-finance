@@ -26,6 +26,7 @@ def test_truncate_sql_targets_expected_tables() -> None:
     assert "us_by_sector" in sql
     assert "swe_by_sector" in sql
     assert "uk_by_sector" in sql
+    assert "indices" in sql
     assert "RESTART IDENTITY" in sql
 
 

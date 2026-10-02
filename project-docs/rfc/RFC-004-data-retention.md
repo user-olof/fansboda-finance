@@ -12,7 +12,7 @@
 
 After each weekly `fetch_sma.py` run, delete rows from `us_metrics` / `swe_metrics` / `uk_metrics` where `trading_date` (and `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics` where `week_start`) is older than the configured retention window (default 365 days).
 
-UK purge is included via the same `DELETE_STALE_*` lists in `db/metrics.py` and `db/market.py` (country sets from RFC-001); `db/retention.purge_stale_data` orchestrates all six tables.
+UK purge is included via the same `DELETE_STALE_*` lists in `db/metrics.py` and `db/market.py` (country sets from RFC-001); `db/retention.purge_stale_data` orchestrates all six tables plus `indices` (`db/indices.purge_stale_indices`) and returns `(metrics, market_metrics, indices)` counts.
 
 ## Requirements
 
@@ -24,7 +24,7 @@ UK purge is included via the same `DELETE_STALE_*` lists in `db/metrics.py` and 
 | — | Parameterized SQL in `db/metrics.py` and `db/market.py` for all country history/aggregate tables |
 | — | Cutoff uses UTC date |
 | — | Purge aggregate rows with `week_start` &lt; cutoff alongside metrics |
-| FR-42 | **Planned ([RFC-015](./RFC-015-equity-indices.md)):** purge `indices` rows with `week_start` &lt; cutoff using the same window |
+| FR-42 | Purge `indices` rows with `week_start` &lt; cutoff using the same window ([RFC-015](./RFC-015-equity-indices.md)) |
 
 ## Implementation
 
@@ -45,7 +45,7 @@ UK purge is included via the same `DELETE_STALE_*` lists in `db/metrics.py` and 
 def retention_cutoff(retention_days: int, *, today: date | None = None) -> date
 def purge_stale_metrics(database_url: str, retention_days: int) -> int
 def purge_stale_market(database_url: str, retention_days: int) -> int
-def purge_stale_data(database_url: str, retention_days: int) -> tuple[int, int]
+def purge_stale_data(database_url: str, retention_days: int) -> tuple[int, int, int]
 ```
 
 SQL (all three country sets):
@@ -57,6 +57,7 @@ DELETE FROM uk_metrics WHERE trading_date < %s;
 DELETE FROM us_market_metrics WHERE week_start < %s;
 DELETE FROM swe_market_metrics WHERE week_start < %s;
 DELETE FROM uk_market_metrics WHERE week_start < %s;
+DELETE FROM indices WHERE week_start < %s;
 ```
 
 Indexes on each `*_metrics.trading_date` (RFC-001) support efficient deletes. `*_market_metrics` rows are purged by `week_start` (a few rows per market per week, so no extra index); each uses `(market, week_start)` as primary key.

@@ -13,7 +13,7 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 | Watchlist seeding | Load symbols from file, resolve company metadata, upsert into Postgres (optional `--country`) |
 | Rolling retention | Keeps ~1 year of `*_metrics` and `*_market_metrics` history; older rows purged after each weekly run |
 | Sector trends | Equal-weighted weekly trend per sector in `us_by_sector` / `swe_by_sector` / `uk_by_sector` (PRD §5.7) |
-| Equity indices (planned) | Equal-weighted weekly price index per country in `indices`: `US-IDX`, `SWE-IDX`, `UK-IDX` (PRD §5.8) |
+| Equity indices | Equal-weighted weekly price index per country in `indices`: `US-IDX`, `SWE-IDX`, `UK-IDX` (PRD §5.8) |
 | Centralized configuration | `DevConfig` / `ProdConfig` in `config.py`; selected via `APP_ENV` |
 | Zero-cost ops | **One** GCP `e2-micro` (Always Free) + Neon Postgres free tier |
 | CI/CD — production | `pytest` on PR to `main`; deploy to long-lived Production VM on push to `main` |
@@ -67,7 +67,7 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 - Retention purge runs even when all tickers are already fresh (nothing to fetch).
 - Purge counts appear in the weekly job summary log.
 - `*_by_sector` weeks no longer present in `*_metrics` are pruned by the sector refresh.
-- **Planned (RFC-015):** `indices` rows with `week_start` older than 365 days are purged with the same window.
+- `indices` rows with `week_start` older than 365 days are purged with the same window (RFC-015).
 - Cutoff uses UTC date via `metrics_retention_days` (configurable).
 
 ### Schema (US, Swedish, and UK table sets)
@@ -92,7 +92,7 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 | `*_metrics` | `id` (PK), `ticker` (FK → matching `*_tickers.symbol`), `company`, `week_start`, `trading_date`, `updated_at`, `currency`, `sma_50`, `sma_200`, `current_price`, `momentum`, `z_score` |
 | `*_market_metrics` | `market`, `week_start`, `updated_at`, `momentum_mean`, `momentum_std` |
 | `*_by_sector` | `sector`, `week_start` (PK together), `updated_at`, `ticker_count`, `momentum_mean`, `momentum_median`, `z_score_mean`, `pct_uptrend` |
-| `indices` (planned, one shared table) | `ticker`, `week_start` (PK together), `name`, `country`, `updated_at`, `ticker_count`, `avg_return`, `index_price` |
+| `indices` (one shared table) | `ticker`, `week_start` (PK together), `name`, `country`, `updated_at`, `ticker_count`, `avg_return`, `index_price` |
 
 `company` on each metrics row is copied from the matching tickers table at fetch time. `currency` is the listing currency code captured per snapshot. Listing `market` lives on the tickers tables and is also stored on `*_market_metrics`. `exchange_name` is the human-readable exchange from yfinance `fullExchangeName`. **`momentum`** is `sma_50 / sma_200`; **`z_score`** is `(momentum - momentum_mean) / momentum_std` using that week's market aggregates. Price and derived columns use `NUMERIC(18, 6)`. Unique on `*_metrics (week_start, ticker)` and `*_market_metrics (market, week_start)`.
 
@@ -213,13 +213,13 @@ Equal-weighted weekly price index per country set (PRD §5.8, FR-34 – FR-43).
 
 | Capability | Detail |
 |------------|--------|
-| Status | **Planned** — [RFC-015](./rfc/RFC-015-equity-indices.md) (proposed; not implemented) |
+| Status | **Shipped** — [RFC-015](./rfc/RFC-015-equity-indices.md) |
 | Indices | `US-IDX` US Equity Index, `SWE-IDX` OMX Equity Index, `UK-IDX` FTSE Equity Index |
 | Table | `indices` — one shared table, one row per `(ticker, week_start)` |
 | Calculation | Each stock's weekly return = `current_price` this week / previous stored week − 1; index growth = plain average of those returns (equal weight); `index_price = previous × (1 + avg_return)`, base week = 100 |
 | Inclusion | Only stocks with a price in both weeks; weeks with no contributing stocks are skipped |
 | Weekly job | `fetch_sma.py` computes the weeks it wrote, after sector trends (FR-7b) |
-| Standalone | Full rebuild over all retained metrics weeks (optional `--country`); no yfinance |
+| Standalone | `compute_indices.py [--country us|swe|uk]` — full rebuild over all retained metrics weeks; no yfinance |
 | Retention | Rows with `week_start` older than `METRICS_RETENTION_DAYS` are purged weekly (same window as metrics) |
 
 ## Configuration
@@ -242,7 +242,7 @@ All tunables live in **`config.py`** (PRD §5.5):
 | `yf_max_retries` | 3 | 3 | Max retries per batch |
 | `yf_retry_base_seconds` | 5.0 | 5.0 | Exponential backoff base |
 | `yf_name_delay_seconds` | 0.25 | 0.25 | Delay between name lookups |
-| `metrics_retention_days` | 365 | 365 | Retention purge cutoff for `us_metrics` / `swe_metrics` / `uk_metrics` / `*_market_metrics` (and `indices` once implemented) |
+| `metrics_retention_days` | 365 | 365 | Retention purge cutoff for `us_metrics` / `swe_metrics` / `uk_metrics` / `*_market_metrics` and `indices` |
 | `backfill_history_days` | 730 | 730 | Backfill download window |
 | `backfill_batch_size` | 25 | 25 | Backfill batch size |
 | `backfill_batch_delay_seconds` | 5.0 | 5.0 | Delay between backfill batches |

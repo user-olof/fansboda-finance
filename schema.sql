@@ -4,6 +4,7 @@
 -- Metrics hold one row per ticker per calendar week (week_start = Monday);
 -- trading_date is the actual bar date within that week.
 -- *_by_sector holds equal-weighted weekly trend averages per tickers.sector.
+-- indices holds one equal-weighted price index per country set per week.
 
 -- ---------------------------------------------------------------------------
 -- US stocks
@@ -168,4 +169,20 @@ CREATE TABLE IF NOT EXISTS uk_by_sector (
     z_score_mean     NUMERIC(18, 6),
     pct_uptrend      NUMERIC(18, 6),
     PRIMARY KEY (sector, week_start)
+);
+
+-- ---------------------------------------------------------------------------
+-- Equal-weighted country indices (US-IDX / SWE-IDX / UK-IDX)
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS indices (
+    ticker        TEXT            NOT NULL,
+    name          TEXT            NOT NULL,
+    country       TEXT            NOT NULL,
+    week_start    DATE            NOT NULL,
+    updated_at    TIMESTAMPTZ     NOT NULL,
+    ticker_count  INTEGER         NOT NULL,
+    avg_return    NUMERIC(18, 6),
+    index_price   NUMERIC(18, 6)  NOT NULL,
+    PRIMARY KEY (ticker, week_start)
 );

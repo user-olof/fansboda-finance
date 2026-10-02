@@ -17,6 +17,7 @@ from decimal import Decimal
 
 import pandas as pd
 
+from compute_indices import refresh_indices
 from compute_sector_trends import refresh_sector_trends
 from config import get_config
 from db.country import CountrySet, country_set_for
@@ -272,18 +273,21 @@ def upsert_market_for_weeks(
         update_z_scores_for_week(database_url, week_start, country=country)
 
 
-def _run_retention_purge(database_url: str, retention_days: int) -> tuple[int, int]:
-    metrics_purged, market_metrics_purged = purge_stale_data(
+def _run_retention_purge(
+    database_url: str, retention_days: int
+) -> tuple[int, int, int]:
+    metrics_purged, market_metrics_purged, indices_purged = purge_stale_data(
         database_url, retention_days
     )
     logger.info(
-        "Retention purge: deleted %d us_/swe_/uk_ metrics and %d us_/swe_/uk_ "
-        "market_metrics row(s) older than %d days",
+        "Retention purge: deleted %d us_/swe_/uk_ metrics, %d us_/swe_/uk_ "
+        "market_metrics, and %d indices row(s) older than %d days",
         metrics_purged,
         market_metrics_purged,
+        indices_purged,
         retention_days,
     )
-    return metrics_purged, market_metrics_purged
+    return metrics_purged, market_metrics_purged, indices_purged
 
 
 def _run_sector_trends(database_url: str, week_starts: set[date]) -> None:
@@ -294,6 +298,15 @@ def _run_sector_trends(database_url: str, week_starts: set[date]) -> None:
         written,
         len(week_starts),
         pruned,
+    )
+
+
+def _run_indices(database_url: str, week_starts: set[date]) -> None:
+    written = refresh_indices(database_url, sorted(week_starts))
+    logger.info(
+        "Indices: wrote %d US-IDX/SWE-IDX/UK-IDX row(s) from week(s) %s",
+        written,
+        ", ".join(week.isoformat() for week in sorted(week_starts)),
     )
 
 
@@ -345,8 +358,8 @@ def main() -> int:
             len(all_tickers),
         )
         try:
-            metrics_purged, market_metrics_purged = _run_retention_purge(
-                database_url, retention_days
+            metrics_purged, market_metrics_purged, indices_purged = (
+                _run_retention_purge(database_url, retention_days)
             )
         except Exception:
             logger.exception("Retention purge failed")
@@ -358,11 +371,13 @@ def main() -> int:
             return 1
         logger.info(
             "Summary: total=%d skipped=%d fetched=0 inserted=0 "
-            "purged_metrics=%d purged_market_metrics=%d failed_batches=0",
+            "purged_metrics=%d purged_market_metrics=%d purged_indices=%d "
+            "failed_batches=0",
             len(all_tickers),
             skipped_count,
             metrics_purged,
             market_metrics_purged,
+            indices_purged,
         )
         return 0
 
@@ -438,8 +453,8 @@ def main() -> int:
             return 1
 
     try:
-        metrics_purged, market_metrics_purged = _run_retention_purge(
-            database_url, retention_days
+        metrics_purged, market_metrics_purged, indices_purged = (
+            _run_retention_purge(database_url, retention_days)
         )
     except Exception:
         logger.exception("Retention purge failed")
@@ -451,15 +466,24 @@ def main() -> int:
         logger.exception("Failed to compute sector trends")
         return 1
 
+    if week_starts:
+        try:
+            _run_indices(database_url, week_starts)
+        except Exception:
+            logger.exception("Failed to compute indices")
+            return 1
+
     logger.info(
         "Summary: total=%d skipped=%d fetched=%d inserted=%d "
-        "purged_metrics=%d purged_market_metrics=%d failed_batches=%d http_batches=%d",
+        "purged_metrics=%d purged_market_metrics=%d purged_indices=%d "
+        "failed_batches=%d http_batches=%d",
         len(all_tickers),
         skipped_count,
         fetched_count,
         inserted_count,
         metrics_purged,
         market_metrics_purged,
+        indices_purged,
         failed_batches,
         len(batches),
     )

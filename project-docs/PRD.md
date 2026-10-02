@@ -286,7 +286,7 @@ entirely from stored data — no yfinance calls.
 - **FR-33 Observability:** Log scope and a summary line with rows written and
   rows pruned. Exit non-zero on DB failure.
 
-### 5.8 Equal-weighted equity indices (`indices` table)
+### 5.8 Equal-weighted equity indices (`compute_indices.py`, `indices` table)
 
 One synthetic price index per country set, built from the stocks in that
 set's watchlist. Every stock has equal weight. Derived entirely from stored
@@ -324,7 +324,9 @@ set's watchlist. Every stock has equal weight. Derived entirely from stored
   a week overwrites that week's row; weeks are computed in ascending order so
   each week chains from the already-stored previous week.
 - **FR-41 Invocation:** Runs as part of the weekly job (FR-7b) for the weeks
-  just written, and standalone for a full rebuild (optional `--country`).
+  just written (recomputing any later stored weeks so the chain stays
+  consistent), and standalone for a full rebuild via
+  `pipenv run python compute_indices.py [--country us|swe|uk]`.
   A full rebuild starts at the earliest week still in the metrics table, so
   the base week (and therefore index levels, but not weekly returns) moves
   forward as retention purges old metrics.
@@ -617,7 +619,8 @@ Python 3.11+. Key libraries: `yfinance`, `pandas`, `psycopg2-binary`,
 - Sector trends (after migration step 17, fill history once with
   `pipenv run python compute_sector_trends.py`):
   `SELECT * FROM us_by_sector WHERE week_start = (SELECT MAX(week_start) FROM us_by_sector) ORDER BY z_score_mean DESC;`
-- Equity indices:
+- Equity indices (after migration step 18, build history once with
+  `pipenv run python compute_indices.py`):
   `SELECT ticker, week_start, index_price, avg_return, ticker_count FROM indices ORDER BY ticker, week_start DESC;`
 
 ## 11. Future Considerations (Out of Current Scope)

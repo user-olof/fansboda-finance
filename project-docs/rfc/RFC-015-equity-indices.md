@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | **Priority** | P3 |
-| **Status** | **Proposed** (not implemented) |
+| **Status** | **Implemented** |
 | **Depends on** | RFC-001, RFC-003, RFC-004, RFC-014 |
 | **PRD** | §5.1 (FR-7, FR-7b), §5.8 (FR-34–FR-43), §6 |
 | **Feature** | [Equity indices](../FEATURES.md#equity-indices) |
@@ -90,17 +90,19 @@ query. Only `ticker` and `week_start` are runtime values, passed as
 parameters; the table name comes from the `{metrics}` placeholder
 (`sql_for_countries`).
 
-## Design (proposed)
+## Design
 
 | Path | Role |
 |------|------|
 | `migrate_add_indices_table.sql` | Step 18 — `CREATE TABLE IF NOT EXISTS indices` (mirrored in `schema.sql`) |
-| `db/indices.py` | Index definitions (ticker / name / country), parameterized SQL, `compute_index_week`, `upsert_index_row`, `purge_stale_indices` |
-| `compute_indices.py` | `refresh_indices(url, week_starts=None, *, country=None)`; CLI `--country us|swe|uk`; default = full rebuild over every stored metrics week, ascending |
-| `fetch_sma.py` | `_run_indices` after `_run_sector_trends` (FR-7b), both normal and all-fresh paths |
-| `db/retention.py` | Purge `indices` with the metrics cutoff (FR-42) |
+| `equity_index.py` | Pure logic: `INDEX_DEFINITIONS`, `IndexRow`, `build_index_row` (base week / chaining / skip empty week) |
+| `db/indices.py` | Parameterized SQL, `write_index_weeks` (ascending weeks in one transaction, optional `rebuild`), `purge_stale_indices` |
+| `compute_indices.py` | `refresh_indices(url, week_starts=None, *, country=None)` — `None` = full rebuild; a list recomputes every stored week from the earliest given week onward so later rows stay chained; CLI `--country us|swe|uk` (always a full rebuild) |
+| `fetch_sma.py` | `_run_indices` after `_run_sector_trends` (FR-7b) when the run wrote any week; skipped on the all-fresh path |
+| `db/retention.py` | `purge_stale_data` returns `(metrics, market_metrics, indices)`; `indices` purged with the metrics cutoff (FR-42); counts in the job summary (`purged_indices`) |
 | `scripts/apply_migrations.sh` / `scripts/verify_schema.sql` / `db/truncate.py` | Step 18, schema checks, dev truncate |
-| `tests/test_compute_indices.py` | Base week, chaining, equal weighting, missing-price exclusion, gap weeks, empty week, CLI |
+| `tests/test_compute_indices.py` | Base week, chaining, equal weighting, empty week, SQL shape, transaction order, orchestration, CLI |
+| `tests/test_retention.py` / `tests/test_schema.py` | Weekly-job hook, 3-way purge, DDL + migration order |
 
 **Full rebuild:** delete the selected index's rows, then recompute every
 metrics week ascending. The base week becomes the earliest retained metrics
@@ -128,6 +130,10 @@ CREATE TABLE IF NOT EXISTS indices (
 2. Build history once: `pipenv run python compute_indices.py`.
 3. Deploy — the weekly job then appends one row per index per week.
 
+Verified on Postgres 16: equal weighting (+10% / −10% → flat), new listing
+and NULL price excluded, a skipped week chained from the last stored week,
+recompute from an earlier week re-chains later rows, re-runs idempotent.
+
 ## Open questions
 
-- Script name `compute_indices.py` is a proposal (PRD FR-41 does not fix it).
+- None.

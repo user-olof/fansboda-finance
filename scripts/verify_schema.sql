@@ -75,6 +75,19 @@ WHERE table_schema = 'public'
 ORDER BY table_name, column_name;
 -- expect 21 rows
 
+-- indices (step 18)
+SELECT column_name, data_type, is_nullable
+FROM information_schema.columns
+WHERE table_schema = 'public'
+  AND table_name = 'indices'
+ORDER BY ordinal_position;
+-- expect 8 rows
+
+SELECT c.conname
+FROM pg_constraint c
+WHERE c.conrelid = 'public.indices'::regclass
+  AND c.contype = 'p';
+
 -- unique (week_start, ticker): one row per ticker per calendar week
 SELECT c.conrelid::regclass AS table_name, c.conname
 FROM pg_constraint c

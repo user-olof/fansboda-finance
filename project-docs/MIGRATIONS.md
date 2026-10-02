@@ -51,7 +51,7 @@ Steps 1–10 upgrade the **legacy** single-set tables (`tickers` / `metrics` / `
 | 15 | `migrate_week_buckets.sql` | Add `week_start` (Monday of `trading_date`) to `*_metrics`, keep only the latest bar per `(ticker, week_start)`, replace `UNIQUE (ticker, trading_date)` with `*_metrics_week_start_ticker_key UNIQUE (week_start, ticker)`; recreate `*_market_metrics` keyed by `(market, week_start)` (PRD §6) |
 | 16 | `migrate_add_business_summary.sql` | Add `business_summary TEXT` to `us_tickers` / `swe_tickers` / `uk_tickers` (yfinance `longBusinessSummary`) |
 | 17 | `migrate_add_by_sector_tables.sql` | Create `us_by_sector` / `swe_by_sector` / `uk_by_sector` — equal-weighted weekly trend averages per sector, PK `(sector, week_start)` (PRD §5.7) |
-| 18 | `migrate_add_indices_table.sql` | **Planned — file not created yet.** Create the shared `indices` table (`US-IDX` / `SWE-IDX` / `UK-IDX`), PK `(ticker, week_start)` (PRD §5.8 / [RFC-015](./rfc/RFC-015-equity-indices.md)) |
+| 18 | `migrate_add_indices_table.sql` | Create the shared `indices` table (`US-IDX` / `SWE-IDX` / `UK-IDX`), PK `(ticker, week_start)` (PRD §5.8 / [RFC-015](./rfc/RFC-015-equity-indices.md)) |
 
 **Golden Cross / Death Cross detection (PRD §5.6):** Lives in the `fansboda` repo and needs **no schema migration** here — it reads existing `*_metrics` columns (`sma_50`, `sma_200`, `trading_date`).
 
@@ -129,14 +129,15 @@ Run step 14 (`migrate_momentum_zscore.sql`), then
 3. Fill history once: `pipenv run python compute_sector_trends.py` (DB only,
    no yfinance; optional `--country us|swe|uk`).
 
-**After step 17, before equity indices (planned, RFC-015):**
+**After step 17, before equity indices (RFC-015):**
 
 1. Run step 18 (`migrate_add_indices_table.sql`) — safe to repeat.
-2. Deploy code that writes `indices` (the weekly job will fail against a
-   pre-step-18 schema).
-3. Build history once with the standalone index script (DB only, no
-   yfinance). Index levels start at 100 on the earliest retained metrics
-   week; rows older than `METRICS_RETENTION_DAYS` are purged weekly.
+2. Build history once: `pipenv run python compute_indices.py` (DB only, no
+   yfinance; optional `--country us|swe|uk`). Index levels start at 100 on
+   the earliest retained metrics week.
+3. Deploy code that writes `indices` (the weekly job fails against a
+   pre-step-18 schema). Rows older than `METRICS_RETENTION_DAYS` are then
+   purged weekly.
 
 ## Dev-backfill CI (`scripts/apply_migrations.sh`)
 
@@ -145,9 +146,9 @@ Used by `.github/workflows/dev-backfill.yml` (manual `workflow_dispatch`) agains
 1. Apply `schema.sql` (country baseline, `CREATE IF NOT EXISTS`).
 2. If legacy `tickers` / `metrics` still exist, run pre-split migrations (steps 1, 4–10; skips destructive steps 2–3).
 3. If `us_metrics` still has `raw_50` (pre-step-14), run steps 11–14 (`migrate_split_us_swe_tables.sql`, `exchange_name`, UK tables, momentum/z_score). Otherwise skip them — they copy `raw_*` columns that step 14 dropped.
-4. Always run steps 15–17 (`migrate_week_buckets.sql`, `migrate_add_business_summary.sql`, `migrate_add_by_sector_tables.sql`; no-ops once applied).
+4. Always run steps 15–18 (`migrate_week_buckets.sql`, `migrate_add_business_summary.sql`, `migrate_add_by_sector_tables.sql`, `migrate_add_indices_table.sql`; no-ops once applied).
 
-Fresh databases get the target layout from `schema.sql`, so only steps 15–17 run (as no-ops). Step 18 joins this list once it is implemented.
+Fresh databases get the target layout from `schema.sql`, so only steps 15–18 run (as no-ops).
 
 ## Verify schema
 
