@@ -112,24 +112,6 @@ END
 """
 )
 
-LOAD_SMA_HISTORY_SQL = sql_for_countries(
-    """
-SELECT ticker, trading_date, sma_50, sma_200
-FROM {metrics}
-ORDER BY ticker, trading_date
-"""
-)
-
-LOAD_SMA_HISTORY_FOR_SYMBOLS_SQL = sql_for_countries(
-    """
-SELECT ticker, trading_date, sma_50, sma_200
-FROM {metrics}
-WHERE ticker = ANY(%s)
-ORDER BY ticker, trading_date
-"""
-)
-
-
 def retention_cutoff(retention_days: int, *, today: date | None = None) -> date:
     """Return the oldest trading_date to keep (exclusive delete boundary)."""
     anchor = today if today is not None else datetime.now(timezone.utc).date()
@@ -341,33 +323,3 @@ def purge_stale_metrics(database_url: str, retention_days: int) -> int:
         conn.commit()
 
     return deleted
-
-
-def load_sma_history(
-    database_url: str,
-    *,
-    country: CountrySet,
-    symbols: list[str] | None = None,
-) -> dict[str, list[tuple[date, Decimal | None, Decimal | None]]]:
-    """Load ordered SMA-50/200 snapshots for one country set (RFC-013 / FR-19).
-
-    Returns ``{ticker: [(trading_date, sma_50, sma_200), ...]}`` ordered by
-    ``trading_date``. Optional ``symbols`` filters with parameterized ``ANY(%s)``.
-    """
-    if symbols is not None and not symbols:
-        return {}
-
-    with psycopg2.connect(database_url) as conn:
-        with conn.cursor() as cur:
-            if symbols is None:
-                cur.execute(LOAD_SMA_HISTORY_SQL[country])
-            else:
-                cur.execute(LOAD_SMA_HISTORY_FOR_SYMBOLS_SQL[country], (symbols,))
-            rows = cur.fetchall()
-
-    by_ticker: dict[str, list[tuple[date, Decimal | None, Decimal | None]]] = (
-        defaultdict(list)
-    )
-    for ticker, trading_date, sma_50, sma_200 in rows:
-        by_ticker[ticker].append((trading_date, sma_50, sma_200))
-    return dict(by_ticker)

@@ -20,8 +20,8 @@ Lightweight weekly pipeline: yfinance → SMA-50/200 + close → Neon Postgres. 
 
 | Path | Role |
 |------|------|
-| `fetch_sma.py`, `seed_tickers.py`, `backfill_sma.py`, `backfill_market.py`, `refresh_tickers.py`, `detect_crosses.py`, `compute_sector_trends.py` | Job / ad-hoc entrypoints |
-| `symbols.py`, `yfinance_client.py`, `cross_detection.py` | Shared symbol parsing, yfinance I/O, pure cross detection |
+| `fetch_sma.py`, `seed_tickers.py`, `backfill_sma.py`, `backfill_market.py`, `refresh_tickers.py`, `compute_sector_trends.py` | Job / ad-hoc entrypoints |
+| `symbols.py`, `yfinance_client.py` | Shared symbol parsing and yfinance I/O |
 | `config.py` | `BaseConfig`, `DevConfig`, `ProdConfig`, `get_config()` |
 | `models.py` | `TickerEntry`, `MetricRow` |
 | `db/metrics.py`, `db/tickers.py`, `db/sector.py` | Parameterized SQL — no SQL in job scripts |
@@ -41,7 +41,6 @@ Dependencies: **Pipenv only** (`Pipfile` / `Pipfile.lock`). No `requirements.txt
 | `seed_tickers.py` | Load symbols from file, resolve names via yfinance, upsert `us_tickers` / `swe_tickers` / `uk_tickers` (optional `--country us|swe|uk`); one-off `--update-business-summary` fills `business_summary` for stored tickers |
 | `backfill_sma.py` | One-off per country set (`--country us|swe|uk`, optional repeatable `--exchange NAME`): ~730d history, one SMA snapshot per calendar week (last bar of the week), upsert into matching `*_metrics`, upsert `*_market_metrics` |
 | `backfill_market.py` | One-off: recompute `momentum` from SMAs, then `*_market_metrics` + `z_score` (optional `--country`) |
-| `detect_crosses.py` | Ad-hoc Golden / Death Cross detection from retained `*_metrics` (RFC-013); no yfinance; not cron-scheduled |
 | `compute_sector_trends.py` | Equal-weighted weekly trend per sector into `*_by_sector` (RFC-014); called by `fetch_sma.py` for the weeks it wrote, or standalone (`--country`, `--week`); no yfinance |
 
 | Utility | Role |

@@ -20,8 +20,6 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
 - Maintain a rolling one-year history of SMA-50, SMA-200, current price,
   **momentum** (`sma_50 / sma_200`), and cross-sectional **`z_score`** for a
   user-managed watchlist of symbols (one row per ticker per `trading_date`).
-- Detect **Golden Cross** and **Death Cross** processes on that retained weekly
-  SMA history for the US, Swedish, and UK watchlists (see §5.6).
 - Run fully unattended on a weekly schedule (Saturdays).
 - Keep monthly operating cost at ~$0 within GCP Always Free and Neon free tiers.
 - Be resilient to transient data-provider failures (rate limits, timeouts).
@@ -30,16 +28,13 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
 
 ### Non-Goals
 
-- No user-facing UI or API — data is consumed directly from Postgres (and from
-  ad-hoc detection output in §5.6).
+- No user-facing UI or API — data is consumed directly from Postgres.
 - No intraday / real-time quotes; the weekly job runs once weekly (Saturday).
 - No additional technical indicators beyond SMA-50, SMA-200, current price,
   and the derived `momentum` / `z_score` fields in §6 — including no EMA, RSI,
   MACD, and no alternate moving-average windows in v1.
-- No push notifications, alerting, or watchers for cross detections (or other
-  signals).
-- No dedicated detections table or persisted detection history in this product
-  pass — detection is computed on demand from retained `*_metrics` rows.
+- No Golden / Death Cross detection, signals, or alerting — owned by the
+  `fansboda` repo (§5.6).
 - No portfolio, order, or transaction tracking.
 - No authentication/authorization layer (single-owner, infra-level access only).
 
@@ -49,21 +44,12 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
   US, Swedish (`.ST`), and UK (`.L`) symbols and queries the country metrics
   tables (`us_metrics` / `swe_metrics` / `uk_metrics`) to see which stocks are
   above/below their long-term moving averages.
-- **Primary use case — Golden / Death Cross detection:** detect completed
-  **Golden Cross** and **Death Cross** processes from stored weekly
-  `sma_50` / `sma_200` history (no yfinance at detection time). Each pattern
-  is a three-stage process that may span multiple weekly snapshots:
-
-  - **Golden Cross:** (1) downtrend or consolidation — SMA-50 below SMA-200;
-    (2) convergence — the gap narrows as recent prices strengthen; (3)
-    crossover — SMA-50 crosses **above** SMA-200.
-  - **Death Cross:** (1) uptrend or consolidation — SMA-50 above SMA-200;
-    (2) convergence — the gap narrows as recent prices weaken vs the longer
-    trend; (3) crossover — SMA-50 crosses **below** SMA-200.
-
-  Use **`momentum`** and **`z_score`** (vs peers in the same country set /
-  listing `market` on that date via `*_market_metrics`) to rank relative
-  strength for heatmaps; sector views via `*_tickers.sector`.
+- **Primary use case — trend data for downstream analysis:** provide the
+  weekly `sma_50` / `sma_200` history that the `fansboda` repo uses for
+  Golden / Death Cross detection (§5.6). Use **`momentum`** and **`z_score`**
+  (vs peers in the same country set / listing `market` on that date via
+  `*_market_metrics`) to rank relative strength for heatmaps; sector views
+  via `*_by_sector` (§5.7).
 - **Watchlist management:** add or remove symbols by editing `us_tickers`,
   `swe_tickers`, or `uk_tickers` (directly via SQL or by running the seeding
   script).
@@ -87,6 +73,7 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
                                               |   UK: uk_tickers, uk_metrics,    |
                                               |       uk_market_metrics          |
                                               |   + us_/swe_/uk_by_sector        |
+                                              |   + indices (one table)          |
                                               +----------------------------------+
 ```
 
@@ -132,13 +119,16 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
   > existing trading_date`: a newer bar in the same week replaces the row, an
   equal or older bar is ignored, so re-runs are idempotent.
 - **FR-7 Retention purge:** After inserts, delete rows from `us_metrics` /
-  `swe_metrics` / `uk_metrics` (and the matching `*_market_metrics` tables)
-  where `trading_date` (`week_start` for `*_market_metrics`) is older than
-  one year (`purge_stale_metrics`).
+  `swe_metrics` / `uk_metrics` (and the matching `*_market_metrics` tables,
+  plus `indices`) where `trading_date` (`week_start` for `*_market_metrics`
+  and `indices`) is older than one year (`purge_stale_metrics`).
 - **FR-7a Sector trends:** After the retention purge, recompute the
   `*_by_sector` rows for every week written in this run and prune sector weeks
   that no longer exist in the metrics tables (§5.7, `refresh_sector_trends`).
   A failure here is logged and exits non-zero.
+- **FR-7b Equity indices:** After sector trends, compute the `indices` row
+  for each country set for every week written in this run (§5.8). A failure
+  here is logged and exits non-zero.
 - **FR-8 Observability:** Log per-batch progress, per-ticker results, insert
   and purge counts, and a final summary (total / skipped / fetched / failed
   batches). Exit non-zero on fatal errors (missing `DATABASE_URL`, no metrics
@@ -255,46 +245,12 @@ object instead of calling `os.getenv` directly.
 `DevConfig` and `ProdConfig` may override any of the shared defaults where
 environments differ (e.g. more conservative batch delays in production).
 
-### 5.6 Golden Cross & Death Cross detection
+### 5.6 Golden Cross & Death Cross detection — moved to `fansboda`
 
-Detection-only feature over retained weekly SMA history. Does **not** call
-yfinance; does **not** run on the Saturday cron schedule in v1.
-
-- **FR-19 Source of truth:** Read only from the country metrics tables
-  (`us_metrics` / `swe_metrics` / `uk_metrics`), using `sma_50`, `sma_200`, and
-  `trading_date` (ordered per ticker). Do not fetch prices at detection time.
-- **FR-20 MA pair:** Treat SMA-50 as the shorter moving average and SMA-200 as
-  the longer moving average for all stage checks.
-- **FR-21 Golden Cross stages:** A Golden Cross event is emitted only when a
-  ticker completes all three stages in order over retained weekly snapshots
-  (a full process may take multiple weeks):
-
-  1. **Downtrend or consolidation** — shorter MA (SMA-50) sits below longer MA
-     (SMA-200).
-  2. **Convergence** — the gap between them narrows as recent prices
-     strengthen.
-  3. **Crossover** — shorter MA crosses **above** the longer MA.
-
-- **FR-22 Death Cross stages:** A Death Cross event is emitted only when a
-  ticker completes all three stages in order (mirror of Golden Cross):
-
-  1. **Uptrend or consolidation** — shorter MA sits above longer MA.
-  2. **Convergence** — the gap narrows as recent prices weaken vs the longer
-     trend.
-  3. **Crossover** — shorter MA crosses **below** the longer MA.
-
-- **FR-23 Scope:** Support all three country sets. Allow filtering to one
-  country and/or a symbol subset for an ad-hoc run.
-- **FR-24 Consumption:** Provide an ad-hoc runnable entrypoint (CLI or
-  equivalent) that prints human-readable and machine-readable output of
-  completed Golden Cross and Death Cross detections. Do not schedule this on
-  cron in v1.
-- **FR-25 Gaps & incomplete sequences:** Skip rows where `sma_50` or `sma_200`
-  is NULL. Incomplete stage sequences (stages 1–2 without a completed stage 3,
-  or out-of-order history) must not emit an event.
-- **FR-26 Stage config:** Stage windows and numeric thresholds are
-  configurable. Exact default values are **not** frozen in this PRD — they
-  belong in application config and a later design RFC.
+Golden / Death Cross detection is owned by the separate **`fansboda`** repo,
+which reads the `us_metrics` / `swe_metrics` / `uk_metrics` SMA history this
+pipeline produces. This repo has no detection code; FR-19 – FR-26 are retired
+here (numbers are not reused).
 
 ### 5.7 Sector trend averages (`compute_sector_trends.py`)
 
@@ -329,6 +285,56 @@ entirely from stored data — no yfinance calls.
   `backfill_sma.py` / `backfill_market.py`, which do not refresh sector rows.
 - **FR-33 Observability:** Log scope and a summary line with rows written and
   rows pruned. Exit non-zero on DB failure.
+
+### 5.8 Equal-weighted equity indices (`indices` table)
+
+One synthetic price index per country set, built from the stocks in that
+set's watchlist. Every stock has equal weight. Derived entirely from stored
+`*_metrics` rows — no yfinance calls.
+
+- **FR-34 Index definitions:**
+
+  | Country set | Index name | Ticker | Source table |
+  |-------------|------------|--------|--------------|
+  | US | US Equity Index | `US-IDX` | `us_metrics` |
+  | Swedish | OMX Equity Index | `SWE-IDX` | `swe_metrics` |
+  | UK | FTSE Equity Index | `UK-IDX` | `uk_metrics` |
+
+- **FR-35 One row per country per week:** Store exactly one `indices` row
+  per index ticker per `week_start`, keyed `(ticker, week_start)`.
+- **FR-36 Weekly stock return:** For each stock with a non-NULL
+  `current_price` in both week `w` and the index's previous stored week `p`:
+  `r_i = current_price_i(w) / current_price_i(p) − 1`. Stocks without a
+  price in both weeks (new listings, missing weeks, removed tickers) do not
+  contribute to that week.
+- **FR-37 Equal-weighted average growth:** The index's weekly growth is the
+  plain average of the contributing stocks' returns:
+  `avg_return(w) = (1 / N) × Σ r_i`. Every stock counts once regardless of
+  market cap or price level (weights reset every week).
+- **FR-38 Index price:** Chain-link the growth onto the previous value:
+  `index_price(w) = index_price(p) × (1 + avg_return(w))`. The first week
+  for an index (no earlier stored row) is the base week with
+  `index_price = 100` and `avg_return` NULL. Because returns are unit-free,
+  mixed price units within a set (e.g. GBp vs GBP) do not distort the index
+  as long as each stock's own units are consistent over time.
+- **FR-39 Insufficient data:** If no stock contributes in a week (`N = 0`),
+  do not write a row for that week; the next week chains from the last stored
+  row.
+- **FR-40 Idempotent writes:** Upsert on `(ticker, week_start)`. Recomputing
+  a week overwrites that week's row; weeks are computed in ascending order so
+  each week chains from the already-stored previous week.
+- **FR-41 Invocation:** Runs as part of the weekly job (FR-7b) for the weeks
+  just written, and standalone for a full rebuild (optional `--country`).
+  A full rebuild starts at the earliest week still in the metrics table, so
+  the base week (and therefore index levels, but not weekly returns) moves
+  forward as retention purges old metrics.
+- **FR-42 Retention:** Purge `indices` rows with the same window as the
+  metrics tables (FR-7): delete rows whose `week_start` is older than
+  `METRICS_RETENTION_DAYS`. The weekly calculation only needs the previous
+  stored week, so purging old rows does not break the chain.
+- **FR-43 Observability:** Log per index the week, `ticker_count`,
+  `avg_return`, and `index_price`, plus a summary line. Exit non-zero on DB
+  failure.
 
 ## 6. Data Model
 
@@ -422,6 +428,26 @@ Equal-weighted weekly trend averages per sector (§5.7); one row per
 
 Primary key on `(sector, week_start)`. Weeks absent from the matching metrics
 table are pruned on each run (FR-31).
+
+### Index table (`indices`)
+
+A single table shared by all country sets (§5.8); one row per index ticker
+per week.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `ticker` | TEXT | `US-IDX`, `SWE-IDX`, or `UK-IDX` |
+| `name` | TEXT | `US Equity Index`, `OMX Equity Index`, or `FTSE Equity Index` |
+| `country` | TEXT | Country set: `us`, `swe`, or `uk` |
+| `week_start` | DATE | Monday of the index week |
+| `updated_at` | TIMESTAMPTZ | When the row was written |
+| `ticker_count` | INTEGER | Stocks contributing to this week's return (`N`) |
+| `avg_return` | NUMERIC(18,6) | Equal-weighted average weekly return (NULL on the base week) |
+| `index_price` | NUMERIC(18,6) | Chain-linked index level (base week = 100) |
+
+Primary key on `(ticker, week_start)`. Rows with `week_start` older than one
+year are deleted on each weekly run (FR-42, same retention as the metrics
+tables).
 
 Deleting a row from `us_tickers`, `swe_tickers`, or `uk_tickers` cascades to all
 of its rows in the matching metrics table.
@@ -591,18 +617,15 @@ Python 3.11+. Key libraries: `yfinance`, `pandas`, `psycopg2-binary`,
 - Sector trends (after migration step 17, fill history once with
   `pipenv run python compute_sector_trends.py`):
   `SELECT * FROM us_by_sector WHERE week_start = (SELECT MAX(week_start) FROM us_by_sector) ORDER BY z_score_mean DESC;`
+- Equity indices:
+  `SELECT ticker, week_start, index_price, avg_return, ticker_count FROM indices ORDER BY ticker, week_start DESC;`
 
 ## 11. Future Considerations (Out of Current Scope)
 
-- **Golden Cross / Death Cross detection** (stage semantics, ad-hoc
-  consumption, config knobs) is **in scope** via §5.6 — not a future idea.
-  Still out of current scope for that feature:
-  - Push notifications, alerting, or watchers when a cross completes.
-  - Persisting detections in a dedicated table / detection history store.
-  - Exact numeric stage windows and thresholds (defer to a design RFC /
-    config defaults; see FR-26).
+- Golden / Death Cross detection — lives in the `fansboda` repo (§5.6), not
+  here.
 - Additional indicators (EMA, RSI, MACD) or alternate moving-average windows
-  beyond the SMA-50 / SMA-200 pair used by §5.6.
+  beyond the SMA-50 / SMA-200 pair.
 - A read API or dashboard for the `us_metrics` / `swe_metrics` / `uk_metrics`
   data.
 - Gap detection for missed weekly runs.

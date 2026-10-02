@@ -10,9 +10,10 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 | Normalized momentum | Per-ticker `momentum` (`sma_50 / sma_200`) and cross-sectional `z_score` |
 | Market aggregates | Per-`(market, week_start)` `momentum_mean` / `momentum_std` in `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics` |
 | Historical backfill | Bootstrap of rolling weekly SMA snapshots (~2 years), **scoped per country set** (`--country us|swe|uk`) so adding a market later does not re-process others |
-| Golden Cross & Death Cross detection | Ad-hoc detection of completed three-stage Golden / Death Cross processes over retained weekly SMA-50/200 (PRD §5.6; Shipped) |
 | Watchlist seeding | Load symbols from file, resolve company metadata, upsert into Postgres (optional `--country`) |
 | Rolling retention | Keeps ~1 year of `*_metrics` and `*_market_metrics` history; older rows purged after each weekly run |
+| Sector trends | Equal-weighted weekly trend per sector in `us_by_sector` / `swe_by_sector` / `uk_by_sector` (PRD §5.7) |
+| Equity indices (planned) | Equal-weighted weekly price index per country in `indices`: `US-IDX`, `SWE-IDX`, `UK-IDX` (PRD §5.8) |
 | Centralized configuration | `DevConfig` / `ProdConfig` in `config.py`; selected via `APP_ENV` |
 | Zero-cost ops | **One** GCP `e2-micro` (Always Free) + Neon Postgres free tier |
 | CI/CD — production | `pytest` on PR to `main`; deploy to long-lived Production VM on push to `main` |
@@ -23,7 +24,7 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 ## Users & use cases
 
 - **Primary user:** project owner with personal watchlists of US, Swedish (`.ST`), and UK (`.L`) symbols; may also query country metrics tables to see which stocks are above/below their long-term moving averages.
-- **Primary use case — Golden / Death Cross detection:** detect completed **Golden Cross** and **Death Cross** three-stage processes from stored weekly `sma_50` / `sma_200` history (no yfinance at detection time; PRD §5.6). Use **`momentum`**, **`z_score`**, and `*_market_metrics` (`momentum_mean` / `momentum_std`) to rank tickers relative to peers in the same country set in each week (cross-sectional normalization for heatmaps; sector views via `*_tickers.sector`).
+- **Primary use case — trend data for downstream analysis:** weekly `sma_50` / `sma_200` history consumed by the `fansboda` repo for Golden / Death Cross detection (PRD §5.6). Use **`momentum`**, **`z_score`**, and `*_market_metrics` (`momentum_mean` / `momentum_std`) to rank tickers relative to peers in the same country set in each week (cross-sectional normalization for heatmaps; sector views via `*_tickers.sector`).
 - **Watchlist management:** add or remove symbols via SQL on `us_tickers` / `swe_tickers` / `uk_tickers`, or by running `seed_tickers.py` (optionally `--country us|swe|uk` to touch only one set).
 
 ---
@@ -65,6 +66,8 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 - After each weekly run, `us_metrics` / `swe_metrics` / `uk_metrics` and matching `*_market_metrics` rows with `trading_date` / `week_start` older than **365 days** are deleted (`db/retention.py`).
 - Retention purge runs even when all tickers are already fresh (nothing to fetch).
 - Purge counts appear in the weekly job summary log.
+- `*_by_sector` weeks no longer present in `*_metrics` are pruned by the sector refresh.
+- **Planned (RFC-015):** `indices` rows with `week_start` older than 365 days are purged with the same window.
 - Cutoff uses UTC date via `metrics_retention_days` (configurable).
 
 ### Schema (US, Swedish, and UK table sets)
@@ -89,6 +92,7 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 | `*_metrics` | `id` (PK), `ticker` (FK → matching `*_tickers.symbol`), `company`, `week_start`, `trading_date`, `updated_at`, `currency`, `sma_50`, `sma_200`, `current_price`, `momentum`, `z_score` |
 | `*_market_metrics` | `market`, `week_start`, `updated_at`, `momentum_mean`, `momentum_std` |
 | `*_by_sector` | `sector`, `week_start` (PK together), `updated_at`, `ticker_count`, `momentum_mean`, `momentum_median`, `z_score_mean`, `pct_uptrend` |
+| `indices` (planned, one shared table) | `ticker`, `week_start` (PK together), `name`, `country`, `updated_at`, `ticker_count`, `avg_return`, `index_price` |
 
 `company` on each metrics row is copied from the matching tickers table at fetch time. `currency` is the listing currency code captured per snapshot. Listing `market` lives on the tickers tables and is also stored on `*_market_metrics`. `exchange_name` is the human-readable exchange from yfinance `fullExchangeName`. **`momentum`** is `sma_50 / sma_200`; **`z_score`** is `(momentum - momentum_mean) / momentum_std` using that week's market aggregates. Price and derived columns use `NUMERIC(18, 6)`. Unique on `*_metrics (week_start, ticker)` and `*_market_metrics (market, week_start)`.
 
@@ -184,20 +188,8 @@ pipenv run python backfill_sma.py --country us
 
 ### Golden Cross & Death Cross detection
 
-Detection-only feature over retained weekly SMA history (PRD §5.6, FR-19 – FR-26).
-
-| Capability | Detail |
-|------------|--------|
-| Status | **Shipped** (PRD §5.6) — [RFC-013](./rfc/RFC-013-cross-detection.md) |
-| Mode | Detection-only; not cron-scheduled; no alerts / push / watchers |
-| Golden stages | (1) SMA-50 below SMA-200 → (2) convergence → (3) SMA-50 crosses **above** SMA-200 |
-| Death stages | (1) SMA-50 above SMA-200 → (2) convergence → (3) SMA-50 crosses **below** SMA-200 |
-| Source of truth | Country `*_metrics` only (`sma_50`, `sma_200`, `trading_date`); no yfinance at detection time |
-| Scope | US / SWE / UK; optional country and/or symbol filters for an ad-hoc run |
-| Consumption | Ad-hoc CLI `detect_crosses.py` with `--pattern` / `--country` / `--symbols` and `table` / `json` / `csv` output |
-| Gaps | Rows with NULL SMAs are skipped; incomplete stage sequences do not emit events |
-| Stage config | `CROSS_MIN_REGIME_WEEKS=4`, `CROSS_CONVERGENCE_WEEKS=3` on `BaseConfig` ([RFC-013](./rfc/RFC-013-cross-detection.md) FR-26) |
-| Persistence | No dedicated detections table in this product pass — computed on demand from retained `*_metrics` |
+Not part of this repo — owned by **`fansboda`**, which reads the `*_metrics`
+SMA history produced here (PRD §5.6).
 
 ### Sector trend averages
 
@@ -214,6 +206,21 @@ Equal-weighted weekly trend per sector (PRD §5.7, FR-27 – FR-33).
 | Retention | Weeks no longer present in `*_metrics` are pruned each run |
 
 ---
+
+### Equity indices
+
+Equal-weighted weekly price index per country set (PRD §5.8, FR-34 – FR-43).
+
+| Capability | Detail |
+|------------|--------|
+| Status | **Planned** — [RFC-015](./rfc/RFC-015-equity-indices.md) (proposed; not implemented) |
+| Indices | `US-IDX` US Equity Index, `SWE-IDX` OMX Equity Index, `UK-IDX` FTSE Equity Index |
+| Table | `indices` — one shared table, one row per `(ticker, week_start)` |
+| Calculation | Each stock's weekly return = `current_price` this week / previous stored week − 1; index growth = plain average of those returns (equal weight); `index_price = previous × (1 + avg_return)`, base week = 100 |
+| Inclusion | Only stocks with a price in both weeks; weeks with no contributing stocks are skipped |
+| Weekly job | `fetch_sma.py` computes the weeks it wrote, after sector trends (FR-7b) |
+| Standalone | Full rebuild over all retained metrics weeks (optional `--country`); no yfinance |
+| Retention | Rows with `week_start` older than `METRICS_RETENTION_DAYS` are purged weekly (same window as metrics) |
 
 ## Configuration
 
@@ -235,12 +242,10 @@ All tunables live in **`config.py`** (PRD §5.5):
 | `yf_max_retries` | 3 | 3 | Max retries per batch |
 | `yf_retry_base_seconds` | 5.0 | 5.0 | Exponential backoff base |
 | `yf_name_delay_seconds` | 0.25 | 0.25 | Delay between name lookups |
-| `metrics_retention_days` | 365 | 365 | Retention purge cutoff for `us_metrics` / `swe_metrics` / `uk_metrics` / `*_market_metrics` |
+| `metrics_retention_days` | 365 | 365 | Retention purge cutoff for `us_metrics` / `swe_metrics` / `uk_metrics` / `*_market_metrics` (and `indices` once implemented) |
 | `backfill_history_days` | 730 | 730 | Backfill download window |
 | `backfill_batch_size` | 25 | 25 | Backfill batch size |
 | `backfill_batch_delay_seconds` | 5.0 | 5.0 | Delay between backfill batches |
-| `cross_min_regime_weeks` | 4 | 4 | Min consecutive valid weeks in stage-1 regime before crossover (RFC-013) |
-| `cross_convergence_weeks` | 3 | 3 | Convergence lookback ending at last regime week; must be ≤ regime weeks |
 
 `DevConfig` and `ProdConfig` may override shared defaults per environment.
 
@@ -367,14 +372,11 @@ Explicitly **not** part of fansboda-finance (PRD §2, §11), except where noted:
 
 - User-facing UI or read API
 - Intraday or real-time quotes (weekly Saturday job only)
-- Additional indicators (EMA, RSI, MACD) or alternate moving-average windows beyond the SMA-50 / SMA-200 pair used by §5.6
-- Push notifications, alerting, or watchers when a cross completes (or for other signals)
-- Dedicated detections table / persisted detection history in this product pass (detection is on-demand from `*_metrics`)
+- Additional indicators (EMA, RSI, MACD) or alternate moving-average windows beyond the SMA-50 / SMA-200 pair
+- Golden / Death Cross detection, signals, or alerting — owned by the `fansboda` repo (PRD §5.6)
 - Portfolio, order, or transaction tracking
 - Application authentication / authorization
 - Gap detection for missed weekly runs
 - Dashboard for `us_metrics` / `swe_metrics` / `uk_metrics` data
-
-**In scope / shipped:** Golden Cross & Death Cross *detection* via PRD §5.6 (FR-19 – FR-26) — see the pipeline section above. Stage-window defaults are in [RFC-013](./rfc/RFC-013-cross-detection.md) (FR-26); CLI is `detect_crosses.py`.
 
 See PRD §11 for future considerations that may be revisited later.

@@ -7,8 +7,6 @@ import pytest
 
 from config import (
     DEFAULT_BACKFILL_BATCH_SIZE,
-    DEFAULT_CROSS_CONVERGENCE_WEEKS,
-    DEFAULT_CROSS_MIN_REGIME_WEEKS,
     DEFAULT_METRICS_RETENTION_DAYS,
     DEFAULT_YF_BATCH_SIZE,
     DevConfig,
@@ -32,8 +30,6 @@ def test_dev_config_loads_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.yf_batch_size == DEFAULT_YF_BATCH_SIZE
     assert config.metrics_retention_days == DEFAULT_METRICS_RETENTION_DAYS
     assert config.backfill_batch_size == DEFAULT_BACKFILL_BATCH_SIZE
-    assert config.cross_min_regime_weeks == DEFAULT_CROSS_MIN_REGIME_WEEKS
-    assert config.cross_convergence_weeks == DEFAULT_CROSS_CONVERGENCE_WEEKS
 
 
 def test_dev_config_applies_env_overrides(
@@ -42,28 +38,12 @@ def test_dev_config_applies_env_overrides(
     monkeypatch.setenv("DATABASE_URL", "postgresql://dev")
     monkeypatch.setenv("YF_BATCH_SIZE", "10")
     monkeypatch.setenv("METRICS_RETENTION_DAYS", "180")
-    monkeypatch.setenv("CROSS_MIN_REGIME_WEEKS", "5")
-    monkeypatch.setenv("CROSS_CONVERGENCE_WEEKS", "2")
 
     with patch("dotenv.load_dotenv"):
         config = DevConfig.load()
 
     assert config.yf_batch_size == 10
     assert config.metrics_retention_days == 180
-    assert config.cross_min_regime_weeks == 5
-    assert config.cross_convergence_weeks == 2
-
-
-def test_cross_windows_validation_rejects_convergence_gt_regime(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("DATABASE_URL", "postgresql://dev")
-    monkeypatch.setenv("CROSS_MIN_REGIME_WEEKS", "3")
-    monkeypatch.setenv("CROSS_CONVERGENCE_WEEKS", "4")
-
-    with patch("dotenv.load_dotenv"):
-        with pytest.raises(ValueError, match="cross_convergence_weeks"):
-            DevConfig.load()
 
 
 def test_dev_config_requires_database_url(
