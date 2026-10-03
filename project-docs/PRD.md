@@ -34,7 +34,8 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
   and the derived `momentum` / `z_score` fields in §6 — including no EMA, RSI,
   MACD, and no alternate moving-average windows in v1.
 - No Golden / Death Cross detection, signals, or alerting — owned by the
-  `fansboda` repo (§5.6).
+  `fansboda` repo (§5.6). The only notification this repo sends is the
+  data-quality email for implausible price moves (§5.9).
 - No portfolio, order, or transaction tracking.
 - No authentication/authorization layer (single-owner, infra-level access only).
 
@@ -112,9 +113,24 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
   matching `*_market_metrics` row, then set each ticker's **`z_score`** =
   `(momentum - momentum_mean) / momentum_std` (NULL when `momentum` or
   aggregates are missing, or `momentum_std` is zero).
+- **FR-5a Weekly growth from one adjusted series:** From the same downloaded
+  (split- and dividend-adjusted) series, find the ticker's last bar of the
+  **previous calendar week** (`week_start − 7 days`) and compute, using only
+  closes up to each bar:
+  - `price_growth = close(this bar) / close(previous-week bar) − 1`
+  - `sma_50_growth = sma_50(this bar) / sma_50(previous-week bar) − 1`
+  - `sma_200_growth = sma_200(this bar) / sma_200(previous-week bar) − 1`
+
+  Each is NULL when the previous week has no bar, the earlier value is
+  missing or zero, or there are too few closes for that SMA at the
+  previous-week bar. Because both sides come from one consistently adjusted
+  download, a split or dividend between two weekly fetches cannot create a
+  fake jump — unlike dividing this week's stored row by last week's stored
+  row, which were adjusted on different days. No extra yfinance calls.
 - **FR-6 Insert:** Write one row per ticker per calendar week into
   `us_metrics`, `swe_metrics`, or `uk_metrics` (`insert_metrics`), keyed by
-  `week_start` (Monday of `trading_date`), including `momentum` and `z_score`.
+  `week_start` (Monday of `trading_date`), including `momentum`, `z_score`,
+  and the FR-5a growth columns.
   Use `ON CONFLICT (ticker, week_start) DO UPDATE … WHERE EXCLUDED.trading_date
   > existing trading_date`: a newer bar in the same week replaces the row, an
   equal or older bar is ignored, so re-runs are idempotent.
@@ -129,6 +145,8 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
 - **FR-7b Equity indices:** After sector trends, compute the `indices` row
   for each country set for every week written in this run (§5.8). A failure
   here is logged and exits non-zero.
+- **FR-7c Outlier email:** After the indices, email newly detected
+  implausible weekly moves in the weeks written this run (§5.9).
 - **FR-8 Observability:** Log per-batch progress, per-ticker results, insert
   and purge counts, and a final summary (total / skipped / fetched / failed
   batches). Exit non-zero on fatal errors (missing `DATABASE_URL`, no metrics
@@ -184,8 +202,16 @@ Saturday schedule.
   `uk_metrics` with the same week upsert as FR-6, so interrupted runs can
   resume without duplicates and a week holding an older (mid-week) bar is
   upgraded to the week's last bar.
+- **FR-15a Weekly growth:** Compute `price_growth`, `sma_50_growth`, and
+  `sma_200_growth` for every snapshot exactly as FR-5a, from the same
+  downloaded series (each snapshot vs the last bar of the previous calendar
+  week).
 - **FR-16 Skip existing:** Before insert, skip `(ticker, trading_date)` pairs
-  already present in the matching country metrics table.
+  already present in the matching country metrics table — except that rows
+  whose growth columns are NULL get those three columns filled from the
+  backfill's computed values (no other column changes). Re-running
+  `backfill_sma.py --country …` therefore populates growth on history stored
+  before FR-5a existed.
 - **FR-17 Observability:** Log per-batch generated, new, inserted, and
   skipped-existing counts plus a final summary.
 - **FR-18 Country-set scope:** Backfill must accept a required country-set
@@ -241,6 +267,11 @@ object instead of calling `os.getenv` directly.
 | `backfill_history_days` | 730 | 730 | Days of OHLCV history per backfill batch download |
 | `backfill_batch_size` | 25 | 25 | Symbols per yfinance batch during backfill |
 | `backfill_batch_delay_seconds` | 5.0 | 5.0 | Delay between backfill batches |
+| `outlier_max_growth` | 4.0 | 4.0 | Weekly growth above this (more than ×5) is an outlier (FR-37b) |
+| `outlier_min_growth` | −0.8 | −0.8 | Weekly growth below this (below ÷5) is an outlier (FR-37b) |
+| `alert_email_enabled` | `false` | `true` | Send the outlier email (FR-51); when off, log it instead |
+| `alert_email_from` | from `.env` (optional) | from VM `.env` (required when enabled) | Workspace mailbox the service account sends as (FR-49) |
+| `alert_email_to` | from `.env` (optional) | from VM `.env` (required when enabled) | Owner's work email address (FR-49) |
 
 `DevConfig` and `ProdConfig` may override any of the shared defaults where
 environments differ (e.g. more conservative batch delays in production).
@@ -308,16 +339,39 @@ yfinance calls.
   Key `(ticker, trading_date)`; at most one row per ticker per calendar week
   — when a later bar in the same week is computed (e.g. a mid-week manual run
   followed by the Saturday job), it replaces that week's row, mirroring FR-6.
-- **FR-36 Contributing stocks:** A stock contributes to week `w` when it has
-  positive `current_price`, `sma_50`, and `sma_200` in both week `w` and the
-  index's previous stored week `p`. The same set of `N` stocks drives all
-  three levels, so they stay comparable. New listings, missing weeks,
-  incomplete SMAs, and removed tickers do not contribute that week.
-- **FR-37 Equal-weighted growth per level:** For each measure
-  `x ∈ {current_price, sma_50, sma_200}`, the index's weekly growth is the
-  plain average of the contributing stocks' growth in that measure:
-  `g_x(w) = (1 / N) × Σ (x_i(w) / x_i(p) − 1)`. Every stock counts once
-  regardless of market cap or price level (weights reset every week).
+- **FR-36 Contributing stocks:** A stock contributes to week `w` when its
+  week-`w` metrics row has positive `current_price`, `sma_50`, and `sma_200`
+  and non-NULL `price_growth`, `sma_50_growth`, and `sma_200_growth` (FR-5a).
+  The same set of `N` stocks drives all three levels, so they stay
+  comparable. New listings, incomplete SMAs, and stocks without a
+  previous-week bar do not contribute that week.
+- **FR-37 Equal-weighted growth per level:** For each measure, the index's
+  weekly growth is the plain average of the contributing stocks' stored
+  growth: `g_price(w) = (1 / N) × Σ price_growth_i(w)`, and likewise
+  `g_sma_50` from `sma_50_growth` and `g_sma_200` from `sma_200_growth`.
+  Every stock counts once regardless of market cap or price level (weights
+  reset every week). Using the stored growth (not a ratio of two stored rows)
+  keeps splits and dividends between weekly fetches from distorting the
+  index.
+- **FR-37a Gap weeks:** The growth columns cover one calendar week. If the
+  index's previous stored week `p` is not the previous calendar week (a week
+  in between had no contributing stocks), that week instead uses the ratio of
+  stored rows between `p` and `w`
+  (`g_x = (1 / N) × Σ (x_i(w) / x_i(p) − 1)`, over stocks with positive
+  values in both weeks).
+- **FR-37b Outlier guard:** A stock-week is an **outlier** when any of its
+  three weekly growth values (FR-5a, or the FR-37a ratio in a gap week) is
+  above `outlier_max_growth` (default `4.0`, i.e. more than ×5) or below
+  `outlier_min_growth` (default `−0.8`, i.e. below ÷5). Outliers are excluded
+  from that week's contributing set for all three levels (and from `N`), so
+  one broken series — typically a split Yahoo failed to adjust, e.g.
+  `WYLD.ST` 1:500 on 2025-12-05 — cannot move the index. The exclusion is
+  per week: the stock contributes again in later weeks whose growth is within
+  the bounds. A genuine ×5 move is also excluded; with equal weights across
+  hundreds of stocks that bias is negligible. Smaller residual SMA drift
+  after an unadjusted split (SMA growth below ×5 in the following weeks) is
+  not caught; fixing the series itself is §11 future work. Base weeks
+  (FR-39) have no growth and are not guarded.
 - **FR-38 Index levels:** Chain-link each level onto its previous value:
   `level_x(w) = level_x(p) × (1 + g_x(w))`, stored as the row's
   `current_price`, `sma_50`, and `sma_200`.
@@ -354,8 +408,49 @@ yfinance calls.
   `METRICS_RETENTION_DAYS`. The weekly calculation only needs the previous
   stored week, so purging old rows does not break the chain.
 - **FR-45 Observability:** Log per index the `trading_date`, `ticker_count`,
-  the three levels, and `momentum`, plus a summary line. Exit non-zero on DB
-  failure.
+  the three levels, and `momentum`, plus a summary line. Log one `WARNING`
+  per excluded outlier (country, ticker, `trading_date`, the three growth
+  values) and the outlier count per index. Exit non-zero on DB failure.
+
+### 5.9 Data-quality email (implausible price moves)
+
+The owner is told by email when a stock makes an implausible weekly move, so
+broken Yahoo series are noticed without reading logs or spotting odd index
+levels. Outliers are derived from stored `*_metrics` rows with the FR-37b
+thresholds — no extra table and no extra yfinance calls.
+
+- **FR-46 Trigger:** Only the weekly job sends email (FR-7c), once per run,
+  after the indices step. Standalone `compute_indices.py`, `backfill_sma.py`,
+  and `backfill_market.py` only log outliers (FR-45) and never email.
+- **FR-47 Scope — new outliers only:** The email lists outlier stock-weeks
+  (FR-37b) in the weeks written this run whose same stock was **not** an
+  outlier in the previous calendar week, so a persistent problem is reported
+  once rather than every Saturday. No outliers → no email (no "all clear"
+  message). The email also states how many continuing outliers were left
+  out.
+- **FR-48 Content:** Plain text. Subject:
+  `fansboda-finance: <n> implausible weekly move(s), week of <week_start>`.
+  Per outlier: country set, ticker, company, `trading_date`, previous-week
+  and current close, `price_growth`, `sma_50_growth`, `sma_200_growth`, which
+  bound was crossed, and a note that the stock was excluded from that week's
+  index. Footer: the active thresholds and the run's UTC timestamp. No
+  credentials or connection strings in the body.
+- **FR-49 Delivery — Gmail API via Workspace domain-wide delegation:**
+  Send with the Gmail API (`users.messages.send`, scope
+  `https://www.googleapis.com/auth/gmail.send`) **from** a Google Workspace
+  mailbox (`alert_email_from`) **to** the owner's work address
+  (`alert_email_to`). The VM's attached service account authenticates
+  keylessly: it signs its delegation JWT through the IAM Credentials
+  `signJwt` API using its metadata-server token, with `subject` =
+  `alert_email_from`. No JSON key, OAuth refresh token, or SMTP password is
+  stored anywhere. One-time setup is in §8.2.
+- **FR-50 Failure handling:** A send failure (auth, quota, network) is logged
+  as `ERROR` with the outlier list in the log, and does not fail the run or
+  roll back data. Sending is retried with the same exponential backoff as
+  yfinance (FR-4) for transient errors.
+- **FR-51 Environments:** Sending is controlled by `alert_email_enabled`
+  (dev default off, prod default on). When disabled, the job logs the email
+  subject and body instead of sending.
 
 ## 6. Data Model
 
@@ -407,6 +502,9 @@ One row per ticker per calendar week (`week_start`) within that country set.
 | `current_price` | NUMERIC(18,6) | Adjusted close on `trading_date` |
 | `momentum` | NUMERIC(18,6) | `sma_50 / sma_200` |
 | `z_score` | NUMERIC(18,6) | `(momentum - momentum_mean) / momentum_std` using that week's matching `*_market_metrics` aggregates |
+| `price_growth` | NUMERIC(18,6) | Close growth vs the last bar of the previous calendar week, from one adjusted series (FR-5a) |
+| `sma_50_growth` | NUMERIC(18,6) | SMA-50 growth over the same period (FR-5a) |
+| `sma_200_growth` | NUMERIC(18,6) | SMA-200 growth over the same period (FR-5a) |
 
 Unique constraint on `(week_start, ticker)`. Each week adds one row per
 ticker; a later bar in the same week replaces it (FR-6). Rows with
@@ -462,7 +560,7 @@ A single table shared by all country sets (§5.8), shaped like the
 | `country` | TEXT | Country set: `us`, `swe`, or `uk` |
 | `trading_date` | DATE | Latest `trading_date` among the contributing stocks that week |
 | `updated_at` | TIMESTAMPTZ | When the row was written |
-| `ticker_count` | INTEGER | Stocks contributing this week (`N`) |
+| `ticker_count` | INTEGER | Stocks contributing this week (`N`), after excluding outliers (FR-37b) |
 | `current_price` | NUMERIC(18,6) | Equal-weighted price index level (base week = 100) |
 | `sma_50` | NUMERIC(18,6) | Equal-weighted SMA-50 index level (base = 100 × average `sma_50 / current_price`) |
 | `sma_200` | NUMERIC(18,6) | Equal-weighted SMA-200 index level (base = 100 × average `sma_200 / current_price`) |
@@ -542,7 +640,28 @@ history and from burning yfinance quota on sets that are already complete.
   (`pipenv install --deploy`), and writes the VM `.env` from the `DATABASE_URL`
   secret via `gcloud compute scp`.
 - Required GitHub secrets: `GCP_PROJECT_ID`, `GCP_ZONE`, `GCP_INSTANCE_NAME`,
-  `DATABASE_URL`, `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_DEPLOY_SERVICE_ACCOUNT`.
+  `DATABASE_URL`, `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_DEPLOY_SERVICE_ACCOUNT`,
+  `ALERT_EMAIL_FROM`, `ALERT_EMAIL_TO` (the last two in the **`production`**
+  environment; written to the VM `.env` on deploy, never committed).
+
+### Outlier email setup (Gmail API, one-time)
+
+Keyless delivery for FR-49, done outside the repo:
+
+1. **GCP project:** enable the **Gmail API** and the **IAM Service Account
+   Credentials API**.
+2. **VM service account:** grant it `roles/iam.serviceAccountTokenCreator`
+   **on itself** (so it can call `signJwt` for its own identity). The VM's
+   access scopes must allow IAM calls (`cloud-platform`).
+3. **Google Workspace admin:** under *Security → API controls → Domain-wide
+   delegation*, add the VM service account's **client ID** with exactly the
+   scope `https://www.googleapis.com/auth/gmail.send`.
+4. **Sender mailbox:** use a Workspace user (e.g. a dedicated
+   `noreply@` account, or the owner's own work account) as
+   `ALERT_EMAIL_FROM`; set `ALERT_EMAIL_TO` to the owner's work address.
+5. **Verify:** after deploy, a manual dry run on the VM with
+   `alert_email_enabled` on sends a test message (implementation provides a
+   test entrypoint; never trigger the full weekly job just to test email).
 
 ### Deploy authentication (GitHub OIDC JWT)
 
@@ -600,15 +719,18 @@ Notes:
   following least-privilege.
 - The VM's **attached** service account (separate from the deploy SA) is the
   runtime identity for workloads on that instance. It needs no special GCP roles
-  for the weekly job itself, since `fetch_sma.py` only makes outbound calls
-  (yfinance, Neon) using `DATABASE_URL` from `.env`.
+  for data collection, since `fetch_sma.py` only makes outbound calls
+  (yfinance, Neon) using `DATABASE_URL` from `.env`. For the outlier email
+  it needs only `roles/iam.serviceAccountTokenCreator` on itself plus the
+  Workspace domain-wide delegation grant above — still no key file.
 - Do not create or store JSON keys for the deploy service account; OIDC JWT via
   WIF is the only supported deploy auth path.
 
 ## 9. Dependencies
 
 Python 3.11+. Key libraries: `yfinance`, `pandas`, `psycopg2-binary`,
-`python-dotenv`. Dependencies are pinned via `Pipfile`/`Pipfile.lock`
+`python-dotenv`, `google-auth` (+ `requests`) for keyless Gmail API delivery
+(§5.9). Dependencies are pinned via `Pipfile`/`Pipfile.lock`
 (`requirements.txt` provided as an export).
 
 ## 10. Operational Notes
@@ -653,3 +775,8 @@ Python 3.11+. Key libraries: `yfinance`, `pandas`, `psycopg2-binary`,
 - A read API or dashboard for the `us_metrics` / `swe_metrics` / `uk_metrics`
   data.
 - Gap detection for missed weekly runs.
+- Further corporate-action handling beyond FR-5a and the FR-37b outlier
+  guard: recording splits from yfinance (`actions=True`) in a
+  corporate-actions table, and correcting series Yahoo failed to
+  split-adjust (e.g. `WYLD.ST`, 1:500 on 2025-12-05) before computing SMAs,
+  `momentum`, `z_score`, and sector trends.
