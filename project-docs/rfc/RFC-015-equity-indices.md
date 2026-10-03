@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | **Priority** | P3 |
-| **Status** | **Revision proposed** — code implements v1 (single `index_price` per `week_start`); v2 below (price / SMA-50 / SMA-200 levels + momentum per `trading_date`) is not implemented |
+| **Status** | **Implemented** (v2: price / SMA-50 / SMA-200 levels + momentum per `trading_date`; replaced v1 single `index_price` per `week_start` via migration step 19) |
 | **Depends on** | RFC-001, RFC-003, RFC-004, RFC-014 |
 | **PRD** | §5.1 (FR-7, FR-7b), §5.8 (FR-34–FR-45), §6 |
 | **Feature** | [Equity indices](../FEATURES.md#equity-indices) |
@@ -103,7 +103,7 @@ WHERE week_start = %s
 Only week dates and the index ticker are runtime values (parameters); the
 table name comes from the `{metrics}` placeholder (`sql_for_countries`).
 
-## Design (v2 changes to the v1 code)
+## Design
 
 | Path | Change |
 |------|--------|
@@ -114,7 +114,7 @@ table name comes from the `{metrics}` placeholder (`sql_for_countries`).
 | `compute_indices.py` | Same entrypoints; log the three levels + momentum |
 | `fetch_sma.py` / `db/retention.py` | Unchanged wiring (FR-7b, 3-way purge) |
 | `scripts/apply_migrations.sh` / `scripts/verify_schema.sql` | Step 19; column checks for the v2 shape |
-| `tests/` | Base-week anchoring, chained levels, common contributing set, momentum, same-week replacement, purge by `trading_date`, migration guard |
+| `tests/test_compute_indices.py` / `tests/test_schema.py` / `tests/test_retention.py` | Base-week anchoring, chained levels, momentum, SQL shape (common contributing set), previous-week mapping, same-week replacement, purge by `trading_date`, step-19 guard and order |
 
 ## Schema (v2)
 
@@ -142,6 +142,12 @@ At most one row per ticker per calendar week is enforced by the writer
 1. Apply step 19 (`migrate_indices_levels.sql`) — drops v1 index rows.
 2. Rebuild: `pipenv run python compute_indices.py`.
 3. Deploy v2 code — the weekly job then writes one row per index per week.
+
+Verified on Postgres 16: step 19 converts a v1 table and is a no-op on
+re-run; base SMA levels anchored to the average SMA-to-price ratio; equal
+weighting (+10% / −10% → flat price level); a new listing and a stock with a
+NULL `sma_200` excluded; `trading_date` = latest contributing bar; recomputing
+a week whose bars moved to an earlier date replaces that week's row.
 
 ## Open questions
 

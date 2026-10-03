@@ -26,52 +26,108 @@ INDEX_DEFINITIONS: dict[CountrySet, IndexDefinition] = {
 
 
 @dataclass(frozen=True)
+class IndexLevels:
+    current_price: Decimal
+    sma_50: Decimal
+    sma_200: Decimal
+
+
+@dataclass(frozen=True)
 class IndexRow:
     ticker: str
     name: str
     country: CountrySet
-    week_start: date
+    trading_date: date
     ticker_count: int
-    avg_return: Decimal | None
-    index_price: Decimal
+    current_price: Decimal
+    sma_50: Decimal
+    sma_200: Decimal
+    momentum: Decimal | None
+
+    @property
+    def levels(self) -> IndexLevels:
+        return IndexLevels(self.current_price, self.sma_50, self.sma_200)
 
 
-def build_index_row(
+def index_momentum(sma_50: Decimal, sma_200: Decimal) -> Decimal | None:
+    """``sma_50 / sma_200`` on index levels; NULL when ``sma_200`` is zero."""
+    if sma_200 == 0:
+        return None
+    return sma_50 / sma_200
+
+
+def _row(
     definition: IndexDefinition,
-    week_start: date,
-    *,
-    prev_price: Decimal | None,
+    trading_date: date,
     ticker_count: int,
-    avg_return: Decimal | None,
-) -> IndexRow | None:
-    """Chain one week onto the previous stored index level.
-
-    ``prev_price=None`` marks the base week (level ``BASE_INDEX_PRICE``,
-    ``avg_return`` NULL); ``ticker_count`` is then the number of priced
-    stocks. Otherwise ``avg_return`` is the equal-weighted mean of stock
-    returns since the previous stored week. Returns ``None`` when no stock
-    contributes (FR-39).
-    """
-    if ticker_count <= 0:
-        return None
-    if prev_price is None:
-        return IndexRow(
-            ticker=definition.ticker,
-            name=definition.name,
-            country=definition.country,
-            week_start=week_start,
-            ticker_count=ticker_count,
-            avg_return=None,
-            index_price=BASE_INDEX_PRICE,
-        )
-    if avg_return is None:
-        return None
+    levels: IndexLevels,
+) -> IndexRow:
     return IndexRow(
         ticker=definition.ticker,
         name=definition.name,
         country=definition.country,
-        week_start=week_start,
+        trading_date=trading_date,
         ticker_count=ticker_count,
-        avg_return=avg_return,
-        index_price=prev_price * (Decimal("1") + avg_return),
+        current_price=levels.current_price,
+        sma_50=levels.sma_50,
+        sma_200=levels.sma_200,
+        momentum=index_momentum(levels.sma_50, levels.sma_200),
     )
+
+
+def build_base_row(
+    definition: IndexDefinition,
+    *,
+    trading_date: date | None,
+    ticker_count: int,
+    avg_sma_50_ratio: Decimal | None,
+    avg_sma_200_ratio: Decimal | None,
+) -> IndexRow | None:
+    """First week of an index: price 100, SMA levels at 100 × mean(sma / price).
+
+    Returns ``None`` when no stock has a positive price and both SMAs (FR-41).
+    """
+    if (
+        ticker_count <= 0
+        or trading_date is None
+        or avg_sma_50_ratio is None
+        or avg_sma_200_ratio is None
+    ):
+        return None
+    levels = IndexLevels(
+        current_price=BASE_INDEX_PRICE,
+        sma_50=BASE_INDEX_PRICE * avg_sma_50_ratio,
+        sma_200=BASE_INDEX_PRICE * avg_sma_200_ratio,
+    )
+    return _row(definition, trading_date, ticker_count, levels)
+
+
+def build_chained_row(
+    definition: IndexDefinition,
+    previous: IndexLevels,
+    *,
+    trading_date: date | None,
+    ticker_count: int,
+    growth_price: Decimal | None,
+    growth_sma_50: Decimal | None,
+    growth_sma_200: Decimal | None,
+) -> IndexRow | None:
+    """Chain each level by the equal-weighted mean growth of its measure.
+
+    Returns ``None`` when no stock contributes this week (FR-41).
+    """
+    if (
+        ticker_count <= 0
+        or trading_date is None
+        or growth_price is None
+        or growth_sma_50 is None
+        or growth_sma_200 is None
+    ):
+        return None
+    one = Decimal("1")
+    levels = IndexLevels(
+        current_price=previous.current_price * (one + growth_price),
+        sma_50=previous.sma_50 * (one + growth_sma_50),
+        sma_200=previous.sma_200 * (one + growth_sma_200),
+    )
+    return _row(definition, trading_date, ticker_count, levels)

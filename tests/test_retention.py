@@ -183,7 +183,7 @@ def test_purge_stale_data_deletes_from_all_country_tables() -> None:
     assert "DELETE FROM us_market_metrics WHERE week_start < %s" in sqls
     assert "DELETE FROM swe_market_metrics WHERE week_start < %s" in sqls
     assert "DELETE FROM uk_market_metrics WHERE week_start < %s" in sqls
-    assert "DELETE FROM indices WHERE week_start < %s" in sqls
+    assert "DELETE FROM indices WHERE trading_date < %s" in sqls
     assert metrics_purged == 3
     assert market_purged == 3
     assert indices_purged == 1

@@ -59,7 +59,7 @@ Reuse shared logic (`download_batch`, `compute_smas`, `metric_row_from_history`,
 
 - **Country sets (PRD §6):** US (`us_tickers`, `us_metrics`, `us_market_metrics`, `us_by_sector`), Swedish (`swe_*`), and UK (`uk_*`) with the same four tables
 - **`*_by_sector`:** PK `(sector, week_start)`; `ticker_count`, `momentum_mean`, `momentum_median`, `z_score_mean`, `pct_uptrend` — equal-weighted, sector normalized to `sectorKey` form; weeks absent from `*_metrics` are pruned
-- **`indices`** (one shared table, shaped like `*_metrics`): PK `(ticker, trading_date)`, at most one row per ticker per calendar week (`trading_date` = latest contributing bar; a later bar replaces the week's row); `name`, `country`, `ticker_count`, `current_price`, `sma_50`, `sma_200`, `momentum` — each level chained weekly by the equal-weighted mean growth of that measure over stocks with positive price / SMA-50 / SMA-200 in both weeks; base week `current_price = 100`, SMA levels `100 ×` average `sma / current_price`; `momentum = sma_50 / sma_200`; no `z_score` (PRD §5.8). **v2 planned** — code still writes the v1 shape (`week_start`, `avg_return`, `index_price`) until migration step 19
+- **`indices`** (one shared table, shaped like `*_metrics`): PK `(ticker, trading_date)`, at most one row per ticker per calendar week (`trading_date` = latest contributing bar; a later bar replaces the week's row); `name`, `country`, `ticker_count`, `current_price`, `sma_50`, `sma_200`, `momentum` — each level chained weekly by the equal-weighted mean growth of that measure over stocks with positive price / SMA-50 / SMA-200 in both weeks; base week `current_price = 100`, SMA levels `100 ×` average `sma / current_price`; `momentum = sma_50 / sma_200`; no `z_score` (PRD §5.8)
 - **`*_tickers`:** `symbol` (PK), `company`, `sector`, `industry`, `market`, `exchange_name`, `business_summary`, `updated_at`
 - **`*_metrics`:** `id` (PK), `ticker` (FK → matching `*_tickers.symbol` ON DELETE CASCADE), `company`, `week_start`, `trading_date`, `updated_at`, `sma_50`, `sma_200`, `current_price`, `momentum`, `z_score` — `NUMERIC(18, 6)` for prices/derived fields
 - One row per `(ticker, week_start)` within each set (`week_start` = Monday of `trading_date`); unique constraint `*_metrics_week_start_ticker_key`
@@ -67,7 +67,7 @@ Reuse shared logic (`download_batch`, `compute_smas`, `metric_row_from_history`,
 - Retention: delete from `*_metrics` / `*_market_metrics` / `indices` where `trading_date` (`week_start` for market metrics) < cutoff (default 365 days)
 - Schema changes go in `schema.sql` or `migrate_*.sql` — not ad-hoc in Python
 
-**Fresh DB:** `schema.sql` → `seed_tickers.py --country us` → optional `backfill_sma.py --country us` (repeat `swe` / `uk` when ready). **Legacy DB:** apply `migrate_*.sql` per `MIGRATIONS.md` (through step 18; step 19 — `indices` v2 — is planned).
+**Fresh DB:** `schema.sql` → `seed_tickers.py --country us` → optional `backfill_sma.py --country us` (repeat `swe` / `uk` when ready). **Legacy DB:** apply `migrate_*.sql` per `MIGRATIONS.md` (through step 19).
 
 ## Configuration
 

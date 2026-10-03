@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Compute equal-weighted weekly country indices into ``indices`` (PRD §5.8).
 
-US-IDX / SWE-IDX / UK-IDX chain the plain average of every stock's weekly
-``current_price`` growth from ``*_metrics``. No yfinance calls. Runs standalone
-(full rebuild by default) and from ``fetch_sma.py`` for the weeks it wrote.
+US-IDX / SWE-IDX / UK-IDX store price, SMA-50 and SMA-200 levels (each chained
+by the plain average of the stocks' weekly growth in that measure) plus
+momentum, from ``*_metrics``. No yfinance calls. Runs standalone (full rebuild
+by default) and from ``fetch_sma.py`` for the weeks it wrote.
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ def refresh_indices(
     """Recompute country indices; returns rows written.
 
     ``week_starts=None`` rebuilds each index from its earliest stored metrics
-    week (base = 100). Otherwise every stored metrics week from the earliest
+    week (price base = 100). Otherwise every stored metrics week from the earliest
     given week onward is recomputed, so later rows stay chained correctly.
     """
     countries = [country] if country is not None else list(CountrySet)
@@ -56,12 +57,15 @@ def refresh_indices(
         )
         for row in rows:
             logger.info(
-                "Index %s week=%s ticker_count=%d avg_return=%s index_price=%.4f",
+                "Index %s trading_date=%s ticker_count=%d current_price=%.4f "
+                "sma_50=%.4f sma_200=%.4f momentum=%s",
                 row.ticker,
-                row.week_start.isoformat(),
+                row.trading_date.isoformat(),
                 row.ticker_count,
-                "base" if row.avg_return is None else f"{row.avg_return:.6f}",
-                row.index_price,
+                row.current_price,
+                row.sma_50,
+                row.sma_200,
+                "n/a" if row.momentum is None else f"{row.momentum:.6f}",
             )
         written += len(rows)
 

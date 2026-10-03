@@ -52,7 +52,7 @@ Steps 1–10 upgrade the **legacy** single-set tables (`tickers` / `metrics` / `
 | 16 | `migrate_add_business_summary.sql` | Add `business_summary TEXT` to `us_tickers` / `swe_tickers` / `uk_tickers` (yfinance `longBusinessSummary`) |
 | 17 | `migrate_add_by_sector_tables.sql` | Create `us_by_sector` / `swe_by_sector` / `uk_by_sector` — equal-weighted weekly trend averages per sector, PK `(sector, week_start)` (PRD §5.7) |
 | 18 | `migrate_add_indices_table.sql` | Create the shared `indices` table (`US-IDX` / `SWE-IDX` / `UK-IDX`) in the v1 shape: PK `(ticker, week_start)`, `avg_return`, `index_price` (superseded by step 19) |
-| 19 | `migrate_indices_levels.sql` | **Planned — file not created yet.** If `indices` still has `week_start`, drop and recreate it in the v2 shape (PRD §5.8 / §6): PK `(ticker, trading_date)`, `ticker_count`, `current_price`, `sma_50`, `sma_200`, `momentum`. Index rows are derived, so they are rebuilt afterwards ([RFC-015](./rfc/RFC-015-equity-indices.md)) |
+| 19 | `migrate_indices_levels.sql` | If `indices` still has `week_start`, drop and recreate it in the v2 shape (PRD §5.8 / §6): PK `(ticker, trading_date)`, `ticker_count`, `current_price`, `sma_50`, `sma_200`, `momentum`. Index rows are derived, so they are rebuilt afterwards ([RFC-015](./rfc/RFC-015-equity-indices.md)) |
 
 **Golden Cross / Death Cross detection (PRD §5.6):** Lives in the `fansboda` repo and needs **no schema migration** here — it reads existing `*_metrics` columns (`sma_50`, `sma_200`, `trading_date`).
 
@@ -140,7 +140,7 @@ Run step 14 (`migrate_momentum_zscore.sql`), then
    pre-step-18 schema). Rows older than `METRICS_RETENTION_DAYS` are then
    purged weekly.
 
-**After step 18, before index levels (RFC-015 v2, planned):**
+**After step 18, before index levels (RFC-015 v2):**
 
 1. Run step 19 (`migrate_indices_levels.sql`) — replaces the v1 `indices`
    table (its rows are dropped); a no-op once applied. No snapshot needed:
@@ -158,9 +158,9 @@ Used by `.github/workflows/dev-backfill.yml` (manual `workflow_dispatch`) agains
 1. Apply `schema.sql` (country baseline, `CREATE IF NOT EXISTS`).
 2. If legacy `tickers` / `metrics` still exist, run pre-split migrations (steps 1, 4–10; skips destructive steps 2–3).
 3. If `us_metrics` still has `raw_50` (pre-step-14), run steps 11–14 (`migrate_split_us_swe_tables.sql`, `exchange_name`, UK tables, momentum/z_score). Otherwise skip them — they copy `raw_*` columns that step 14 dropped.
-4. Always run steps 15–18 (`migrate_week_buckets.sql`, `migrate_add_business_summary.sql`, `migrate_add_by_sector_tables.sql`, `migrate_add_indices_table.sql`; no-ops once applied). Step 19 joins this list when it is implemented.
+4. Always run steps 15–19 (`migrate_week_buckets.sql`, `migrate_add_business_summary.sql`, `migrate_add_by_sector_tables.sql`, `migrate_add_indices_table.sql`, `migrate_indices_levels.sql`; no-ops once applied).
 
-Fresh databases get the target layout from `schema.sql`, so only steps 15–18 run (as no-ops).
+Fresh databases get the target layout from `schema.sql`, so only steps 15–19 run (as no-ops).
 
 ## Verify schema
 

@@ -75,13 +75,14 @@ WHERE table_schema = 'public'
 ORDER BY table_name, column_name;
 -- expect 21 rows
 
--- indices (step 18)
+-- indices (steps 18–19, v2 shape)
 SELECT column_name, data_type, is_nullable
 FROM information_schema.columns
 WHERE table_schema = 'public'
   AND table_name = 'indices'
 ORDER BY ordinal_position;
--- expect 8 rows
+-- expect 10 rows: ticker, name, country, trading_date, updated_at,
+-- ticker_count, current_price, sma_50, sma_200, momentum (no week_start)
 
 SELECT c.conname
 FROM pg_constraint c

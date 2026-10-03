@@ -24,7 +24,7 @@ UK purge is included via the same `DELETE_STALE_*` lists in `db/metrics.py` and 
 | — | Parameterized SQL in `db/metrics.py` and `db/market.py` for all country history/aggregate tables |
 | — | Cutoff uses UTC date |
 | — | Purge aggregate rows with `week_start` &lt; cutoff alongside metrics |
-| FR-44 | Purge `indices` rows with `trading_date` &lt; cutoff using the same window ([RFC-015](./RFC-015-equity-indices.md); v1 code still purges by `week_start` until step 19) |
+| FR-44 | Purge `indices` rows with `trading_date` &lt; cutoff using the same window ([RFC-015](./RFC-015-equity-indices.md)) |
 
 ## Implementation
 
@@ -57,7 +57,7 @@ DELETE FROM uk_metrics WHERE trading_date < %s;
 DELETE FROM us_market_metrics WHERE week_start < %s;
 DELETE FROM swe_market_metrics WHERE week_start < %s;
 DELETE FROM uk_market_metrics WHERE week_start < %s;
-DELETE FROM indices WHERE trading_date < %s;  -- v1 code: week_start
+DELETE FROM indices WHERE trading_date < %s;
 ```
 
 Indexes on each `*_metrics.trading_date` (RFC-001) support efficient deletes. `*_market_metrics` rows are purged by `week_start` (a few rows per market per week, so no extra index); each uses `(market, week_start)` as primary key.

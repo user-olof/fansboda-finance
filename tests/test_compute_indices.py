@@ -1,4 +1,4 @@
-"""Tests for PRD §5.8 equal-weighted country indices (RFC-015)."""
+"""Tests for PRD §5.8 equal-weighted country indices (RFC-015 v2)."""
 
 from datetime import date
 from decimal import Decimal
@@ -10,27 +10,32 @@ from compute_indices import build_parser, main, refresh_indices
 from config import BaseConfig
 from db.country import CountrySet
 from db.indices import (
-    COUNT_PRICED_STOCKS_SQL,
+    BASE_WEEK_STATS_SQL,
+    CHAINED_WEEK_STATS_SQL,
     DELETE_INDEX_SQL,
     DELETE_INDEX_WEEK_SQL,
     DELETE_STALE_INDICES_SQL,
+    INSERT_INDEX_SQL,
     LOAD_PREVIOUS_INDEX_SQL,
-    UPSERT_INDEX_SQL,
-    WEEKLY_RETURN_SQL,
     purge_stale_indices,
     write_index_weeks,
 )
 from equity_index import (
     BASE_INDEX_PRICE,
     INDEX_DEFINITIONS,
+    IndexLevels,
     IndexRow,
-    build_index_row,
+    build_base_row,
+    build_chained_row,
+    index_momentum,
 )
 
 US = INDEX_DEFINITIONS[CountrySet.US]
 W1 = date(2026, 6, 1)
 W2 = date(2026, 6, 8)
 W3 = date(2026, 6, 15)
+D1 = date(2026, 6, 5)
+D2 = date(2026, 6, 12)
 
 
 def _mock_config(**overrides: object) -> BaseConfig:
@@ -59,63 +64,93 @@ def test_index_definitions_match_prd() -> None:
         assert definition.country is country
 
 
-def test_build_index_row_base_week_is_100() -> None:
-    row = build_index_row(US, W1, prev_price=None, ticker_count=5, avg_return=None)
-    assert row == IndexRow(
-        ticker="US-IDX",
-        name="US Equity Index",
-        country=CountrySet.US,
-        week_start=W1,
-        ticker_count=5,
-        avg_return=None,
-        index_price=BASE_INDEX_PRICE,
-    )
+def test_index_momentum() -> None:
+    assert index_momentum(Decimal("110"), Decimal("100")) == Decimal("1.1")
+    assert index_momentum(Decimal("110"), Decimal("0")) is None
 
 
-def test_build_index_row_chains_average_return() -> None:
-    row = build_index_row(
-        US, W2, prev_price=Decimal("100"), ticker_count=2, avg_return=Decimal("0.05")
+def test_build_base_row_anchors_sma_levels_to_price_ratio() -> None:
+    row = build_base_row(
+        US,
+        trading_date=D1,
+        ticker_count=4,
+        avg_sma_50_ratio=Decimal("0.95"),
+        avg_sma_200_ratio=Decimal("0.90"),
     )
     assert row is not None
-    assert row.index_price == Decimal("105.00")
-    assert row.avg_return == Decimal("0.05")
-
-    next_row = build_index_row(
-        US, W3, prev_price=row.index_price, ticker_count=2, avg_return=Decimal("-0.1")
+    assert row.trading_date == D1
+    assert row.ticker_count == 4
+    assert row.current_price == BASE_INDEX_PRICE
+    assert row.sma_50 == Decimal("95.00")
+    assert row.sma_200 == Decimal("90.00")
+    assert row.momentum == Decimal("95") / Decimal("90")
+    assert (row.ticker, row.name, row.country) == (
+        "US-IDX",
+        "US Equity Index",
+        CountrySet.US,
     )
-    assert next_row is not None
-    assert next_row.index_price == Decimal("94.500")
+
+
+def test_build_chained_row_grows_each_level_independently() -> None:
+    previous = IndexLevels(Decimal("100"), Decimal("95"), Decimal("90"))
+    row = build_chained_row(
+        US,
+        previous,
+        trading_date=D2,
+        ticker_count=3,
+        growth_price=Decimal("0.10"),
+        growth_sma_50=Decimal("0.02"),
+        growth_sma_200=Decimal("0.01"),
+    )
+    assert row is not None
+    assert row.current_price == Decimal("110.00")
+    assert row.sma_50 == Decimal("96.90")
+    assert row.sma_200 == Decimal("90.90")
+    assert row.momentum == Decimal("96.90") / Decimal("90.90")
+    assert row.levels == IndexLevels(row.current_price, row.sma_50, row.sma_200)
 
 
 def test_equal_weighting_ignores_price_level() -> None:
-    """A $1000 stock up 10% and a $10 stock down 10% net to a flat index."""
-    returns = [Decimal("1100") / Decimal("1000") - 1, Decimal("9") / Decimal("10") - 1]
-    avg = sum(returns) / len(returns)
-    row = build_index_row(
-        US, W2, prev_price=Decimal("100"), ticker_count=2, avg_return=avg
+    """A $1000 stock up 10% and a $10 stock down 10% leave the price level flat."""
+    growth = (
+        (Decimal("1100") / Decimal("1000") - 1) + (Decimal("9") / Decimal("10") - 1)
+    ) / 2
+    row = build_chained_row(
+        US,
+        IndexLevels(Decimal("100"), Decimal("95"), Decimal("90")),
+        trading_date=D2,
+        ticker_count=2,
+        growth_price=growth,
+        growth_sma_50=Decimal("0"),
+        growth_sma_200=Decimal("0"),
     )
     assert row is not None
-    assert row.index_price == Decimal("100")
+    assert row.current_price == Decimal("100")
 
 
 @pytest.mark.parametrize(
-    ("prev_price", "ticker_count", "avg_return"),
+    "kwargs",
     [
-        (None, 0, None),
-        (Decimal("100"), 0, None),
-        (Decimal("100"), 3, None),
+        {"trading_date": D1, "ticker_count": 0, "avg_sma_50_ratio": None, "avg_sma_200_ratio": None},
+        {"trading_date": None, "ticker_count": 2, "avg_sma_50_ratio": Decimal("1"), "avg_sma_200_ratio": Decimal("1")},
+        {"trading_date": D1, "ticker_count": 2, "avg_sma_50_ratio": None, "avg_sma_200_ratio": Decimal("1")},
     ],
 )
-def test_build_index_row_skips_week_without_contributors(
-    prev_price: Decimal | None, ticker_count: int, avg_return: Decimal | None
-) -> None:
+def test_build_base_row_skips_week_without_contributors(kwargs: dict) -> None:
+    assert build_base_row(US, **kwargs) is None
+
+
+def test_build_chained_row_skips_week_without_contributors() -> None:
+    previous = IndexLevels(Decimal("100"), Decimal("95"), Decimal("90"))
     assert (
-        build_index_row(
+        build_chained_row(
             US,
-            W1,
-            prev_price=prev_price,
-            ticker_count=ticker_count,
-            avg_return=avg_return,
+            previous,
+            trading_date=None,
+            ticker_count=0,
+            growth_price=None,
+            growth_sma_50=None,
+            growth_sma_200=None,
         )
         is None
     )
@@ -124,28 +159,37 @@ def test_build_index_row_skips_week_without_contributors(
 @pytest.mark.parametrize("country", list(CountrySet))
 def test_index_sql_targets_country_metrics(country: CountrySet) -> None:
     prefix = country.value
-    assert f"FROM {prefix}_metrics" in COUNT_PRICED_STOCKS_SQL[country]
-    weekly = " ".join(WEEKLY_RETURN_SQL[country].split())
-    assert f"FROM {prefix}_metrics cur JOIN {prefix}_metrics prev" in weekly
-    assert "AVG(cur.current_price / prev.current_price - 1)" in weekly
-    assert "prev.current_price > 0" in weekly
-    assert weekly.count("%s") == 2
+    base = " ".join(BASE_WEEK_STATS_SQL[country].split())
+    assert f"FROM {prefix}_metrics" in base
+    assert "AVG(sma_50 / current_price)" in base
+    assert "AVG(sma_200 / current_price)" in base
+    assert "current_price > 0 AND sma_50 > 0 AND sma_200 > 0" in base
+    chained = " ".join(CHAINED_WEEK_STATS_SQL[country].split())
+    assert f"FROM {prefix}_metrics cur JOIN {prefix}_metrics prev" in chained
+    for measure in ("current_price", "sma_50", "sma_200"):
+        assert f"AVG(cur.{measure} / prev.{measure} - 1)" in chained
+        assert f"prev.{measure} > 0" in chained
+    assert "MAX(cur.trading_date)" in chained
+    assert chained.count("%s") == 2
 
 
 def test_static_index_sql_is_parameterized() -> None:
-    assert "ON CONFLICT (ticker, week_start) DO UPDATE" in UPSERT_INDEX_SQL
-    assert UPSERT_INDEX_SQL.count("%s") == 7
-    assert LOAD_PREVIOUS_INDEX_SQL.count("%s") == 2
-    assert DELETE_STALE_INDICES_SQL == "DELETE FROM indices WHERE week_start < %s"
+    assert INSERT_INDEX_SQL.count("%s") == 9
+    assert "trading_date < %s" in LOAD_PREVIOUS_INDEX_SQL
+    assert " ".join(DELETE_INDEX_WEEK_SQL.split()) == (
+        "DELETE FROM indices WHERE ticker = %s AND trading_date >= %s "
+        "AND trading_date < %s"
+    )
+    assert DELETE_STALE_INDICES_SQL == "DELETE FROM indices WHERE trading_date < %s"
 
 
 def test_write_index_weeks_base_then_chained_week() -> None:
     mock_conn, mock_cursor = _mock_conn(
         [
-            None,  # no previous row for W1
-            (3,),  # priced stocks in W1
-            (W1, Decimal("100")),  # previous row for W2
-            (2, Decimal("0.1")),  # weekly return stats for W2
+            None,  # no previous row before W1
+            (3, D1, Decimal("0.95"), Decimal("0.90")),  # base stats W1
+            (D1, Decimal("100"), Decimal("95"), Decimal("90")),  # previous row
+            (2, D2, Decimal("0.1"), Decimal("0.02"), Decimal("0.01")),  # W2 growth
         ]
     )
 
@@ -154,37 +198,65 @@ def test_write_index_weeks_base_then_chained_week() -> None:
             "postgresql://example", [W2, W1], country=CountrySet.US, rebuild=True
         )
 
-    assert [(r.week_start, r.index_price, r.ticker_count) for r in rows] == [
-        (W1, Decimal("100"), 3),
-        (W2, Decimal("110.0"), 2),
+    assert [(r.trading_date, r.current_price, r.sma_50, r.sma_200) for r in rows] == [
+        (D1, Decimal("100"), Decimal("95.00"), Decimal("90.00")),
+        (D2, Decimal("110.0"), Decimal("96.90"), Decimal("90.90")),
     ]
     executed = mock_cursor.execute.call_args_list
     assert executed[0] == call(DELETE_INDEX_SQL, ("US-IDX",))
     assert executed[1] == call(LOAD_PREVIOUS_INDEX_SQL, ("US-IDX", W1))
-    assert executed[2] == call(COUNT_PRICED_STOCKS_SQL[CountrySet.US], (W1,))
-    assert executed[3] == call(
-        UPSERT_INDEX_SQL, ("US-IDX", "US Equity Index", "us", W1, 3, None, Decimal("100"))
+    assert executed[2] == call(BASE_WEEK_STATS_SQL[CountrySet.US], (W1,))
+    assert executed[3] == call(DELETE_INDEX_WEEK_SQL, ("US-IDX", W1, W2))
+    assert executed[4] == call(
+        INSERT_INDEX_SQL,
+        (
+            "US-IDX",
+            "US Equity Index",
+            "us",
+            D1,
+            3,
+            Decimal("100"),
+            Decimal("95.00"),
+            Decimal("90.00"),
+            Decimal("95.00") / Decimal("90.00"),
+        ),
     )
-    assert executed[5] == call(WEEKLY_RETURN_SQL[CountrySet.US], (W1, W2))
-    assert executed[6] == call(
-        UPSERT_INDEX_SQL,
-        ("US-IDX", "US Equity Index", "us", W2, 2, Decimal("0.1"), Decimal("110.0")),
-    )
+    assert executed[6] == call(CHAINED_WEEK_STATS_SQL[CountrySet.US], (W1, W2))
+    assert executed[7] == call(DELETE_INDEX_WEEK_SQL, ("US-IDX", W2, W3))
     mock_conn.commit.assert_called_once()
 
 
-def test_write_index_weeks_deletes_week_without_contributors() -> None:
-    mock_conn, mock_cursor = _mock_conn([(W1, Decimal("100")), (0, None)])
+def test_write_index_weeks_uses_week_of_previous_trading_date() -> None:
+    """A previous row dated Thursday still maps to its Monday week."""
+    mock_conn, mock_cursor = _mock_conn(
+        [
+            (date(2026, 6, 4), Decimal("100"), Decimal("95"), Decimal("90")),
+            (1, D2, Decimal("0"), Decimal("0"), Decimal("0")),
+        ]
+    )
+
+    with patch("db.indices.psycopg2.connect", return_value=mock_conn):
+        write_index_weeks("postgresql://example", [W2], country=CountrySet.UK)
+
+    assert mock_cursor.execute.call_args_list[1] == call(
+        CHAINED_WEEK_STATS_SQL[CountrySet.UK], (W1, W2)
+    )
+
+
+def test_write_index_weeks_removes_week_without_contributors() -> None:
+    mock_conn, mock_cursor = _mock_conn(
+        [(D1, Decimal("100"), Decimal("95"), Decimal("90")), (0, None, None, None, None)]
+    )
 
     with patch("db.indices.psycopg2.connect", return_value=mock_conn):
         rows = write_index_weeks("postgresql://example", [W2], country=CountrySet.SWE)
 
     assert rows == []
     sqls = [c.args[0] for c in mock_cursor.execute.call_args_list]
+    assert INSERT_INDEX_SQL not in sqls
     assert DELETE_INDEX_SQL not in sqls
-    assert UPSERT_INDEX_SQL not in sqls
     assert mock_cursor.execute.call_args_list[-1] == call(
-        DELETE_INDEX_WEEK_SQL, ("SWE-IDX", W2)
+        DELETE_INDEX_WEEK_SQL, ("SWE-IDX", W2, W3)
     )
 
 
@@ -201,8 +273,18 @@ def test_purge_stale_indices_uses_retention_cutoff() -> None:
     )
 
 
-def _row(week: date) -> IndexRow:
-    return IndexRow("US-IDX", "US Equity Index", CountrySet.US, week, 2, None, Decimal("100"))
+def _row(trading_date: date) -> IndexRow:
+    return IndexRow(
+        "US-IDX",
+        "US Equity Index",
+        CountrySet.US,
+        trading_date,
+        2,
+        Decimal("100"),
+        Decimal("95"),
+        Decimal("90"),
+        Decimal("95") / Decimal("90"),
+    )
 
 
 def test_refresh_indices_full_rebuild_uses_all_weeks() -> None:

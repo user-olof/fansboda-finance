@@ -24,6 +24,7 @@ MIGRATIONS = [
     REPO_ROOT / "migrate_add_business_summary.sql",
     REPO_ROOT / "migrate_add_by_sector_tables.sql",
     REPO_ROOT / "migrate_add_indices_table.sql",
+    REPO_ROOT / "migrate_indices_levels.sql",
 ]
 APPLY_MIGRATIONS_SH = REPO_ROOT / "scripts" / "apply_migrations.sh"
 COUNTRY_TABLES = (
@@ -359,31 +360,52 @@ INDICES_COLUMNS = (
     r"\bticker\s+TEXT\s+NOT NULL",
     r"\bname\s+TEXT\s+NOT NULL",
     r"\bcountry\s+TEXT\s+NOT NULL",
-    r"\bweek_start\s+DATE\s+NOT NULL",
+    r"\btrading_date\s+DATE\s+NOT NULL",
     r"\bupdated_at\s+TIMESTAMPTZ\s+NOT NULL",
     r"\bticker_count\s+INTEGER\s+NOT NULL",
-    r"\bavg_return\s+NUMERIC\(18, 6\)",
-    r"\bindex_price\s+NUMERIC\(18, 6\)\s+NOT NULL",
-    r"PRIMARY KEY \(ticker, week_start\)",
+    r"\bcurrent_price\s+NUMERIC\(18, 6\)\s+NOT NULL",
+    r"\bsma_50\s+NUMERIC\(18, 6\)\s+NOT NULL",
+    r"\bsma_200\s+NUMERIC\(18, 6\)\s+NOT NULL",
+    r"\bmomentum\s+NUMERIC\(18, 6\)",
+    r"PRIMARY KEY \(ticker, trading_date\)",
 )
 
 
-def test_schema_and_migration_define_indices_table() -> None:
-    for path in (SCHEMA_SQL, REPO_ROOT / "migrate_add_indices_table.sql"):
-        sql = path.read_text(encoding="utf-8")
-        section = sql.split("CREATE TABLE IF NOT EXISTS indices (", 1)[1].split(
-            ");", 1
-        )[0]
+def _indices_ddl(path) -> str:
+    sql = path.read_text(encoding="utf-8")
+    return sql.split("CREATE TABLE IF NOT EXISTS indices (", 1)[1].split(");", 1)[0]
+
+
+def test_schema_and_step_19_define_indices_v2() -> None:
+    for path in (SCHEMA_SQL, REPO_ROOT / "migrate_indices_levels.sql"):
+        section = _indices_ddl(path)
         for pattern in INDICES_COLUMNS:
             assert re.search(pattern, section), (path.name, pattern)
+        assert "week_start" not in section
+        assert "index_price" not in section
 
 
-def test_apply_migrations_runs_indices_after_by_sector_in_both_paths() -> None:
+def test_step_19_only_drops_v1_indices() -> None:
+    sql = " ".join(
+        (REPO_ROOT / "migrate_indices_levels.sql").read_text(encoding="utf-8").split()
+    )
+    guard = sql.index("column_name = 'week_start'")
+    assert guard < sql.index("DROP TABLE indices;")
+    assert sql.index("DROP TABLE indices;") < sql.index(
+        "CREATE TABLE IF NOT EXISTS indices"
+    )
+
+
+def test_apply_migrations_runs_indices_steps_in_order_in_both_paths() -> None:
     script = APPLY_MIGRATIONS_SH.read_text(encoding="utf-8")
     skip_block = script.split('"$has_raw_ratios" == "no"', 1)[1].split("fi\n", 1)[0]
-    assert skip_block.index("migrate_add_by_sector_tables.sql") < skip_block.index(
-        "migrate_add_indices_table.sql"
+    assert (
+        skip_block.index("migrate_add_by_sector_tables.sql")
+        < skip_block.index("migrate_add_indices_table.sql")
+        < skip_block.index("migrate_indices_levels.sql")
     )
-    assert script.rindex("migrate_add_indices_table.sql") > script.rindex(
-        "migrate_add_by_sector_tables.sql"
+    assert (
+        script.rindex("migrate_add_by_sector_tables.sql")
+        < script.rindex("migrate_add_indices_table.sql")
+        < script.rindex("migrate_indices_levels.sql")
     )
