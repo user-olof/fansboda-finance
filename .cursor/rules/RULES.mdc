@@ -21,7 +21,7 @@ Lightweight weekly pipeline: yfinance → SMA-50/200 + close → Neon Postgres. 
 | Path | Role |
 |------|------|
 | `fetch_sma.py`, `seed_tickers.py`, `backfill_sma.py`, `backfill_market.py`, `refresh_tickers.py`, `compute_sector_trends.py`, `compute_indices.py` | Job / ad-hoc entrypoints |
-| `symbols.py`, `yfinance_client.py`, `equity_index.py` | Shared symbol parsing, yfinance I/O, pure index chaining |
+| `symbols.py`, `yfinance_client.py`, `equity_index.py` | Shared symbol parsing, yfinance I/O, pure index-level chaining |
 | `config.py` | `BaseConfig`, `DevConfig`, `ProdConfig`, `get_config()` |
 | `models.py` | `TickerEntry`, `MetricRow` |
 | `db/metrics.py`, `db/tickers.py`, `db/sector.py`, `db/indices.py` | Parameterized SQL — no SQL in job scripts |
@@ -42,7 +42,7 @@ Dependencies: **Pipenv only** (`Pipfile` / `Pipfile.lock`). No `requirements.txt
 | `backfill_sma.py` | One-off per country set (`--country us|swe|uk`, optional repeatable `--exchange NAME`): ~730d history, one SMA snapshot per calendar week (last bar of the week), upsert into matching `*_metrics`, upsert `*_market_metrics` |
 | `backfill_market.py` | One-off: recompute `momentum` from SMAs, then `*_market_metrics` + `z_score` (optional `--country`) |
 | `compute_sector_trends.py` | Equal-weighted weekly trend per sector into `*_by_sector` (RFC-014); called by `fetch_sma.py` for the weeks it wrote, or standalone (`--country`, `--week`); no yfinance |
-| `compute_indices.py` | Equal-weighted weekly country index (`US-IDX` / `SWE-IDX` / `UK-IDX`) into `indices` (RFC-015); called by `fetch_sma.py`, or standalone full rebuild (`--country`); no yfinance |
+| `compute_indices.py` | Equal-weighted weekly country index (`US-IDX` / `SWE-IDX` / `UK-IDX`): price / SMA-50 / SMA-200 levels + momentum into `indices` (RFC-015); called by `fetch_sma.py`, or standalone full rebuild (`--country`); no yfinance |
 
 | Utility | Role |
 |---------|------|
@@ -59,15 +59,15 @@ Reuse shared logic (`download_batch`, `compute_smas`, `metric_row_from_history`,
 
 - **Country sets (PRD §6):** US (`us_tickers`, `us_metrics`, `us_market_metrics`, `us_by_sector`), Swedish (`swe_*`), and UK (`uk_*`) with the same four tables
 - **`*_by_sector`:** PK `(sector, week_start)`; `ticker_count`, `momentum_mean`, `momentum_median`, `z_score_mean`, `pct_uptrend` — equal-weighted, sector normalized to `sectorKey` form; weeks absent from `*_metrics` are pruned
-- **`indices`** (one shared table): PK `(ticker, week_start)`; `name`, `country`, `ticker_count`, `avg_return`, `index_price` — chain-linked from the equal-weighted mean of weekly `current_price` returns (base week = 100); purged with the metrics retention window
+- **`indices`** (one shared table, shaped like `*_metrics`): PK `(ticker, trading_date)`, at most one row per ticker per calendar week (`trading_date` = latest contributing bar; a later bar replaces the week's row); `name`, `country`, `ticker_count`, `current_price`, `sma_50`, `sma_200`, `momentum` — each level chained weekly by the equal-weighted mean growth of that measure over stocks with positive price / SMA-50 / SMA-200 in both weeks; base week `current_price = 100`, SMA levels `100 ×` average `sma / current_price`; `momentum = sma_50 / sma_200`; no `z_score` (PRD §5.8). **v2 planned** — code still writes the v1 shape (`week_start`, `avg_return`, `index_price`) until migration step 19
 - **`*_tickers`:** `symbol` (PK), `company`, `sector`, `industry`, `market`, `exchange_name`, `business_summary`, `updated_at`
 - **`*_metrics`:** `id` (PK), `ticker` (FK → matching `*_tickers.symbol` ON DELETE CASCADE), `company`, `week_start`, `trading_date`, `updated_at`, `sma_50`, `sma_200`, `current_price`, `momentum`, `z_score` — `NUMERIC(18, 6)` for prices/derived fields
 - One row per `(ticker, week_start)` within each set (`week_start` = Monday of `trading_date`); unique constraint `*_metrics_week_start_ticker_key`
 - Week upserts: `ON CONFLICT (ticker, week_start) DO UPDATE ... WHERE EXCLUDED.trading_date > existing` — a newer bar in the same week replaces the row
-- Retention: delete from `*_metrics` / `*_market_metrics` / `indices` where `trading_date` (`week_start` for market metrics and indices) < cutoff (default 365 days)
+- Retention: delete from `*_metrics` / `*_market_metrics` / `indices` where `trading_date` (`week_start` for market metrics) < cutoff (default 365 days)
 - Schema changes go in `schema.sql` or `migrate_*.sql` — not ad-hoc in Python
 
-**Fresh DB:** `schema.sql` → `seed_tickers.py --country us` → optional `backfill_sma.py --country us` (repeat `swe` / `uk` when ready). **Legacy DB:** apply `migrate_*.sql` per `MIGRATIONS.md` (through step 18).
+**Fresh DB:** `schema.sql` → `seed_tickers.py --country us` → optional `backfill_sma.py --country us` (repeat `swe` / `uk` when ready). **Legacy DB:** apply `migrate_*.sql` per `MIGRATIONS.md` (through step 18; step 19 — `indices` v2 — is planned).
 
 ## Configuration
 
