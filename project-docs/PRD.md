@@ -120,8 +120,8 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
   equal or older bar is ignored, so re-runs are idempotent.
 - **FR-7 Retention purge:** After inserts, delete rows from `us_metrics` /
   `swe_metrics` / `uk_metrics` (and the matching `*_market_metrics` tables,
-  plus `indices`) where `trading_date` (`week_start` for `*_market_metrics`
-  and `indices`) is older than one year (`purge_stale_metrics`).
+  plus `indices`) where `trading_date` (`week_start` for `*_market_metrics`)
+  is older than one year (`purge_stale_metrics`).
 - **FR-7a Sector trends:** After the retention purge, recompute the
   `*_by_sector` rows for every week written in this run and prune sector weeks
   that no longer exist in the metrics tables (§5.7, `refresh_sector_trends`).
@@ -288,9 +288,11 @@ entirely from stored data — no yfinance calls.
 
 ### 5.8 Equal-weighted equity indices (`compute_indices.py`, `indices` table)
 
-One synthetic price index per country set, built from the stocks in that
-set's watchlist. Every stock has equal weight. Derived entirely from stored
-`*_metrics` rows — no yfinance calls.
+One synthetic index per country set, built from the stocks in that set's
+watchlist and stored in the same shape as a `*_metrics` row: an index
+**price**, its **SMA-50** and **SMA-200** levels, and **momentum**. Every
+stock has equal weight. Derived entirely from stored `*_metrics` rows — no
+yfinance calls.
 
 - **FR-34 Index definitions:**
 
@@ -300,42 +302,59 @@ set's watchlist. Every stock has equal weight. Derived entirely from stored
   | Swedish | OMX Equity Index | `SWE-IDX` | `swe_metrics` |
   | UK | FTSE Equity Index | `UK-IDX` | `uk_metrics` |
 
-- **FR-35 One row per country per week:** Store exactly one `indices` row
-  per index ticker per `week_start`, keyed `(ticker, week_start)`.
-- **FR-36 Weekly stock return:** For each stock with a non-NULL
-  `current_price` in both week `w` and the index's previous stored week `p`:
-  `r_i = current_price_i(w) / current_price_i(p) − 1`. Stocks without a
-  price in both weeks (new listings, missing weeks, removed tickers) do not
-  contribute to that week.
-- **FR-37 Equal-weighted average growth:** The index's weekly growth is the
-  plain average of the contributing stocks' returns:
-  `avg_return(w) = (1 / N) × Σ r_i`. Every stock counts once regardless of
-  market cap or price level (weights reset every week).
-- **FR-38 Index price:** Chain-link the growth onto the previous value:
-  `index_price(w) = index_price(p) × (1 + avg_return(w))`. The first week
-  for an index (no earlier stored row) is the base week with
-  `index_price = 100` and `avg_return` NULL. Because returns are unit-free,
-  mixed price units within a set (e.g. GBp vs GBP) do not distort the index
-  as long as each stock's own units are consistent over time.
-- **FR-39 Insufficient data:** If no stock contributes in a week (`N = 0`),
+- **FR-35 One row per country per week:** Store one `indices` row per index
+  ticker per calendar week. The row's `trading_date` is the latest
+  `trading_date` among the contributing stocks' metrics rows for that week.
+  Key `(ticker, trading_date)`; at most one row per ticker per calendar week
+  — when a later bar in the same week is computed (e.g. a mid-week manual run
+  followed by the Saturday job), it replaces that week's row, mirroring FR-6.
+- **FR-36 Contributing stocks:** A stock contributes to week `w` when it has
+  positive `current_price`, `sma_50`, and `sma_200` in both week `w` and the
+  index's previous stored week `p`. The same set of `N` stocks drives all
+  three levels, so they stay comparable. New listings, missing weeks,
+  incomplete SMAs, and removed tickers do not contribute that week.
+- **FR-37 Equal-weighted growth per level:** For each measure
+  `x ∈ {current_price, sma_50, sma_200}`, the index's weekly growth is the
+  plain average of the contributing stocks' growth in that measure:
+  `g_x(w) = (1 / N) × Σ (x_i(w) / x_i(p) − 1)`. Every stock counts once
+  regardless of market cap or price level (weights reset every week).
+- **FR-38 Index levels:** Chain-link each level onto its previous value:
+  `level_x(w) = level_x(p) × (1 + g_x(w))`, stored as the row's
+  `current_price`, `sma_50`, and `sma_200`.
+- **FR-39 Base week:** The first week for an index (no earlier stored row)
+  uses every stock with positive `current_price`, `sma_50`, and `sma_200`
+  that week:
+  - `current_price = 100`
+  - `sma_50 = 100 × (1 / N) × Σ (sma_50_i / current_price_i)`
+  - `sma_200 = 100 × (1 / N) × Σ (sma_200_i / current_price_i)`
+
+  Anchoring both SMA levels to the stocks' average SMA-to-price ratio makes
+  index momentum reflect the stocks' real trend from the first week, instead
+  of starting at exactly 1.0. Because every ratio and growth rate is
+  unit-free, mixed price units within a set (e.g. GBp vs GBP) do not distort
+  the index as long as each stock's own units are consistent over time.
+- **FR-40 Momentum:** `momentum = sma_50 / sma_200` on the index levels (NULL
+  if `sma_200` is zero), the same definition as for stocks (FR-5). No
+  `z_score` is calculated for indices.
+- **FR-41 Insufficient data:** If no stock contributes in a week (`N = 0`),
   do not write a row for that week; the next week chains from the last stored
   row.
-- **FR-40 Idempotent writes:** Upsert on `(ticker, week_start)`. Recomputing
-  a week overwrites that week's row; weeks are computed in ascending order so
-  each week chains from the already-stored previous week.
-- **FR-41 Invocation:** Runs as part of the weekly job (FR-7b) for the weeks
+- **FR-42 Idempotent writes:** Recomputing a week overwrites that week's row;
+  weeks are computed in ascending order so each week chains from the
+  already-stored previous week.
+- **FR-43 Invocation:** Runs as part of the weekly job (FR-7b) for the weeks
   just written (recomputing any later stored weeks so the chain stays
   consistent), and standalone for a full rebuild via
   `pipenv run python compute_indices.py [--country us|swe|uk]`.
   A full rebuild starts at the earliest week still in the metrics table, so
-  the base week (and therefore index levels, but not weekly returns) moves
+  the base week (and therefore index levels, but not weekly growth) moves
   forward as retention purges old metrics.
-- **FR-42 Retention:** Purge `indices` rows with the same window as the
-  metrics tables (FR-7): delete rows whose `week_start` is older than
+- **FR-44 Retention:** Purge `indices` rows with the same window as the
+  metrics tables (FR-7): delete rows whose `trading_date` is older than
   `METRICS_RETENTION_DAYS`. The weekly calculation only needs the previous
   stored week, so purging old rows does not break the chain.
-- **FR-43 Observability:** Log per index the week, `ticker_count`,
-  `avg_return`, and `index_price`, plus a summary line. Exit non-zero on DB
+- **FR-45 Observability:** Log per index the `trading_date`, `ticker_count`,
+  the three levels, and `momentum`, plus a summary line. Exit non-zero on DB
   failure.
 
 ## 6. Data Model
@@ -433,23 +452,25 @@ table are pruned on each run (FR-31).
 
 ### Index table (`indices`)
 
-A single table shared by all country sets (§5.8); one row per index ticker
-per week.
+A single table shared by all country sets (§5.8), shaped like the
+`*_metrics` tables; one row per index ticker per calendar week.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `ticker` | TEXT | `US-IDX`, `SWE-IDX`, or `UK-IDX` |
 | `name` | TEXT | `US Equity Index`, `OMX Equity Index`, or `FTSE Equity Index` |
 | `country` | TEXT | Country set: `us`, `swe`, or `uk` |
-| `week_start` | DATE | Monday of the index week |
+| `trading_date` | DATE | Latest `trading_date` among the contributing stocks that week |
 | `updated_at` | TIMESTAMPTZ | When the row was written |
-| `ticker_count` | INTEGER | Stocks contributing to this week's return (`N`) |
-| `avg_return` | NUMERIC(18,6) | Equal-weighted average weekly return (NULL on the base week) |
-| `index_price` | NUMERIC(18,6) | Chain-linked index level (base week = 100) |
+| `ticker_count` | INTEGER | Stocks contributing this week (`N`) |
+| `current_price` | NUMERIC(18,6) | Equal-weighted price index level (base week = 100) |
+| `sma_50` | NUMERIC(18,6) | Equal-weighted SMA-50 index level (base = 100 × average `sma_50 / current_price`) |
+| `sma_200` | NUMERIC(18,6) | Equal-weighted SMA-200 index level (base = 100 × average `sma_200 / current_price`) |
+| `momentum` | NUMERIC(18,6) | `sma_50 / sma_200` |
 
-Primary key on `(ticker, week_start)`. Rows with `week_start` older than one
-year are deleted on each weekly run (FR-42, same retention as the metrics
-tables).
+Primary key on `(ticker, trading_date)`, with at most one row per ticker per
+calendar week (FR-35). Rows with `trading_date` older than one year are
+deleted on each weekly run (FR-44, same retention as the metrics tables).
 
 Deleting a row from `us_tickers`, `swe_tickers`, or `uk_tickers` cascades to all
 of its rows in the matching metrics table.
@@ -621,7 +642,7 @@ Python 3.11+. Key libraries: `yfinance`, `pandas`, `psycopg2-binary`,
   `SELECT * FROM us_by_sector WHERE week_start = (SELECT MAX(week_start) FROM us_by_sector) ORDER BY z_score_mean DESC;`
 - Equity indices (after migration step 18, build history once with
   `pipenv run python compute_indices.py`):
-  `SELECT ticker, week_start, index_price, avg_return, ticker_count FROM indices ORDER BY ticker, week_start DESC;`
+  `SELECT ticker, trading_date, current_price, sma_50, sma_200, momentum, ticker_count FROM indices ORDER BY ticker, trading_date DESC;`
 
 ## 11. Future Considerations (Out of Current Scope)
 
