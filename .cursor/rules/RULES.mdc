@@ -14,7 +14,8 @@ Lightweight weekly pipeline: yfinance → SMA-50/200 + close → Neon Postgres. 
 - No UI, API, auth layer, portfolio tracking, or extra indicators (EMA, RSI, MACD).
 - No intraday/real-time data; weekly Saturday job only.
 - `backfill_sma.py` is a **one-off manual** bootstrap — never cron-schedule it on production; run **per country set** (`--country us|swe|uk`, PRD FR-18).
-- Planned but not built: country-scoped `dev-backfill` input, dashboard, gap detection — see PRD §8.1 / §11.
+- No alerting except the data-quality outlier email (PRD §5.9); Golden / Death Cross signals live in `fansboda`.
+- Specified, not yet built: weekly growth columns ([RFC-016](project-docs/rfc/RFC-016-weekly-growth-columns.md), migration step 20) and the outlier guard + Gmail email ([RFC-017](project-docs/rfc/RFC-017-outlier-guard-email.md), no migration). Out of scope until requested: corporate-actions table / correcting unadjusted series, dashboard, gap detection — see PRD §11.
 
 ## Repo layout
 
@@ -65,6 +66,7 @@ Reuse shared logic (`download_batch`, `compute_smas`, `metric_row_from_history`,
 - One row per `(ticker, week_start)` within each set (`week_start` = Monday of `trading_date`); unique constraint `*_metrics_week_start_ticker_key`
 - Week upserts: `ON CONFLICT (ticker, week_start) DO UPDATE ... WHERE EXCLUDED.trading_date > existing` — a newer bar in the same week replaces the row
 - Retention: delete from `*_metrics` / `*_market_metrics` / `indices` where `trading_date` (`week_start` for market metrics) < cutoff (default 365 days)
+- **Planned (RFC-016 / RFC-017):** `*_metrics.price_growth` / `sma_50_growth` / `sma_200_growth` — growth vs the previous calendar week's last bar, both ends from **one** adjusted download (never a ratio of two stored rows, which may sit on different split/dividend bases); indices chain from their equal-weighted mean (stored-row ratio only for gap weeks) and exclude stock-weeks with any growth > `outlier_max_growth` (4.0) or < `outlier_min_growth` (−0.8)
 - Schema changes go in `schema.sql` or `migrate_*.sql` — not ad-hoc in Python
 
 **Fresh DB:** `schema.sql` → `seed_tickers.py --country us` → optional `backfill_sma.py --country us` (repeat `swe` / `uk` when ready). **Legacy DB:** apply `migrate_*.sql` per `MIGRATIONS.md` (through step 19).
@@ -90,6 +92,7 @@ Scripts read from the config object — not scattered `os.getenv` calls. Key tun
 - Production `DATABASE_URL` in GitHub **`production`** environment secrets; dev backfill uses **`development`** + `DATABASE_URL_DEV`.
 - Deploy auth: GitHub OIDC JWT + Workload Identity Federation only — **no `GCP_SA_KEY` or JSON keys**.
 - VM attached service account (metadata server); cron runs as Linux user **`fansboda`**, not root.
+- Outlier email (planned): Gmail API via Workspace domain-wide delegation, JWT signed by the VM SA through IAM `signJwt` — **no JSON key, OAuth refresh token, or SMTP password**; scope `gmail.send` only. `ALERT_EMAIL_FROM` / `ALERT_EMAIL_TO` live in **`production`** secrets / VM `.env`, never in the repo. Test delivery with `scripts/send_test_email.py`, never by running `fetch_sma.py`.
 
 ## CI/CD & operations
 

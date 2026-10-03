@@ -21,7 +21,8 @@ One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **N
 | FR-13 | Download ~730 days OHLCV per batch (default 25 symbols/batch); retry/backoff; inter-batch delay |
 | FR-14 | One snapshot per calendar week (Monday-based `week_start`) at the week's last bar, using closes up to that bar; skip weeks with &lt;200 closes so far |
 | FR-15 | Upsert into the selected country `*_metrics` with the RFC-003 week upsert (`ON CONFLICT (ticker, week_start)`, newer bar wins) |
-| FR-16 | Skip `(ticker, trading_date)` pairs already in the matching country metrics table |
+| FR-15a | Compute `price_growth` / `sma_50_growth` / `sma_200_growth` per weekly snapshot (FR-5a) — **planned** ([RFC-016](./RFC-016-weekly-growth-columns.md)) |
+| FR-16 | Skip `(ticker, trading_date)` pairs already in the matching country metrics table; **planned** (RFC-016): rows whose growth columns are all NULL get only those columns filled |
 | FR-17 | Log per-batch generated/new/inserted/skipped counts and final summary |
 | FR-18 | Required `--country us|swe|uk`: load only that set's `*_tickers`; write only that set's `*_metrics` / `*_market_metrics` |
 | FR-18a | Optional, repeatable `--exchange NAME`: keep only tickers whose `exchange_name` matches (case-insensitive); fail with the available names when none match |
@@ -102,3 +103,4 @@ pipenv run python backfill_sma.py --country us
 | RFC-002 | Seed `--country` used before backfill in the same bootstrap/dev-backfill run |
 | RFC-011 | Dev-backfill passes `--country` into this script |
 | RFC-012 | Scoped backfill only upserts market aggregates for the selected set |
+| RFC-016 | Re-running backfill per country fills the growth columns on stored history |

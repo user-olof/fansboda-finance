@@ -21,10 +21,13 @@ Core weekly job (`fetch_sma.py`): load watchlists from `us_tickers`, `swe_ticker
 | FR-3 | Batch download ~300d OHLCV (default 40 symbols/batch, delay between batches) |
 | FR-4 | Retry 429, rate, timeout, connection, empty frames with exponential backoff |
 | FR-5 | Compute SMA-50/200; skip if &lt;200 closes; set `current_price`, `trading_date`, `currency`; copy `company` from the matching `*_tickers` table |
-| FR-5a | Set `momentum = sma_50 / sma_200`; set `z_score` from market aggregates (RFC-012) |
+| FR-5 (cont.) | Set `momentum = sma_50 / sma_200`; set `z_score` from market aggregates (RFC-012) |
+| FR-5a | Weekly `price_growth` / `sma_50_growth` / `sma_200_growth` vs the previous calendar week's last bar, from the same download — **planned** ([RFC-016](./RFC-016-weekly-growth-columns.md)) |
 | FR-5b | Upsert aggregate row per `week_start` into `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics` — `momentum_mean` / `momentum_std` from that country set's metrics in that week |
 | FR-6 | Upsert with `ON CONFLICT (ticker, week_start) DO UPDATE … WHERE EXCLUDED.trading_date > existing` into `us_metrics` / `swe_metrics` / `uk_metrics` (newer bar replaces the week's row) |
 | FR-7 | Retention purge after run (RFC-004) |
+| FR-7a / FR-7b | Refresh `*_by_sector` (RFC-014), then `indices` (RFC-015) for the weeks written |
+| FR-7c | Email newly detected implausible weekly moves — **planned** ([RFC-017](./RFC-017-outlier-guard-email.md)) |
 | FR-8 | Log batch progress, per-ticker results, summary; non-zero exit on fatal errors |
 
 ## Implementation

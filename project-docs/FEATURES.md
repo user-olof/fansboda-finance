@@ -14,6 +14,8 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 | Rolling retention | Keeps ~1 year of `*_metrics` and `*_market_metrics` history; older rows purged after each weekly run |
 | Sector trends | Equal-weighted weekly trend per sector in `us_by_sector` / `swe_by_sector` / `uk_by_sector` (PRD §5.7) |
 | Equity indices | Equal-weighted weekly index per country in `indices` (`US-IDX`, `SWE-IDX`, `UK-IDX`) with price / SMA-50 / SMA-200 levels and momentum (PRD §5.8) |
+| Weekly growth columns *(planned)* | `price_growth` / `sma_50_growth` / `sma_200_growth` on `*_metrics` from one adjusted download, so splits between fetches cannot distort the indices (PRD FR-5a, [RFC-016](./rfc/RFC-016-weekly-growth-columns.md)) |
+| Outlier guard & email *(planned)* | Stock-weeks moving more than ×5 / below ÷5 are excluded from the index and newly detected ones are emailed to the owner via the Gmail API (PRD FR-37b, §5.9, [RFC-017](./rfc/RFC-017-outlier-guard-email.md)) |
 | Centralized configuration | `DevConfig` / `ProdConfig` in `config.py`; selected via `APP_ENV` |
 | Zero-cost ops | **One** GCP `e2-micro` (Always Free) + Neon Postgres free tier |
 | CI/CD — production | `pytest` on PR to `main`; deploy to long-lived Production VM on push to `main` |
@@ -42,6 +44,7 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 - **Sector**, **industry**, listing **market**, and **exchange_name** are watchlist-level fields on `*_tickers`, not duplicated per metric row.
 - One row per ticker per calendar week (`week_start` = Monday) within each country set; `trading_date` is the bar the row holds.
 - Idempotent week upserts: `ON CONFLICT (ticker, week_start) DO UPDATE … WHERE EXCLUDED.trading_date > existing` — a newer bar in the same week replaces the row.
+- **Planned (RFC-016):** stores **`price_growth`**, **`sma_50_growth`**, and **`sma_200_growth`** — growth vs the previous calendar week's last bar, both ends taken from the same adjusted download (PRD FR-5a). NULL without a previous-week bar or enough closes. Backfill fills them on stored history (FR-16).
 
 ### Market aggregates
 
@@ -89,7 +92,7 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 | Table role | Key columns |
 |------------|-------------|
 | `*_tickers` | `symbol` (PK), `company`, `sector`, `industry`, `market`, `exchange_name`, `business_summary`, `updated_at` |
-| `*_metrics` | `id` (PK), `ticker` (FK → matching `*_tickers.symbol`), `company`, `week_start`, `trading_date`, `updated_at`, `currency`, `sma_50`, `sma_200`, `current_price`, `momentum`, `z_score` |
+| `*_metrics` | `id` (PK), `ticker` (FK → matching `*_tickers.symbol`), `company`, `week_start`, `trading_date`, `updated_at`, `currency`, `sma_50`, `sma_200`, `current_price`, `momentum`, `z_score`; planned: `price_growth`, `sma_50_growth`, `sma_200_growth` (step 20) |
 | `*_market_metrics` | `market`, `week_start`, `updated_at`, `momentum_mean`, `momentum_std` |
 | `*_by_sector` | `sector`, `week_start` (PK together), `updated_at`, `ticker_count`, `momentum_mean`, `momentum_median`, `z_score_mean`, `pct_uptrend` |
 | `indices` (one shared table) | `ticker`, `trading_date` (PK together), `name`, `country`, `updated_at`, `ticker_count`, `current_price`, `sma_50`, `sma_200`, `momentum` |
@@ -118,7 +121,10 @@ Scheduled **Saturdays at 11:00 UTC** on the Production VM (after every market's 
 | Z-score | Sets `z_score` = `(momentum - momentum_mean) / momentum_std` using that date's market aggregates |
 | yfinance metadata | Captures `currency` per snapshot; copies `company` from the matching `*_tickers` table |
 | Append metrics | Inserts new rows into `us_metrics` / `swe_metrics` / `uk_metrics` without overwriting history |
+| Weekly growth *(planned)* | `price_growth` / `sma_50_growth` / `sma_200_growth` vs the previous calendar week's last bar, from the same download (FR-5a, RFC-016) |
 | Retention purge | Deletes `*_metrics` and `*_market_metrics` rows older than configured retention (default 365 days) |
+| Sector trends / indices | Refreshes `*_by_sector` (FR-7a) and `indices` (FR-7b) for the weeks written |
+| Outlier email *(planned)* | Emails newly detected implausible weekly moves after the indices step (FR-7c, RFC-017) |
 | Observability | Per-batch progress, per-ticker results, insert/purge counts, final summary |
 
 ### Watchlist seeding (`seed_tickers.py`)
@@ -171,7 +177,8 @@ Bootstrap script for SMA history — **not** part of the weekly cron (FR-13 – 
 | Momentum / z-score | Populates `momentum` and `z_score` on each inserted country `*_metrics` row |
 | Market stats | Upserts matching `*_market_metrics` with `momentum_mean` / `momentum_std` for backfilled weeks |
 | Currency | Resolves listing `currency` per ticker (same rate-limit pattern as weekly fetch) |
-| Skip existing | Skips `(ticker, trading_date)` pairs already in the matching country metrics table |
+| Skip existing | Skips `(ticker, trading_date)` pairs already in the matching country metrics table; planned (RFC-016): fills the growth columns on stored rows where they are all NULL |
+| Weekly growth *(planned)* | Computes the FR-5a growth columns per weekly snapshot (FR-15a) |
 | Resume-safe | Week upsert; interrupted runs can continue without duplicates |
 | Country scope | **Required** `--country us|swe|uk` — only that set's tickers are loaded and only that set's tables are written (FR-18). Adding UK later must not re-download or re-touch US/SWE. |
 | Exchange scope | Optional, repeatable `--exchange NAME` (e.g. `NasdaqGS`, `NYSE`) limits the run to tickers with that `exchange_name` (FR-18a) |
@@ -221,9 +228,27 @@ Equal-weighted weekly index per country set, stored like a `*_metrics` row
 | Base week | `current_price = 100`; `sma_50` / `sma_200` = `100 ×` the stocks' average `sma / current_price`, so momentum reflects the real trend from week one |
 | Momentum | `sma_50 / sma_200` on the index levels; no `z_score` |
 | Inclusion | Stocks with positive price, SMA-50 and SMA-200 in both this and the previous stored week (one set for all three levels); weeks with none are skipped |
+| Growth chaining *(planned)* | Weekly growth = average of the stocks' stored growth columns (FR-37); stored-row ratio only for gap weeks (FR-37a); inclusion then requires non-NULL growth (FR-36) — [RFC-016](./rfc/RFC-016-weekly-growth-columns.md) |
+| Outlier guard *(planned)* | Stock-weeks with any growth above +400% (×5) or below −80% (÷5) are excluded from all three levels and `ticker_count` that week (FR-37b) — [RFC-017](./rfc/RFC-017-outlier-guard-email.md) |
 | Weekly job | `fetch_sma.py` computes the weeks it wrote (and re-chains later weeks), after sector trends (FR-7b) |
 | Standalone | `compute_indices.py [--country us|swe|uk]` — full rebuild over all retained metrics weeks; no yfinance |
 | Retention | Rows with `trading_date` older than `METRICS_RETENTION_DAYS` are purged weekly (same window as metrics) |
+
+### Data-quality email
+
+Email to the owner's work address when a stock makes an implausible weekly
+move (PRD §5.9, FR-46 – FR-51).
+
+| Capability | Detail |
+|------------|--------|
+| Status | **Planned** — [RFC-017](./rfc/RFC-017-outlier-guard-email.md) |
+| Trigger | Weekly job only, once per run after indices (FR-7c); standalone index rebuilds and backfills only log |
+| Scope | Outliers (FR-37b) in the weeks written that were **not** outliers the previous week; no outliers → no email |
+| Content | Plain text: country, ticker, company, `trading_date`, previous / current close, three growth values, bound crossed, "excluded from index"; thresholds + timestamp footer |
+| Delivery | Gmail API `gmail.send`, from a Google Workspace mailbox (`ALERT_EMAIL_FROM`) to `ALERT_EMAIL_TO`; VM service account via domain-wide delegation, JWT signed with IAM `signJwt` — no stored key |
+| Failure | Logged as `ERROR` with the outlier list; run does not fail |
+| Environments | `alert_email_enabled` off in dev (logs the email), on in prod |
+| Test | `scripts/send_test_email.py` — never run `fetch_sma.py` to test email |
 
 ## Configuration
 
@@ -249,6 +274,10 @@ All tunables live in **`config.py`** (PRD §5.5):
 | `backfill_history_days` | 730 | 730 | Backfill download window |
 | `backfill_batch_size` | 25 | 25 | Backfill batch size |
 | `backfill_batch_delay_seconds` | 5.0 | 5.0 | Delay between backfill batches |
+| `outlier_max_growth` *(planned)* | 4.0 | 4.0 | Weekly growth above this (more than ×5) is an outlier |
+| `outlier_min_growth` *(planned)* | −0.8 | −0.8 | Weekly growth below this (below ÷5) is an outlier |
+| `alert_email_enabled` *(planned)* | `false` | `true` | Send the outlier email; when off, log it |
+| `alert_email_from` / `alert_email_to` *(planned)* | from `.env` (optional) | from VM `.env` (required when enabled) | Workspace sender / owner's work address |
 
 `DevConfig` and `ProdConfig` may override shared defaults per environment.
 
@@ -266,7 +295,7 @@ GCP e2-micro VM  ──cron Thu 11:00 UTC──▶  fetch_sma.py  ──▶  Neo
 
 - **Compute:** one `e2-micro`, UTC, weekly on Saturdays.
 - **Storage:** Neon Postgres (free tier).
-- **Outbound only:** yfinance + Neon via `DATABASE_URL`; VM attached SA needs no GCP API roles.
+- **Outbound only:** yfinance + Neon via `DATABASE_URL`; VM attached SA needs no GCP API roles for data collection. Planned outlier email (RFC-017): Gmail API via that SA with `roles/iam.serviceAccountTokenCreator` on itself + Workspace domain-wide delegation (`gmail.send`).
 
 ### Production VM
 
@@ -296,7 +325,7 @@ Bootstrap installs an enhanced line that also sources `.env` and sets `PIPENV_VE
 - VM `.env`: `DATABASE_URL`, temporary `APP_ENV=dev` while validating (cut over to `APP_ENV=production` later); `chown fansboda:fansboda`, mode `600`.
 - Schema upgrades (three country sets; [MIGRATIONS.md](./MIGRATIONS.md) through steps 12–13) are applied **manually** — not by `deploy.yml`.
 
-**GitHub secrets:** `DATABASE_URL`, `GCP_PROJECT_ID`, `GCP_ZONE`, `GCP_INSTANCE_NAME`, `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_DEPLOY_SERVICE_ACCOUNT`.
+**GitHub secrets:** `DATABASE_URL`, `GCP_PROJECT_ID`, `GCP_ZONE`, `GCP_INSTANCE_NAME`, `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_DEPLOY_SERVICE_ACCOUNT`; planned: `ALERT_EMAIL_FROM`, `ALERT_EMAIL_TO` (RFC-017).
 
 ### CI/CD — dev backfill (PRD §8.1, implemented)
 
@@ -349,6 +378,7 @@ Uses GitHub **`DEV`** environment and `DATABASE_URL` secret (dev branch). Deploy
 - **Deploy auth:** GitHub OIDC JWT + Workload Identity Federation — no long-lived JSON keys.
 - **SSH/SCP:** `--tunnel-through-iap` for production deploy and dev backfill (no public IP).
 - **VM runtime:** Attached service account via metadata server; no key on disk.
+- **Outlier email (planned):** Gmail API via domain-wide delegation with an IAM-signed JWT — no JSON key, OAuth refresh token, or SMTP password; scope limited to `gmail.send`.
 - **SQL:** Parameterized queries in `db/` modules; job scripts contain no SQL strings; live paths use `us_*` / `swe_*` / `uk_*` only.
 - Single-owner system — infra-level access only (PRD §2).
 
@@ -365,7 +395,7 @@ Deploy SA IAM roles: `compute.instanceAdmin.v1`, `iam.serviceAccountUser`, `comp
 | Idempotency | Re-running weekly job or a **scoped** backfill does not create duplicate rows; per-country runs avoid re-touching other sets |
 | Maintainability | Pure logic separated from I/O; unit tests with mocks for DB and yfinance |
 
-**Dependencies:** Python 3.11+; `yfinance`, `pandas`, `psycopg2-binary`, `python-dotenv` via Pipenv.
+**Dependencies:** Python 3.11+; `yfinance`, `pandas`, `psycopg2-binary`, `python-dotenv` via Pipenv; planned `google-auth` + `requests` for the outlier email (RFC-017).
 
 ---
 
@@ -376,7 +406,8 @@ Explicitly **not** part of fansboda-finance (PRD §2, §11), except where noted:
 - User-facing UI or read API
 - Intraday or real-time quotes (weekly Saturday job only)
 - Additional indicators (EMA, RSI, MACD) or alternate moving-average windows beyond the SMA-50 / SMA-200 pair
-- Golden / Death Cross detection, signals, or alerting — owned by the `fansboda` repo (PRD §5.6)
+- Golden / Death Cross detection, signals, or alerting — owned by the `fansboda` repo (PRD §5.6); the only notification here is the data-quality email (PRD §5.9)
+- Correcting series Yahoo failed to split-adjust, or a corporate-actions table (PRD §11)
 - Portfolio, order, or transaction tracking
 - Application authentication / authorization
 - Gap detection for missed weekly runs

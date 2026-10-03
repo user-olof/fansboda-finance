@@ -51,6 +51,11 @@ Replace scattered `os.getenv` / `os.environ` reads with `config.py` exposing `De
 | `backfill_history_days` | 730 | 730 | `BACKFILL_HISTORY_DAYS` | Backfill OHLCV window |
 | `backfill_batch_size` | 25 | 25 | `BACKFILL_BATCH_SIZE` | Backfill batch size |
 | `backfill_batch_delay_seconds` | 5.0 | 5.0 | `BACKFILL_BATCH_DELAY_SECONDS` | Delay between backfill batches |
+| `outlier_max_growth` | 4.0 | 4.0 | `OUTLIER_MAX_GROWTH` | **Planned** (RFC-017) — weekly growth above this (more than ×5) is an outlier |
+| `outlier_min_growth` | −0.8 | −0.8 | `OUTLIER_MIN_GROWTH` | **Planned** (RFC-017) — weekly growth below this (below ÷5) is an outlier |
+| `alert_email_enabled` | `false` | `true` | `ALERT_EMAIL_ENABLED` | **Planned** (RFC-017) — send the outlier email; when off, log it |
+| `alert_email_from` | from `.env` (optional) | from VM `.env` (required when enabled) | `ALERT_EMAIL_FROM` | **Planned** (RFC-017) — Workspace sender mailbox |
+| `alert_email_to` | from `.env` (optional) | from VM `.env` (required when enabled) | `ALERT_EMAIL_TO` | **Planned** (RFC-017) — owner's work address |
 
 `DevConfig` and `ProdConfig` may override shared defaults per environment.
 
@@ -75,6 +80,9 @@ def get_config() -> BaseConfig:
 ```
 DATABASE_URL=postgresql://...
 APP_ENV=dev
+# planned (RFC-017):
+ALERT_EMAIL_FROM=...
+ALERT_EMAIL_TO=...
 ```
 
 **Temporary (VM validation):** deploy currently writes `APP_ENV=dev` (not production cutover). Switch to `APP_ENV=production` when ready (RFC-007). No UK-specific env vars are required — country routing is code/schema, not config.
