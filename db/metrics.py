@@ -22,7 +22,8 @@ INSERT_METRICS_SQL = sql_for_countries(
     """
 INSERT INTO {metrics} (
     ticker, company, week_start, trading_date, updated_at,
-    currency, sma_50, sma_200, current_price, momentum, z_score
+    currency, sma_50, sma_200, current_price, momentum, z_score,
+    price_growth, sma_50_growth, sma_200_growth
 )
 VALUES %s
 ON CONFLICT (ticker, week_start) DO UPDATE SET
@@ -34,8 +35,29 @@ ON CONFLICT (ticker, week_start) DO UPDATE SET
     sma_200 = EXCLUDED.sma_200,
     current_price = EXCLUDED.current_price,
     momentum = EXCLUDED.momentum,
-    z_score = EXCLUDED.z_score
+    z_score = EXCLUDED.z_score,
+    price_growth = EXCLUDED.price_growth,
+    sma_50_growth = EXCLUDED.sma_50_growth,
+    sma_200_growth = EXCLUDED.sma_200_growth
 WHERE EXCLUDED.trading_date > {metrics}.trading_date
+"""
+)
+
+# Backfill (FR-16): only rows whose growth columns are all still NULL.
+FILL_MISSING_GROWTH_SQL = sql_for_countries(
+    """
+UPDATE {metrics} m
+SET price_growth = v.price_growth::numeric,
+    sma_50_growth = v.sma_50_growth::numeric,
+    sma_200_growth = v.sma_200_growth::numeric
+FROM (VALUES %s) AS v (
+    ticker, trading_date, price_growth, sma_50_growth, sma_200_growth
+)
+WHERE m.ticker = v.ticker
+  AND m.trading_date = v.trading_date::date
+  AND m.price_growth IS NULL
+  AND m.sma_50_growth IS NULL
+  AND m.sma_200_growth IS NULL
 """
 )
 
@@ -132,6 +154,9 @@ def _metric_values(rows: list[MetricRow], *, updated_at: datetime) -> list[tuple
             row.current_price,
             row.momentum,
             row.z_score,
+            row.price_growth,
+            row.sma_50_growth,
+            row.sma_200_growth,
         )
         for row in rows
     ]
@@ -164,6 +189,47 @@ def insert_metrics(database_url: str, rows: list[MetricRow]) -> int:
         conn.commit()
 
     return inserted
+
+
+def fill_missing_growth(
+    database_url: str,
+    rows: list[MetricRow],
+    *,
+    country: CountrySet,
+) -> int:
+    """Fill growth columns on stored rows where all three are NULL (FR-16).
+
+    Rows are matched on ``(ticker, trading_date)``; nothing else is touched.
+    Returns rows updated.
+    """
+    values = [
+        (
+            row.ticker,
+            row.trading_date,
+            row.price_growth,
+            row.sma_50_growth,
+            row.sma_200_growth,
+        )
+        for row in rows
+        if row.price_growth is not None
+        or row.sma_50_growth is not None
+        or row.sma_200_growth is not None
+    ]
+    if not values:
+        return 0
+
+    with psycopg2.connect(database_url) as conn:
+        with conn.cursor() as cur:
+            execute_values(
+                cur,
+                FILL_MISSING_GROWTH_SQL[country],
+                values,
+                page_size=len(values),
+            )
+            updated = cur.rowcount
+        conn.commit()
+
+    return updated
 
 
 def load_existing_metric_keys(

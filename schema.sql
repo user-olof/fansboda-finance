@@ -36,6 +36,9 @@ CREATE TABLE IF NOT EXISTS us_metrics (
     current_price  NUMERIC(18, 6),
     momentum       NUMERIC(18, 6),
     z_score        NUMERIC(18, 6),
+    price_growth   NUMERIC(18, 6),
+    sma_50_growth  NUMERIC(18, 6),
+    sma_200_growth NUMERIC(18, 6),
     CONSTRAINT us_metrics_week_start_ticker_key UNIQUE (week_start, ticker)
 );
 
@@ -91,6 +94,9 @@ CREATE TABLE IF NOT EXISTS swe_metrics (
     current_price  NUMERIC(18, 6),
     momentum       NUMERIC(18, 6),
     z_score        NUMERIC(18, 6),
+    price_growth   NUMERIC(18, 6),
+    sma_50_growth  NUMERIC(18, 6),
+    sma_200_growth NUMERIC(18, 6),
     CONSTRAINT swe_metrics_week_start_ticker_key UNIQUE (week_start, ticker)
 );
 
@@ -146,6 +152,9 @@ CREATE TABLE IF NOT EXISTS uk_metrics (
     current_price  NUMERIC(18, 6),
     momentum       NUMERIC(18, 6),
     z_score        NUMERIC(18, 6),
+    price_growth   NUMERIC(18, 6),
+    sma_50_growth  NUMERIC(18, 6),
+    sma_200_growth NUMERIC(18, 6),
     CONSTRAINT uk_metrics_week_start_ticker_key UNIQUE (week_start, ticker)
 );
 

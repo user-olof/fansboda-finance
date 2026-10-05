@@ -19,7 +19,7 @@ import pandas as pd
 
 from compute_indices import refresh_indices
 from compute_sector_trends import refresh_sector_trends
-from config import get_config
+from config import BaseConfig, get_config
 from db.country import CountrySet, country_set_for
 from db.market import upsert_market_stats
 from db.metrics import (
@@ -28,9 +28,12 @@ from db.metrics import (
     load_momentum_by_market_for_week,
     update_z_scores_for_week,
 )
+from db.outliers import load_outliers
 from db.retention import purge_stale_data
 from db.tickers import load_tickers_from_db
-from models import MarketRow, MetricRow
+from gmail_client import send_email
+from models import MarketRow, MetricRow, OutlierRow, week_start_of
+from outlier_email import build_outlier_email
 from yfinance_client import download_batch, load_currency_for_tickers
 
 logging.basicConfig(
@@ -75,6 +78,48 @@ def trading_date_from_index(index: pd.DatetimeIndex) -> date:
     if hasattr(ts, "date"):
         return ts.date()
     return pd.Timestamp(ts).date()
+
+
+def previous_week_bar_position(index: pd.DatetimeIndex, pos: int) -> int | None:
+    """Position of the last bar in the calendar week before the bar at ``pos``."""
+    previous_week = week_start_of(pd.Timestamp(index[pos]).date()) - timedelta(days=7)
+    for candidate in range(pos - 1, -1, -1):
+        week = week_start_of(pd.Timestamp(index[candidate]).date())
+        if week == previous_week:
+            return candidate
+        if week < previous_week:
+            return None
+    return None
+
+
+def _growth(current: object, previous: object) -> Decimal | None:
+    if current is None or previous is None:
+        return None
+    previous_value = float(previous)
+    current_value = float(current)
+    if previous_value == 0 or pd.isna(previous_value) or pd.isna(current_value):
+        return None
+    return _to_decimal(current_value / previous_value - 1)
+
+
+def compute_weekly_growth(
+    close: pd.Series, pos: int
+) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
+    """Growth of close, SMA-50 and SMA-200 vs the previous calendar week (FR-5a).
+
+    Both ends come from the same (consistently adjusted) ``close`` series, each
+    SMA using only closes up to its own bar.
+    """
+    previous_pos = previous_week_bar_position(close.index, pos)
+    if previous_pos is None:
+        return None, None, None
+    sma_50, sma_200 = compute_smas(close.iloc[: pos + 1])
+    prev_sma_50, prev_sma_200 = compute_smas(close.iloc[: previous_pos + 1])
+    return (
+        _growth(close.iloc[pos], close.iloc[previous_pos]),
+        _growth(sma_50, prev_sma_50),
+        _growth(sma_200, prev_sma_200),
+    )
 
 
 def compute_momentum(
@@ -160,6 +205,9 @@ def metric_row_from_history(
     trading_date = trading_date_from_index(history.index)
     current_price = _to_decimal(close.iloc[-1])
     momentum = compute_momentum(sma_50, sma_200)
+    price_growth, sma_50_growth, sma_200_growth = compute_weekly_growth(
+        close, len(close) - 1
+    )
 
     return MetricRow(
         ticker=ticker,
@@ -171,6 +219,9 @@ def metric_row_from_history(
         currency=currency,
         momentum=momentum,
         z_score=None,
+        price_growth=price_growth,
+        sma_50_growth=sma_50_growth,
+        sma_200_growth=sma_200_growth,
     )
 
 
@@ -301,13 +352,95 @@ def _run_sector_trends(database_url: str, week_starts: set[date]) -> None:
     )
 
 
-def _run_indices(database_url: str, week_starts: set[date]) -> None:
-    written = refresh_indices(database_url, sorted(week_starts))
+def _run_indices(config: BaseConfig, week_starts: set[date]) -> None:
+    written = refresh_indices(
+        config.database_url,
+        sorted(week_starts),
+        max_growth=config.outlier_max_growth,
+        min_growth=config.outlier_min_growth,
+    )
     logger.info(
         "Indices: wrote %d US-IDX/SWE-IDX/UK-IDX row(s) from week(s) %s",
         written,
         ", ".join(week.isoformat() for week in sorted(week_starts)),
     )
+
+
+def _run_outlier_email(config: BaseConfig, week_starts: set[date]) -> tuple[int, int]:
+    """Email newly detected outliers in the weeks written (FR-7c / §5.9).
+
+    Never raises: email problems must not fail the run (FR-50). Returns
+    ``(new, continuing)`` outlier counts.
+    """
+    try:
+        outliers: list[OutlierRow] = []
+        for country in CountrySet:
+            outliers.extend(
+                load_outliers(
+                    config.database_url,
+                    sorted(week_starts),
+                    country=country,
+                    max_growth=config.outlier_max_growth,
+                    min_growth=config.outlier_min_growth,
+                )
+            )
+    except Exception:
+        logger.exception("Failed to load outliers for the data-quality email")
+        return 0, 0
+
+    new_count = sum(1 for row in outliers if row.is_new)
+    continuing = len(outliers) - new_count
+    message = build_outlier_email(
+        outliers,
+        max_growth=config.outlier_max_growth,
+        min_growth=config.outlier_min_growth,
+        now=datetime.now(timezone.utc),
+    )
+    if message is None:
+        logger.info(
+            "Outlier email: no new outliers (%d continuing), nothing to send",
+            continuing,
+        )
+        return new_count, continuing
+
+    subject, body = message
+    if not config.alert_email_enabled:
+        logger.info(
+            "Outlier email disabled (ALERT_EMAIL_ENABLED off); would send:\n%s\n\n%s",
+            subject,
+            body,
+        )
+        return new_count, continuing
+    if not config.alert_email_from or not config.alert_email_to:
+        logger.error(
+            "Outlier email enabled but ALERT_EMAIL_FROM / ALERT_EMAIL_TO missing; "
+            "not sent:\n%s\n\n%s",
+            subject,
+            body,
+        )
+        return new_count, continuing
+
+    try:
+        message_id = send_email(
+            sender=config.alert_email_from,
+            recipient=config.alert_email_to,
+            subject=subject,
+            body=body,
+            max_retries=config.yf_max_retries,
+            retry_base_seconds=config.yf_retry_base_seconds,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to send outlier email; outliers were:\n%s\n\n%s", subject, body
+        )
+        return new_count, continuing
+
+    logger.info(
+        "Outlier email sent (%d new outlier(s), message id %s)",
+        new_count,
+        message_id,
+    )
+    return new_count, continuing
 
 
 def main() -> int:
@@ -466,16 +599,19 @@ def main() -> int:
         logger.exception("Failed to compute sector trends")
         return 1
 
+    outliers_new = outliers_continuing = 0
     if week_starts:
         try:
-            _run_indices(database_url, week_starts)
+            _run_indices(config, week_starts)
         except Exception:
             logger.exception("Failed to compute indices")
             return 1
+        outliers_new, outliers_continuing = _run_outlier_email(config, week_starts)
 
     logger.info(
         "Summary: total=%d skipped=%d fetched=%d inserted=%d "
         "purged_metrics=%d purged_market_metrics=%d purged_indices=%d "
+        "outliers_new=%d outliers_continuing=%d "
         "failed_batches=%d http_batches=%d",
         len(all_tickers),
         skipped_count,
@@ -484,6 +620,8 @@ def main() -> int:
         metrics_purged,
         market_metrics_purged,
         indices_purged,
+        outliers_new,
+        outliers_continuing,
         failed_batches,
         len(batches),
     )

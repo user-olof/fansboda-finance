@@ -25,6 +25,7 @@ MIGRATIONS = [
     REPO_ROOT / "migrate_add_by_sector_tables.sql",
     REPO_ROOT / "migrate_add_indices_table.sql",
     REPO_ROOT / "migrate_indices_levels.sql",
+    REPO_ROOT / "migrate_add_growth_columns.sql",
 ]
 APPLY_MIGRATIONS_SH = REPO_ROOT / "scripts" / "apply_migrations.sh"
 COUNTRY_TABLES = (
@@ -408,4 +409,42 @@ def test_apply_migrations_runs_indices_steps_in_order_in_both_paths() -> None:
         script.rindex("migrate_add_by_sector_tables.sql")
         < script.rindex("migrate_add_indices_table.sql")
         < script.rindex("migrate_indices_levels.sql")
+    )
+
+
+GROWTH_COLUMNS = ("price_growth", "sma_50_growth", "sma_200_growth")
+
+
+def test_schema_metrics_have_growth_columns() -> None:
+    sql = SCHEMA_SQL.read_text(encoding="utf-8")
+    for prefix in ("us", "swe", "uk"):
+        section = sql.split(f"CREATE TABLE IF NOT EXISTS {prefix}_metrics (", 1)[
+            1
+        ].split(");", 1)[0]
+        for column in GROWTH_COLUMNS:
+            assert re.search(rf"\b{column}\s+NUMERIC\(18, 6\)", section), (
+                prefix,
+                column,
+            )
+
+
+def test_step_20_adds_growth_columns_idempotently() -> None:
+    sql = " ".join(
+        (REPO_ROOT / "migrate_add_growth_columns.sql").read_text(encoding="utf-8").split()
+    )
+    for prefix in ("us", "swe", "uk"):
+        assert f"ALTER TABLE {prefix}_metrics" in sql
+    for column in GROWTH_COLUMNS:
+        assert sql.count(f"ADD COLUMN IF NOT EXISTS {column} NUMERIC(18, 6)") == 3
+    assert "DROP" not in sql
+
+
+def test_apply_migrations_runs_step_20_last_in_both_paths() -> None:
+    script = APPLY_MIGRATIONS_SH.read_text(encoding="utf-8")
+    skip_block = script.split('"$has_raw_ratios" == "no"', 1)[1].split("fi\n", 1)[0]
+    assert skip_block.index("migrate_indices_levels.sql") < skip_block.index(
+        "migrate_add_growth_columns.sql"
+    )
+    assert script.rindex("migrate_indices_levels.sql") < script.rindex(
+        "migrate_add_growth_columns.sql"
     )

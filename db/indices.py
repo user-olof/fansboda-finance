@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from decimal import Decimal
 
 import psycopg2
 
+from config import DEFAULT_OUTLIER_MAX_GROWTH, DEFAULT_OUTLIER_MIN_GROWTH
 from db.country import CountrySet, sql_for_countries
 from db.metrics import retention_cutoff
 from equity_index import (
@@ -38,9 +40,30 @@ WHERE week_start = %s
 """
 )
 
-# Equal-weighted mean growth per measure over stocks with positive price and
-# SMAs in both the previous index week and this week (one set for all levels).
+# Equal-weighted mean of the stocks' stored weekly growth (FR-37), over stocks
+# with positive price / SMAs and all three growth values inside the outlier
+# bounds (FR-36 / FR-37b); one set drives all three levels.
 CHAINED_WEEK_STATS_SQL = sql_for_countries(
+    """
+SELECT
+    COUNT(*),
+    MAX(trading_date),
+    AVG(price_growth),
+    AVG(sma_50_growth),
+    AVG(sma_200_growth)
+FROM {metrics}
+WHERE week_start = %s
+  AND current_price > 0 AND sma_50 > 0 AND sma_200 > 0
+  AND price_growth BETWEEN %s AND %s
+  AND sma_50_growth BETWEEN %s AND %s
+  AND sma_200_growth BETWEEN %s AND %s
+"""
+)
+
+# Gap week (FR-37a): the previous index week is not the previous calendar week,
+# so growth is the ratio of stored rows between the two weeks, with the same
+# outlier bounds applied to each ratio.
+GAP_WEEK_STATS_SQL = sql_for_countries(
     """
 SELECT
     COUNT(*),
@@ -55,6 +78,9 @@ JOIN {metrics} prev
 WHERE cur.week_start = %s
   AND cur.current_price > 0 AND cur.sma_50 > 0 AND cur.sma_200 > 0
   AND prev.current_price > 0 AND prev.sma_50 > 0 AND prev.sma_200 > 0
+  AND cur.current_price / prev.current_price - 1 BETWEEN %s AND %s
+  AND cur.sma_50 / prev.sma_50 - 1 BETWEEN %s AND %s
+  AND cur.sma_200 / prev.sma_200 - 1 BETWEEN %s AND %s
 """
 )
 
@@ -82,6 +108,8 @@ def write_index_weeks(
     *,
     country: CountrySet,
     rebuild: bool = False,
+    max_growth: float = DEFAULT_OUTLIER_MAX_GROWTH,
+    min_growth: float = DEFAULT_OUTLIER_MIN_GROWTH,
 ) -> list[IndexRow]:
     """Compute and store the country's index for each week, in ascending order.
 
@@ -89,10 +117,12 @@ def write_index_weeks(
     the rows written earlier in the same call. The week's existing row (any
     ``trading_date`` in that calendar week) is replaced. ``rebuild=True`` first
     deletes every row for the index, making the earliest week the base week.
-    A week with no contributing stocks ends up with no row (FR-41). One
+    A week with no contributing stocks ends up with no row (FR-41). Stock-weeks
+    with growth outside ``[min_growth, max_growth]`` are excluded (FR-37b). One
     transaction.
     """
     definition = INDEX_DEFINITIONS[country]
+    bounds = (Decimal(str(min_growth)), Decimal(str(max_growth))) * 3
     written: list[IndexRow] = []
     with psycopg2.connect(database_url) as conn:
         with conn.cursor() as cur:
@@ -115,10 +145,16 @@ def write_index_weeks(
                     )
                 else:
                     prev_date, prev_price, prev_sma_50, prev_sma_200 = previous
-                    cur.execute(
-                        CHAINED_WEEK_STATS_SQL[country],
-                        (week_start_of(prev_date), week_start),
-                    )
+                    prev_week = week_start_of(prev_date)
+                    if prev_week == week_start - timedelta(days=7):
+                        cur.execute(
+                            CHAINED_WEEK_STATS_SQL[country], (week_start, *bounds)
+                        )
+                    else:
+                        cur.execute(
+                            GAP_WEEK_STATS_SQL[country],
+                            (prev_week, week_start, *bounds),
+                        )
                     (
                         ticker_count,
                         trading_date,

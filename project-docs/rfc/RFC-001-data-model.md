@@ -59,7 +59,7 @@ Listing **`market`** (yfinance bucket on `*_tickers`, e.g. `us_market`, `se_mark
 | `currency` | TEXT | From yfinance |
 | `sma_50` / `sma_200` / `current_price` | NUMERIC(18,6) | |
 | `momentum` / `z_score` | NUMERIC(18,6) | `sma_50/sma_200`; cross-sectional z-score vs market aggregates |
-| `price_growth` / `sma_50_growth` / `sma_200_growth` | NUMERIC(18,6) | Growth vs the previous calendar week's last bar from one adjusted series (FR-5a) — **planned**, step 20 ([RFC-016](./RFC-016-weekly-growth-columns.md)) |
+| `price_growth` / `sma_50_growth` / `sma_200_growth` | NUMERIC(18,6) | Growth vs the previous calendar week's last bar from one adjusted series (FR-5a) — step 20 ([RFC-016](./RFC-016-weekly-growth-columns.md)) |
 
 - One row per ticker per calendar week within each set (`*_metrics_week_start_ticker_key UNIQUE (week_start, ticker)`; column order lets the same index serve per-week lookups)
 - Week upsert: `ON CONFLICT (ticker, week_start) DO UPDATE … WHERE EXCLUDED.trading_date > existing trading_date` — a newer bar replaces the week's row; equal/older bars are ignored
@@ -88,7 +88,7 @@ Listing **`market`** (yfinance bucket on `*_tickers`, e.g. `us_market`, `se_mark
 | `migrate_add_uk_tables.sql` | Step 13 — create `uk_*` table set — **done** |
 | `migrate_momentum_zscore.sql` | Step 14 — `momentum` / `z_score` — **done** |
 | `migrate_week_buckets.sql` | Step 15 — `week_start` buckets; market metrics keyed by week |
-| `migrate_add_growth_columns.sql` | Step 20 — weekly growth columns on `*_metrics` — **planned** (RFC-016) |
+| `migrate_add_growth_columns.sql` | Step 20 — weekly growth columns on `*_metrics` — **done** (RFC-016) |
 | `project-docs/MIGRATIONS.md` | Migration order and paths by starting state |
 | `scripts/verify_schema.sql` | Asserts US/SWE/UK sets and `exchange_name` |
 | `tests/test_schema.py` | CI validation of DDL files |

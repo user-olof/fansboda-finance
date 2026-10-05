@@ -441,7 +441,7 @@ thresholds — no extra table and no extra yfinance calls.
   mailbox (`alert_email_from`) **to** the owner's work address
   (`alert_email_to`). The VM's attached service account authenticates
   keylessly: it signs its delegation JWT through the IAM Credentials
-  `signJwt` API using its metadata-server token, with `subject` =
+  API (`signBlob`) using its metadata-server token, with `subject` =
   `alert_email_from`. No JSON key, OAuth refresh token, or SMTP password is
   stored anywhere. One-time setup is in §8.2.
 - **FR-50 Failure handling:** A send failure (auth, quota, network) is logged
@@ -651,7 +651,7 @@ Keyless delivery for FR-49, done outside the repo:
 1. **GCP project:** enable the **Gmail API** and the **IAM Service Account
    Credentials API**.
 2. **VM service account:** grant it `roles/iam.serviceAccountTokenCreator`
-   **on itself** (so it can call `signJwt` for its own identity). The VM's
+   **on itself** (so it can sign with the IAM Credentials API as its own identity). The VM's
    access scopes must allow IAM calls (`cloud-platform`).
 3. **Google Workspace admin:** under *Security → API controls → Domain-wide
    delegation*, add the VM service account's **client ID** with exactly the

@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | **Priority** | P3 |
-| **Status** | **Proposed** |
+| **Status** | **Implemented** (code + tests; Gmail / domain-wide delegation setup is a manual one-time step) |
 | **Depends on** | RFC-006, RFC-007, RFC-009, RFC-015, RFC-016 |
 | **PRD** | §2, §5.1 (FR-7c), §5.5, §5.8 (FR-37b, FR-45), §5.9 (FR-46–FR-51), §8.2, §9 |
 | **Feature** | [Equity indices](../FEATURES.md#equity-indices), [Data-quality email](../FEATURES.md#data-quality-email) |
@@ -29,7 +29,7 @@ thresholds; no extra table, no schema migration, no extra yfinance calls.
 | FR-7c / FR-46 | Only the weekly job emails, once per run, after indices; standalone `compute_indices.py` / backfills only log |
 | FR-47 | Email only outliers whose stock was **not** an outlier in the previous calendar week; no outliers → no email; report count of continuing outliers |
 | FR-48 | Plain-text subject/body as in PRD (country, ticker, company, `trading_date`, previous / current close, three growth values, bound crossed, "excluded from index"; thresholds + UTC timestamp footer); no secrets |
-| FR-49 | Gmail API `users.messages.send`, scope `gmail.send`, from `alert_email_from` to `alert_email_to`; VM SA signs its delegation JWT via IAM Credentials `signJwt`, `subject = alert_email_from` |
+| FR-49 | Gmail API `users.messages.send`, scope `gmail.send`, from `alert_email_from` to `alert_email_to`; VM SA signs its delegation JWT via the IAM Credentials API (`signBlob`, through `google.auth.iam.Signer`), `subject = alert_email_from` |
 | FR-50 | Send failure → `ERROR` log with outlier list; run does not fail; transient errors retried with FR-4 backoff |
 | FR-51 | `alert_email_enabled` (dev off / prod on); when off, log subject + body |
 
@@ -85,7 +85,7 @@ AuthorizedSession(creds).post(
 )
 ```
 
-The metadata-server token authorizes `signJwt`; the signed JWT is exchanged
+The metadata-server token authorizes the IAM `signBlob` call; the signed JWT is exchanged
 for a Gmail token impersonating `alert_email_from`. Nothing secret lives on
 disk; addresses are not secrets but are kept out of the repo in the VM
 `.env`.
@@ -94,7 +94,7 @@ disk; addresses are not secrets but are kept out of the repo in the VM
 
 `deploy.yml` adds `ALERT_EMAIL_FROM` / `ALERT_EMAIL_TO` (GitHub `production`
 environment secrets) to the VM `.env`, same `install -o fansboda -g fansboda
--m 600` path. `ALERT_EMAIL_ENABLED` follows `APP_ENV` defaults unless set.
+-m 600` path. When both secrets are set, deploy also writes `ALERT_EMAIL_ENABLED=true` (the VM still runs `APP_ENV=dev` while validating); without them the email stays off.
 
 ### One-time setup (outside the repo, PRD §8.2)
 

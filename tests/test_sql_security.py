@@ -13,6 +13,9 @@ JOB_SCRIPTS = (
     "refresh_tickers.py",
     "compute_sector_trends.py",
     "compute_indices.py",
+    "outlier_email.py",
+    "gmail_client.py",
+    "scripts/send_test_email.py",
 )
 
 SQL_MARKERS = (
@@ -39,6 +42,7 @@ DB_MODULES = (
     "market.py",
     "retention.py",
     "truncate.py",
+    "outliers.py",
 )
 
 

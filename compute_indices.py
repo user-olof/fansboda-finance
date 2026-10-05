@@ -2,9 +2,10 @@
 """Compute equal-weighted weekly country indices into ``indices`` (PRD §5.8).
 
 US-IDX / SWE-IDX / UK-IDX store price, SMA-50 and SMA-200 levels (each chained
-by the plain average of the stocks' weekly growth in that measure) plus
-momentum, from ``*_metrics``. No yfinance calls. Runs standalone (full rebuild
-by default) and from ``fetch_sma.py`` for the weeks it wrote.
+by the plain average of the stocks' stored weekly growth in that measure) plus
+momentum, from ``*_metrics``. Stock-weeks with implausible growth are excluded
+and logged (FR-37b). No yfinance calls. Runs standalone (full rebuild by
+default) and from ``fetch_sma.py`` for the weeks it wrote.
 """
 
 from __future__ import annotations
@@ -14,10 +15,15 @@ import logging
 import sys
 from datetime import date
 
-from config import get_config
+from config import (
+    DEFAULT_OUTLIER_MAX_GROWTH,
+    DEFAULT_OUTLIER_MIN_GROWTH,
+    get_config,
+)
 from db.country import CountrySet
 from db.indices import write_index_weeks
 from db.metrics import load_distinct_week_starts
+from db.outliers import load_outliers
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,6 +37,8 @@ def refresh_indices(
     week_starts: list[date] | None = None,
     *,
     country: CountrySet | None = None,
+    max_growth: float = DEFAULT_OUTLIER_MAX_GROWTH,
+    min_growth: float = DEFAULT_OUTLIER_MIN_GROWTH,
 ) -> int:
     """Recompute country indices; returns rows written.
 
@@ -53,8 +61,40 @@ def refresh_indices(
             continue
 
         rows = write_index_weeks(
-            database_url, weeks, country=set_key, rebuild=week_starts is None
+            database_url,
+            weeks,
+            country=set_key,
+            rebuild=week_starts is None,
+            max_growth=max_growth,
+            min_growth=min_growth,
         )
+        outliers = load_outliers(
+            database_url,
+            weeks,
+            country=set_key,
+            max_growth=max_growth,
+            min_growth=min_growth,
+        )
+        if week_starts is None:
+            outliers = [o for o in outliers if o.week_start != weeks[0]]
+        for outlier in outliers:
+            logger.warning(
+                "Outlier excluded from %s index: %s trading_date=%s "
+                "price_growth=%s sma_50_growth=%s sma_200_growth=%s (%s)",
+                set_key.value,
+                outlier.ticker,
+                outlier.trading_date.isoformat(),
+                outlier.price_growth,
+                outlier.sma_50_growth,
+                outlier.sma_200_growth,
+                outlier.bound,
+            )
+        if outliers:
+            logger.info(
+                "Index %s: %d outlier stock-week(s) excluded",
+                set_key.value,
+                len(outliers),
+            )
         for row in rows:
             logger.info(
                 "Index %s trading_date=%s ticker_count=%d current_price=%.4f "
@@ -103,7 +143,13 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Rebuilding indices (country=%s)", scope)
 
     try:
-        written = refresh_indices(config.database_url, None, country=country)
+        written = refresh_indices(
+            config.database_url,
+            None,
+            country=country,
+            max_growth=config.outlier_max_growth,
+            min_growth=config.outlier_min_growth,
+        )
     except Exception:
         logger.exception("Failed to compute indices (%s)", scope)
         return 1

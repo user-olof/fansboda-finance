@@ -34,6 +34,15 @@ WHERE table_schema = 'public'
 ORDER BY table_name, column_name;
 -- expect 15 rows
 
+-- weekly growth columns (step 20, FR-5a)
+SELECT table_name, column_name, numeric_precision, numeric_scale
+FROM information_schema.columns
+WHERE table_schema = 'public'
+  AND table_name IN ('us_metrics', 'swe_metrics', 'uk_metrics')
+  AND column_name IN ('price_growth', 'sma_50_growth', 'sma_200_growth')
+ORDER BY table_name, column_name;
+-- expect 9 rows (18, 6)
+
 -- us_market_metrics / swe_market_metrics / uk_market_metrics
 SELECT table_name, column_name, data_type, numeric_precision, numeric_scale
 FROM information_schema.columns

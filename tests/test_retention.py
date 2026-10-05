@@ -32,6 +32,12 @@ def _stub_indices():
 
 
 @pytest.fixture(autouse=True)
+def _stub_outliers():
+    with patch("fetch_sma.load_outliers", return_value=[]) as mock:
+        yield mock
+
+
+@pytest.fixture(autouse=True)
 def _stub_sector_trends():
     with patch("fetch_sma.refresh_sector_trends", return_value=(0, 0)) as mock:
         yield mock
@@ -356,7 +362,12 @@ def test_main_fetches_stale_tickers_and_inserts(
     _stub_sector_trends.assert_called_once_with(
         "postgresql://example", [date(2026, 6, 1)]
     )
-    _stub_indices.assert_called_once_with("postgresql://example", [date(2026, 6, 1)])
+    _stub_indices.assert_called_once_with(
+        "postgresql://example",
+        [date(2026, 6, 1)],
+        max_growth=4.0,
+        min_growth=-0.8,
+    )
     inserted_rows = mock_insert.call_args[0][1]
     assert inserted_rows[0].company == "Alpha"
     assert inserted_rows[0].currency == "SEK"

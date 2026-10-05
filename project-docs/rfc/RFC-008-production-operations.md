@@ -36,7 +36,7 @@ PRD §8.1 (ephemeral dev VM via manual `workflow_dispatch`) is **out of scope** 
 ```
 
 - **Cost target:** one 24/7 `e2-micro` within GCP Always Free + Neon free tier (PRD §1, §7).
-- **Outbound only:** yfinance and Neon via `DATABASE_URL`; the VM's attached service account needs no GCP API roles for data collection. **Planned** (RFC-017): the outlier email adds outbound Gmail API / IAM Credentials calls using that same identity.
+- **Outbound only:** yfinance and Neon via `DATABASE_URL`; the VM's attached service account needs no GCP API roles for data collection. The outlier email (RFC-017) adds outbound Gmail API / IAM Credentials calls using that same identity.
 
 ## Requirements
 
@@ -127,7 +127,7 @@ Bootstrap installs an **enhanced** line so `get_config()` receives production se
 
 Separate from the **deploy** service account (RFC-009). The instance SA is the runtime identity via the metadata server. No GCP roles required for data collection — outbound HTTPS to yfinance and Neon only.
 
-**Planned (RFC-017, outlier email):** grant the instance SA
+**Outlier email (RFC-017):** grant the instance SA
 `roles/iam.serviceAccountTokenCreator` on itself, set VM access scopes to
 include `cloud-platform`, enable the Gmail API and IAM Service Account
 Credentials API, and have a Workspace admin add the SA's client ID to

@@ -19,6 +19,8 @@ DEFAULT_METRICS_RETENTION_DAYS = 365
 DEFAULT_BACKFILL_HISTORY_DAYS = 730
 DEFAULT_BACKFILL_BATCH_SIZE = 25
 DEFAULT_BACKFILL_BATCH_DELAY_SECONDS = 5.0
+DEFAULT_OUTLIER_MAX_GROWTH = 4.0
+DEFAULT_OUTLIER_MIN_GROWTH = -0.8
 
 _PRODUCTION_APP_ENVS = frozenset({"prod", "production"})
 
@@ -35,6 +37,18 @@ def _env_float(name: str, default: float) -> float:
     if raw is None:
         return default
     return float(raw)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_str(name: str) -> str | None:
+    raw = os.environ.get(name, "").strip()
+    return raw or None
 
 
 def _env_path(name: str, default: Path) -> Path:
@@ -77,9 +91,19 @@ class BaseConfig:
     backfill_history_days: int = DEFAULT_BACKFILL_HISTORY_DAYS
     backfill_batch_size: int = DEFAULT_BACKFILL_BATCH_SIZE
     backfill_batch_delay_seconds: float = DEFAULT_BACKFILL_BATCH_DELAY_SECONDS
+    outlier_max_growth: float = DEFAULT_OUTLIER_MAX_GROWTH
+    outlier_min_growth: float = DEFAULT_OUTLIER_MIN_GROWTH
+    alert_email_enabled: bool = False
+    alert_email_from: str | None = None
+    alert_email_to: str | None = None
 
     @classmethod
-    def _from_env(cls, *, require_database_url: bool = True) -> BaseConfig:
+    def _from_env(
+        cls,
+        *,
+        require_database_url: bool = True,
+        alert_email_enabled_default: bool = False,
+    ) -> BaseConfig:
         database_url = os.environ.get("DATABASE_URL", "")
         if require_database_url and not database_url:
             raise ValueError("DATABASE_URL is not set")
@@ -111,6 +135,17 @@ class BaseConfig:
                 "BACKFILL_BATCH_DELAY_SECONDS",
                 DEFAULT_BACKFILL_BATCH_DELAY_SECONDS,
             ),
+            outlier_max_growth=_env_float(
+                "OUTLIER_MAX_GROWTH", DEFAULT_OUTLIER_MAX_GROWTH
+            ),
+            outlier_min_growth=_env_float(
+                "OUTLIER_MIN_GROWTH", DEFAULT_OUTLIER_MIN_GROWTH
+            ),
+            alert_email_enabled=_env_bool(
+                "ALERT_EMAIL_ENABLED", alert_email_enabled_default
+            ),
+            alert_email_from=_env_str("ALERT_EMAIL_FROM"),
+            alert_email_to=_env_str("ALERT_EMAIL_TO"),
         )
 
 
@@ -128,7 +163,9 @@ class DevConfig(BaseConfig):
 class ProdConfig(BaseConfig):
     @classmethod
     def load(cls) -> ProdConfig:
-        return cls._from_env(require_database_url=True)
+        return cls._from_env(
+            require_database_url=True, alert_email_enabled_default=True
+        )
 
 
 def get_config() -> BaseConfig:

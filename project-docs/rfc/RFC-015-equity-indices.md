@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | **Priority** | P3 |
-| **Status** | **Implemented** (v2: price / SMA-50 / SMA-200 levels + momentum per `trading_date`; replaced v1 single `index_price` per `week_start` via migration step 19). **Pending:** chaining from stored growth (FR-36/37/37a, [RFC-016](./RFC-016-weekly-growth-columns.md)) and the outlier guard (FR-37b, [RFC-017](./RFC-017-outlier-guard-email.md)) |
+| **Status** | **Implemented** (v2: price / SMA-50 / SMA-200 levels + momentum per `trading_date`; replaced v1 single `index_price` per `week_start` via migration step 19). Chaining from stored growth (FR-36/37/37a, [RFC-016](./RFC-016-weekly-growth-columns.md)) and the outlier guard (FR-37b, [RFC-017](./RFC-017-outlier-guard-email.md)) implemented |
 | **Depends on** | RFC-001, RFC-003, RFC-004, RFC-014 |
 | **PRD** | §5.1 (FR-7, FR-7b), §5.8 (FR-34–FR-45), §6 |
 | **Feature** | [Equity indices](../FEATURES.md#equity-indices) |
@@ -75,13 +75,13 @@ close at fetch time; a dividend or split adjustment between two weekly
 fetches can introduce a fake one-week move for that stock in the
 stored-row ratio below.
 
-**Pending change (RFC-016 / RFC-017):** step 3 becomes the average of the
+**Since RFC-016 / RFC-017:** step 3 is the average of the
 stored `price_growth` / `sma_50_growth` / `sma_200_growth` for week `w`
 (computed from one adjusted download, so no fake move); the stored-row
-ratio below is kept only for gap weeks (FR-37a). Both queries add the
+ratio below is used only for gap weeks (FR-37a). Both queries apply the
 FR-37b bounds so implausible stock-weeks are excluded.
 
-### SQL sketch (chained week, one country — current; gap weeks after RFC-016)
+### SQL sketch (gap week, one country — the chained week averages the stored growth columns, see RFC-016)
 
 ```sql
 SELECT

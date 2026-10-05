@@ -53,7 +53,7 @@ Steps 1–10 upgrade the **legacy** single-set tables (`tickers` / `metrics` / `
 | 17 | `migrate_add_by_sector_tables.sql` | Create `us_by_sector` / `swe_by_sector` / `uk_by_sector` — equal-weighted weekly trend averages per sector, PK `(sector, week_start)` (PRD §5.7) |
 | 18 | `migrate_add_indices_table.sql` | Create the shared `indices` table (`US-IDX` / `SWE-IDX` / `UK-IDX`) in the v1 shape: PK `(ticker, week_start)`, `avg_return`, `index_price` (superseded by step 19) |
 | 19 | `migrate_indices_levels.sql` | If `indices` still has `week_start`, drop and recreate it in the v2 shape (PRD §5.8 / §6): PK `(ticker, trading_date)`, `ticker_count`, `current_price`, `sma_50`, `sma_200`, `momentum`. Index rows are derived, so they are rebuilt afterwards ([RFC-015](./rfc/RFC-015-equity-indices.md)) |
-| 20 | `migrate_add_growth_columns.sql` | **Planned** — add `price_growth`, `sma_50_growth`, `sma_200_growth` `NUMERIC(18, 6)` to `us_metrics` / `swe_metrics` / `uk_metrics` (PRD FR-5a / §6). Additive and idempotent (`ADD COLUMN IF NOT EXISTS`) ([RFC-016](./rfc/RFC-016-weekly-growth-columns.md)) |
+| 20 | `migrate_add_growth_columns.sql` | Add `price_growth`, `sma_50_growth`, `sma_200_growth` `NUMERIC(18, 6)` to `us_metrics` / `swe_metrics` / `uk_metrics` (PRD FR-5a / §6). Additive and idempotent (`ADD COLUMN IF NOT EXISTS`) ([RFC-016](./rfc/RFC-016-weekly-growth-columns.md)) |
 
 **Outlier guard & email (PRD FR-37b, §5.9, [RFC-017](./rfc/RFC-017-outlier-guard-email.md)):** needs **no schema migration** — outliers are derived from the step-20 growth columns and the configured thresholds.
 
@@ -154,7 +154,7 @@ Run step 14 (`migrate_momentum_zscore.sql`), then
 3. Deploy v2 code (v1 code fails against the step-19 schema and vice versa,
    so apply step 19 and deploy together).
 
-**After step 19, before weekly growth columns (RFC-016, planned):**
+**After step 19, before weekly growth columns (RFC-016):**
 
 1. Run step 20 (`migrate_add_growth_columns.sql`) — additive, safe to
    repeat; no snapshot needed. Old code keeps working (it ignores the new
@@ -178,9 +178,9 @@ Used by `.github/workflows/dev-backfill.yml` (manual `workflow_dispatch`) agains
 1. Apply `schema.sql` (country baseline, `CREATE IF NOT EXISTS`).
 2. If legacy `tickers` / `metrics` still exist, run pre-split migrations (steps 1, 4–10; skips destructive steps 2–3).
 3. If `us_metrics` still has `raw_50` (pre-step-14), run steps 11–14 (`migrate_split_us_swe_tables.sql`, `exchange_name`, UK tables, momentum/z_score). Otherwise skip them — they copy `raw_*` columns that step 14 dropped.
-4. Always run steps 15–19 (`migrate_week_buckets.sql`, `migrate_add_business_summary.sql`, `migrate_add_by_sector_tables.sql`, `migrate_add_indices_table.sql`, `migrate_indices_levels.sql`; no-ops once applied). Step 20 (`migrate_add_growth_columns.sql`) joins this list when implemented (RFC-016).
+4. Always run steps 15–19 (`migrate_week_buckets.sql`, `migrate_add_business_summary.sql`, `migrate_add_by_sector_tables.sql`, `migrate_add_indices_table.sql`, `migrate_indices_levels.sql`; no-ops once applied). Then step 20 (`migrate_add_growth_columns.sql`, RFC-016).
 
-Fresh databases get the target layout from `schema.sql`, so only steps 15–19 run (as no-ops).
+Fresh databases get the target layout from `schema.sql`, so only steps 15–20 run (as no-ops).
 
 ## Verify schema
 

@@ -125,3 +125,44 @@ def test_require_non_production(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("APP_ENV", "production")
     with pytest.raises(ValueError, match="development only"):
         require_non_production()
+
+
+def test_outlier_and_alert_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://dev")
+    for name in (
+        "OUTLIER_MAX_GROWTH",
+        "OUTLIER_MIN_GROWTH",
+        "ALERT_EMAIL_ENABLED",
+        "ALERT_EMAIL_FROM",
+        "ALERT_EMAIL_TO",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    with patch("dotenv.load_dotenv"):
+        dev = DevConfig.load()
+    prod = ProdConfig.load()
+
+    assert (dev.outlier_max_growth, dev.outlier_min_growth) == (4.0, -0.8)
+    assert dev.alert_email_enabled is False
+    assert prod.alert_email_enabled is True
+    assert dev.alert_email_from is None and dev.alert_email_to is None
+
+
+def test_outlier_and_alert_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://dev")
+    monkeypatch.setenv("OUTLIER_MAX_GROWTH", "2")
+    monkeypatch.setenv("OUTLIER_MIN_GROWTH", "-0.5")
+    monkeypatch.setenv("ALERT_EMAIL_ENABLED", "true")
+    monkeypatch.setenv("ALERT_EMAIL_FROM", " noreply@example.com ")
+    monkeypatch.setenv("ALERT_EMAIL_TO", "owner@example.com")
+
+    with patch("dotenv.load_dotenv"):
+        dev = DevConfig.load()
+    monkeypatch.setenv("ALERT_EMAIL_ENABLED", "false")
+    prod = ProdConfig.load()
+
+    assert (dev.outlier_max_growth, dev.outlier_min_growth) == (2.0, -0.5)
+    assert dev.alert_email_enabled is True
+    assert dev.alert_email_from == "noreply@example.com"
+    assert dev.alert_email_to == "owner@example.com"
+    assert prod.alert_email_enabled is False

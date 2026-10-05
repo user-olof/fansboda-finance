@@ -40,7 +40,7 @@ Deploy ships a **tarball** from the runner checkout (not `git pull` on the VM), 
 2. Package repo checkout as `fansboda-finance.tgz` (exclude `.git` / `.venv`)
 3. `gcloud compute scp --tunnel-through-iap` tarball to the VM
 4. `gcloud compute ssh --tunnel-through-iap` — unpack to `/opt/fansboda-finance`, ensure `fansboda` user + `pipenv`, run `PIPENV_VENV_IN_PROJECT=1 pipenv install --deploy` as `fansboda`
-5. Write `.env` with `DATABASE_URL` and `APP_ENV=dev` (temporary VM validation; cut over to `APP_ENV=production` later) via SCP + `install -o fansboda -g fansboda -m 600`. **Planned** (RFC-017): also `ALERT_EMAIL_FROM` / `ALERT_EMAIL_TO`
+5. Write `.env` with `DATABASE_URL` and `APP_ENV=dev` (temporary VM validation; cut over to `APP_ENV=production` later) via SCP + `install -o fansboda -g fansboda -m 600`. When the `ALERT_EMAIL_FROM` / `ALERT_EMAIL_TO` secrets are both set, also `ALERT_EMAIL_ENABLED=true` plus both addresses (RFC-017)
 
 Schema upgrades (including country-table steps 11–13) are applied manually per [MIGRATIONS.md](../MIGRATIONS.md) — not in this workflow.
 
@@ -54,7 +54,7 @@ Schema upgrades (including country-table steps 11–13) are applied manually per
 | `DATABASE_URL` | Neon production connection string |
 | `GCP_WORKLOAD_IDENTITY_PROVIDER` | WIF provider resource name |
 | `GCP_DEPLOY_SERVICE_ACCOUNT` | Deploy SA email |
-| `ALERT_EMAIL_FROM` / `ALERT_EMAIL_TO` | **Planned** (RFC-017) — outlier email sender / recipient (`production` environment) |
+| `ALERT_EMAIL_FROM` / `ALERT_EMAIL_TO` | Optional (RFC-017) — outlier email sender / recipient (`production` environment) |
 
 ### Branch protection
 

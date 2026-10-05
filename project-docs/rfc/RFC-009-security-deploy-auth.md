@@ -19,7 +19,7 @@ No credentials in repo. Production secrets in GitHub. Deploy authenticates via G
 - Deploy SA: OIDC JWT via WIF only — **no `GCP_SA_KEY`**
 - Deploy SSH/SCP via `--tunnel-through-iap` (no public IP assumption)
 - VM: attached service account via metadata server (no key on disk)
-- Outlier email (planned, RFC-017): Gmail API via domain-wide delegation, JWT signed through IAM `signJwt` with the VM SA — no JSON key, OAuth refresh token, or SMTP password; DWD scope limited to `gmail.send`
+- Outlier email (RFC-017): Gmail API via domain-wide delegation, JWT signed through the IAM Credentials API (`signBlob`) with the VM SA — no JSON key, OAuth refresh token, or SMTP password; DWD scope limited to `gmail.send`
 - Cron runs as `fansboda`, not root
 - Parameterized SQL in `db/` modules; no SQL in job scripts
 - Country-set tables only (`us_*` / `swe_*` / `uk_*`) — no legacy single-set SQL in live paths
@@ -80,7 +80,7 @@ Remote steps use `gcloud compute ssh` / `scp` with `--tunnel-through-iap`.
 | `GCP_WORKLOAD_IDENTITY_PROVIDER` | Yes |
 | `GCP_DEPLOY_SERVICE_ACCOUNT` | Yes |
 | `DATABASE_URL` | Yes (prod env; written to VM `.env`) |
-| `ALERT_EMAIL_FROM` / `ALERT_EMAIL_TO` | Planned (RFC-017; prod env; written to VM `.env`) |
+| `ALERT_EMAIL_FROM` / `ALERT_EMAIL_TO` | Optional (RFC-017; prod env; written to VM `.env`; email enabled only when both are set) |
 | `GCP_SA_KEY` | **Remove** — deprecated |
 
 ### `.env` on VM

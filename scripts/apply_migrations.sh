@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Apply schema for Neon (dev-backfill CI and manual upgrades).
 #
-# Country-partitioned DBs before step 14: schema.sql + steps 11–19 (idempotent).
+# Country-partitioned DBs before step 14: schema.sql + steps 11–20 (idempotent).
 # DBs past step 14 (us_metrics has no raw_50; includes fresh schema.sql DBs):
-#   schema.sql + steps 15–19 only — steps 11–13 copy raw_* columns step 14 dropped.
-# Legacy single-set DBs: run pre-split migrations, then steps 11–19.
+#   schema.sql + steps 15–20 only — steps 11–13 copy raw_* columns step 14 dropped.
+# Legacy single-set DBs: run pre-split migrations, then steps 11–20.
 #
 # Skips destructive one-time migrations unsafe to re-run:
 #   - migrate_one_row_per_ticker.sql
@@ -73,6 +73,7 @@ if [[ "$has_legacy" == "no" && "$has_raw_ratios" == "no" ]]; then
   run_sql "$REPO_DIR/migrate_add_by_sector_tables.sql"
   run_sql "$REPO_DIR/migrate_add_indices_table.sql"
   run_sql "$REPO_DIR/migrate_indices_levels.sql"
+  run_sql "$REPO_DIR/migrate_add_growth_columns.sql"
   echo "All migrations applied (us_* / swe_* / uk_*)."
   exit 0
 fi
@@ -112,5 +113,8 @@ run_sql "$REPO_DIR/migrate_add_indices_table.sql"
 
 # Step 19: indices v2 (price / SMA levels + momentum by trading_date).
 run_sql "$REPO_DIR/migrate_indices_levels.sql"
+
+# Step 20: weekly growth columns on *_metrics (FR-5a).
+run_sql "$REPO_DIR/migrate_add_growth_columns.sql"
 
 echo "All migrations applied (us_* / swe_* / uk_*)."

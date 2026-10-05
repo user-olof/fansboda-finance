@@ -49,6 +49,27 @@ class IndexRow:
         return IndexLevels(self.current_price, self.sma_50, self.sma_200)
 
 
+def is_outlier(
+    growths: dict[str, Decimal | None],
+    *,
+    max_growth: float,
+    min_growth: float,
+) -> str | None:
+    """Return the first crossed bound (e.g. ``"price_growth > 4.0"``), else None.
+
+    A stock-week is an outlier when any weekly growth is above ``max_growth``
+    or below ``min_growth`` (FR-37b). NULL growth values are ignored.
+    """
+    for name, value in growths.items():
+        if value is None:
+            continue
+        if float(value) > max_growth:
+            return f"{name} > {max_growth:g}"
+        if float(value) < min_growth:
+            return f"{name} < {min_growth:g}"
+    return None
+
+
 def index_momentum(sma_50: Decimal, sma_200: Decimal) -> Decimal | None:
     """``sma_50 / sma_200`` on index levels; NULL when ``sma_200`` is zero."""
     if sma_200 == 0:

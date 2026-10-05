@@ -74,9 +74,16 @@ jobs:
           # Temporary: DEV while validating the VM. Switch to production cutover:
           # DATABASE_URL_PROD + APP_ENV=production
           DATABASE_URL_DEV: ${{ secrets.DATABASE_URL }}
+          # Outlier email (RFC-017); enabled only once both secrets are set.
+          ALERT_EMAIL_FROM: ${{ secrets.ALERT_EMAIL_FROM }}
+          ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
         run: |
           set +x
           printf 'DATABASE_URL=%s\nAPP_ENV=dev\n' "$DATABASE_URL_DEV" > .env.tmp
+          if [ -n "$ALERT_EMAIL_FROM" ] && [ -n "$ALERT_EMAIL_TO" ]; then
+            printf 'ALERT_EMAIL_ENABLED=true\nALERT_EMAIL_FROM=%s\nALERT_EMAIL_TO=%s\n' \
+              "$ALERT_EMAIL_FROM" "$ALERT_EMAIL_TO" >> .env.tmp
+          fi
           gcloud compute scp .env.tmp "$GCP_INSTANCE_NAME:/tmp/.env.tmp" \
             --zone="$GCP_ZONE" \
             --project="$GCP_PROJECT_ID" \

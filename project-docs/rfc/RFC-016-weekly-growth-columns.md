@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | **Priority** | P3 |
-| **Status** | **Proposed** |
+| **Status** | **Implemented** |
 | **Depends on** | RFC-001, RFC-003, RFC-005, RFC-015 |
 | **Enables** | RFC-017 |
 | **PRD** | §5.1 (FR-5a, FR-6), §5.4 (FR-15a, FR-16), §5.8 (FR-36, FR-37, FR-37a), §6 |
@@ -33,8 +33,7 @@ against those, and correcting the series is PRD §11 future work.
 | FR-5a | From the downloaded series, find the ticker's last bar of the previous calendar week (`week_start − 7 days`); `price_growth = close / prev_close − 1`, `sma_50_growth = sma_50 / prev_sma_50 − 1`, `sma_200_growth = sma_200 / prev_sma_200 − 1`, each SMA using only closes up to its bar. NULL when there is no previous-week bar, the earlier value is missing or zero, or there are too few closes for that SMA at the previous-week bar. No extra yfinance calls |
 | FR-6 | The week upsert also writes (and on a newer bar, replaces) the three growth columns |
 | FR-15a | Backfill computes the same three columns for every weekly snapshot |
-| FR-16 | Backfill still skips stored `(ticker, trading_date)` rows, except rows with NULL growth columns get only those three columns filled — re-running `backfill_sma.py --country …` populates history |
-| FR-36 | A stock contributes to index week `w` only with positive price / SMAs and non-NULL growth columns |
+| FR-16 | Backfill still skips stored `(ticker, trading_date)` rows, except rows with NULL growth columns get only those three columns filled — re-running `backfill_sma.py --country …` populates history || FR-36 | A stock contributes to index week `w` only with positive price / SMAs and non-NULL growth columns |
 | FR-37 | `g_x(w) = mean(x_growth_i(w))` per measure (equal weight) |
 | FR-37a | Gap week (previous stored index week ≠ previous calendar week): fall back to `mean(x_i(w) / x_i(p) − 1)` over stocks positive in both weeks |
 
@@ -71,7 +70,6 @@ today) and **existing** (stored `(ticker, trading_date)`) — existing rows go
 to `fill_missing_growth`, which only touches rows whose growth columns are
 all NULL, so re-runs and already-filled rows are no-ops. Log counts for
 inserted, growth-filled, and skipped rows (FR-17).
-
 ### Chained-week SQL sketch
 
 ```sql
