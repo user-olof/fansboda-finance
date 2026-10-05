@@ -18,7 +18,6 @@ from decimal import Decimal
 import pandas as pd
 
 from compute_indices import refresh_indices
-from compute_sector_trends import refresh_sector_trends
 from config import BaseConfig, get_config
 from db.country import CountrySet, country_set_for
 from db.market import upsert_market_stats
@@ -341,17 +340,6 @@ def _run_retention_purge(
     return metrics_purged, market_metrics_purged, indices_purged
 
 
-def _run_sector_trends(database_url: str, week_starts: set[date]) -> None:
-    written, pruned = refresh_sector_trends(database_url, sorted(week_starts))
-    logger.info(
-        "Sector trends: wrote %d us_/swe_/uk_ by_sector row(s) for %d week(s), "
-        "pruned %d orphan row(s)",
-        written,
-        len(week_starts),
-        pruned,
-    )
-
-
 def _run_indices(config: BaseConfig, week_starts: set[date]) -> None:
     written = refresh_indices(
         config.database_url,
@@ -360,7 +348,7 @@ def _run_indices(config: BaseConfig, week_starts: set[date]) -> None:
         min_growth=config.outlier_min_growth,
     )
     logger.info(
-        "Indices: wrote %d US-IDX/SWE-IDX/UK-IDX row(s) from week(s) %s",
+        "Indices: wrote %d market + sector index row(s) from week(s) %s",
         written,
         ", ".join(week.isoformat() for week in sorted(week_starts)),
     )
@@ -497,11 +485,6 @@ def main() -> int:
         except Exception:
             logger.exception("Retention purge failed")
             return 1
-        try:
-            _run_sector_trends(database_url, set())
-        except Exception:
-            logger.exception("Failed to compute sector trends")
-            return 1
         logger.info(
             "Summary: total=%d skipped=%d fetched=0 inserted=0 "
             "purged_metrics=%d purged_market_metrics=%d purged_indices=%d "
@@ -591,12 +574,6 @@ def main() -> int:
         )
     except Exception:
         logger.exception("Retention purge failed")
-        return 1
-
-    try:
-        _run_sector_trends(database_url, week_starts)
-    except Exception:
-        logger.exception("Failed to compute sector trends")
         return 1
 
     outliers_new = outliers_continuing = 0

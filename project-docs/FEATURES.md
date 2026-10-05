@@ -12,10 +12,10 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 | Historical backfill | Bootstrap of rolling weekly SMA snapshots (~2 years), **scoped per country set** (`--country us|swe|uk`) so adding a market later does not re-process others |
 | Watchlist seeding | Load symbols from file, resolve company metadata, upsert into Postgres (optional `--country`) |
 | Rolling retention | Keeps ~1 year of `*_metrics` and `*_market_metrics` history; older rows purged after each weekly run |
-| Sector trends | Equal-weighted weekly trend per sector in `us_by_sector` / `swe_by_sector` / `uk_by_sector` (PRD §5.7) |
 | Equity indices | Equal-weighted weekly index per country in `indices` (`US-IDX`, `SWE-IDX`, `UK-IDX`) with price / SMA-50 / SMA-200 levels and momentum (PRD §5.8) |
+| Sector indices | One equal-weighted index per sector per country in `indices` (e.g. `US-IDX-TECHNOLOGY`), plus `sector`, `currency`, `pct_uptrend`, and sector-vs-sector `z_score` on every index row; replaces the retired `*_by_sector` sector trends (PRD §5.7–5.8, [RFC-018](./rfc/RFC-018-sector-indices.md)) |
 | Weekly growth columns | `price_growth` / `sma_50_growth` / `sma_200_growth` on `*_metrics` from one adjusted download, so splits between fetches cannot distort the indices (PRD FR-5a, [RFC-016](./rfc/RFC-016-weekly-growth-columns.md)) |
-| Outlier guard & email | Stock-weeks moving more than ×5 / below ÷5 are excluded from the index and newly detected ones are emailed to the owner via the Gmail API (PRD FR-37b, §5.9, [RFC-017](./rfc/RFC-017-outlier-guard-email.md)) |
+| Outlier guard & email | Stock-weeks moving more than ×10 up or falling more than 99.9% are excluded from the index and newly detected ones are emailed to the owner via the Gmail API (PRD FR-37b, §5.9, [RFC-017](./rfc/RFC-017-outlier-guard-email.md)) |
 | Centralized configuration | `DevConfig` / `ProdConfig` in `config.py`; selected via `APP_ENV` |
 | Zero-cost ops | **One** GCP `e2-micro` (Always Free) + Neon Postgres free tier |
 | CI/CD — production | `pytest` on PR to `main`; deploy to long-lived Production VM on push to `main` |
@@ -69,8 +69,7 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 - After each weekly run, `us_metrics` / `swe_metrics` / `uk_metrics` and matching `*_market_metrics` rows with `trading_date` / `week_start` older than **365 days** are deleted (`db/retention.py`).
 - Retention purge runs even when all tickers are already fresh (nothing to fetch).
 - Purge counts appear in the weekly job summary log.
-- `*_by_sector` weeks no longer present in `*_metrics` are pruned by the sector refresh.
-- `indices` rows with `trading_date` older than 365 days are purged with the same window (RFC-015).
+- `indices` rows (market and sector indices) with `trading_date` older than 365 days are purged with the same window (RFC-015 / RFC-018).
 - Cutoff uses UTC date via `metrics_retention_days` (configurable).
 
 ### Schema (US, Swedish, and UK table sets)
@@ -94,8 +93,7 @@ Feature overview derived from [PRD.md](./PRD.md). The PRD remains the authoritat
 | `*_tickers` | `symbol` (PK), `company`, `sector`, `industry`, `market`, `exchange_name`, `business_summary`, `updated_at` |
 | `*_metrics` | `id` (PK), `ticker` (FK → matching `*_tickers.symbol`), `company`, `week_start`, `trading_date`, `updated_at`, `currency`, `sma_50`, `sma_200`, `current_price`, `momentum`, `z_score`, `price_growth`, `sma_50_growth`, `sma_200_growth` (step 20) |
 | `*_market_metrics` | `market`, `week_start`, `updated_at`, `momentum_mean`, `momentum_std` |
-| `*_by_sector` | `sector`, `week_start` (PK together), `updated_at`, `ticker_count`, `momentum_mean`, `momentum_median`, `z_score_mean`, `pct_uptrend` |
-| `indices` (one shared table) | `ticker`, `trading_date` (PK together), `name`, `country`, `updated_at`, `ticker_count`, `current_price`, `sma_50`, `sma_200`, `momentum` |
+| `indices` (one shared table) | `ticker`, `trading_date` (PK together), `country`, `updated_at`, `ticker_count`, `current_price`, `sma_50`, `sma_200`, `momentum`, `sector` (index label; former `name`), `currency`, `pct_uptrend`, `z_score` (step 21, RFC-018) |
 
 `company` on each metrics row is copied from the matching tickers table at fetch time. `currency` is the listing currency code captured per snapshot. Listing `market` lives on the tickers tables and is also stored on `*_market_metrics`. `exchange_name` is the human-readable exchange from yfinance `fullExchangeName`. **`momentum`** is `sma_50 / sma_200`; **`z_score`** is `(momentum - momentum_mean) / momentum_std` using that week's market aggregates. Price and derived columns use `NUMERIC(18, 6)`. Unique on `*_metrics (week_start, ticker)` and `*_market_metrics (market, week_start)`.
 
@@ -123,7 +121,7 @@ Scheduled **Saturdays at 11:00 UTC** on the Production VM (after every market's 
 | Append metrics | Inserts new rows into `us_metrics` / `swe_metrics` / `uk_metrics` without overwriting history |
 | Weekly growth | `price_growth` / `sma_50_growth` / `sma_200_growth` vs the previous calendar week's last bar, from the same download (FR-5a, RFC-016) |
 | Retention purge | Deletes `*_metrics` and `*_market_metrics` rows older than configured retention (default 365 days) |
-| Sector trends / indices | Refreshes `*_by_sector` (FR-7a) and `indices` (FR-7b) for the weeks written |
+| Indices | Writes market + sector index rows in `indices` for the weeks written, right after the purge (FR-7b, RFC-018) |
 | Outlier email | Emails newly detected implausible weekly moves after the indices step (FR-7c, RFC-017) |
 | Observability | Per-batch progress, per-ticker results, insert/purge counts, final summary |
 
@@ -200,17 +198,11 @@ SMA history produced here (PRD §5.6).
 
 ### Sector trend averages
 
-Equal-weighted weekly trend per sector (PRD §5.7, FR-27 – FR-33).
-
-| Capability | Detail |
-|------------|--------|
-| Status | **Shipped** — [RFC-014](./rfc/RFC-014-sector-trends.md) |
-| Tables | `us_by_sector` / `swe_by_sector` / `uk_by_sector`, one row per `(sector, week_start)` |
-| Grouping | `*_tickers.sector`, normalized to `sectorKey` form (`Financial Services` → `financial-services`) |
-| Measures | `ticker_count`, `momentum_mean`, `momentum_median`, `z_score_mean`, `pct_uptrend` (% with SMA-50 > SMA-200); every company weighted equally |
-| Weekly job | `fetch_sma.py` refreshes the weeks it wrote after the retention purge |
-| Standalone | `compute_sector_trends.py [--country us|swe|uk] [--week YYYY-MM-DD]` — default: all stored weeks, all sets; no yfinance |
-| Retention | Weeks no longer present in `*_metrics` are pruned each run |
+Retired — superseded by the sector indices in [Equity indices](#equity-indices)
+([RFC-018](./rfc/RFC-018-sector-indices.md)). `compute_sector_trends.py` and
+`db/sector.py` are removed; migration step 22 drops `us_by_sector` /
+`swe_by_sector` / `uk_by_sector` ([RFC-014](./rfc/RFC-014-sector-trends.md),
+superseded).
 
 ---
 
@@ -226,13 +218,15 @@ Equal-weighted weekly index per country set, stored like a `*_metrics` row
 | Table | `indices` — one shared table, PK `(ticker, trading_date)`, at most one row per ticker per calendar week; `trading_date` = latest contributing bar that week |
 | Levels | `current_price`, `sma_50`, `sma_200` — each chained weekly by the plain average of the stocks' growth in that measure (equal weight) |
 | Base week | `current_price = 100`; `sma_50` / `sma_200` = `100 ×` the stocks' average `sma / current_price`, so momentum reflects the real trend from week one |
-| Momentum | `sma_50 / sma_200` on the index levels; no `z_score` |
+| Momentum | `sma_50 / sma_200` on the index levels |
 | Inclusion | Stocks with positive price, SMA-50 and SMA-200 in both this and the previous stored week (one set for all three levels); weeks with none are skipped |
 | Growth chaining | Weekly growth = average of the stocks' stored growth columns (FR-37); stored-row ratio only for gap weeks (FR-37a); inclusion then requires non-NULL growth (FR-36) — [RFC-016](./rfc/RFC-016-weekly-growth-columns.md) |
-| Outlier guard | Stock-weeks with any growth above +400% (×5) or below −80% (÷5) are excluded from all three levels and `ticker_count` that week (FR-37b) — [RFC-017](./rfc/RFC-017-outlier-guard-email.md) |
-| Weekly job | `fetch_sma.py` computes the weeks it wrote (and re-chains later weeks), after sector trends (FR-7b) |
+| Outlier guard | Stock-weeks with any growth above +900% (×10) or below −99.9% are excluded from all three levels and `ticker_count` that week (FR-37b) — [RFC-017](./rfc/RFC-017-outlier-guard-email.md) |
+| Weekly job | `fetch_sma.py` computes the weeks it wrote (and re-chains later weeks), after the retention purge (FR-7b) |
 | Standalone | `compute_indices.py [--country us|swe|uk]` — full rebuild over all retained metrics weeks; no yfinance |
 | Retention | Rows with `trading_date` older than `METRICS_RETENTION_DAYS` are purged weekly (same window as metrics) |
+| Sector indices | Per country, one index per `*_tickers.sector` key: ticker `<market>-<SECTOR>` (e.g. `US-IDX-TECHNOLOGY`), `sector` label `Technology` (sector name only; unique per country), chained the same way from the members' growth columns; base week per sector — [RFC-018](./rfc/RFC-018-sector-indices.md) |
+| Sector columns | `sector` (index label: `US Equity Index` on market rows, `Technology` on sector rows; the former `name` column), `currency` (`USD` / `SEK` / `GBP`), `pct_uptrend` (% of contributing stocks with SMA-50 > SMA-200), `z_score` (sector momentum vs the set's sector indices that week, population std; NULL on market rows) |
 
 ### Data-quality email
 
@@ -274,8 +268,8 @@ All tunables live in **`config.py`** (PRD §5.5):
 | `backfill_history_days` | 730 | 730 | Backfill download window |
 | `backfill_batch_size` | 25 | 25 | Backfill batch size |
 | `backfill_batch_delay_seconds` | 5.0 | 5.0 | Delay between backfill batches |
-| `outlier_max_growth` | 4.0 | 4.0 | Weekly growth above this (more than ×5) is an outlier |
-| `outlier_min_growth` | −0.8 | −0.8 | Weekly growth below this (below ÷5) is an outlier |
+| `outlier_max_growth` | 9.0 | 9.0 | Weekly growth above this (more than ×10) is an outlier |
+| `outlier_min_growth` | −0.999 | −0.999 | Weekly growth below this (a fall of more than 99.9%) is an outlier |
 | `alert_email_enabled` | `false` | `true` | Send the outlier email; when off, log it |
 | `alert_email_from` / `alert_email_to` | from `.env` (optional) | from VM `.env` (required when enabled) | Workspace sender / owner's work address |
 

@@ -3,8 +3,9 @@
 | Field | Value |
 |-------|-------|
 | **Priority** | P3 |
-| **Status** | **Implemented** (v2: price / SMA-50 / SMA-200 levels + momentum per `trading_date`; replaced v1 single `index_price` per `week_start` via migration step 19). Chaining from stored growth (FR-36/37/37a, [RFC-016](./RFC-016-weekly-growth-columns.md)) and the outlier guard (FR-37b, [RFC-017](./RFC-017-outlier-guard-email.md)) implemented |
+| **Status** | **Implemented** (v2: price / SMA-50 / SMA-200 levels + momentum per `trading_date`; replaced v1 single `index_price` per `week_start` via migration step 19). Chaining from stored growth (FR-36/37/37a, [RFC-016](./RFC-016-weekly-growth-columns.md)) and the outlier guard (FR-37b, [RFC-017](./RFC-017-outlier-guard-email.md)) implemented. Extended with sector indices + `pct_uptrend` / `z_score` / `currency` / `sector` columns by [RFC-018](./RFC-018-sector-indices.md) (implemented) |
 | **Depends on** | RFC-001, RFC-003, RFC-004, RFC-014 |
+| **Extended by** | RFC-018 (sector indices) |
 | **PRD** | §5.1 (FR-7, FR-7b), §5.8 (FR-34–FR-45), §6 |
 | **Feature** | [Equity indices](../FEATURES.md#equity-indices) |
 
@@ -31,7 +32,7 @@ size. Computed in SQL from stored `*_metrics`; no yfinance. No `z_score`.
 | FR-36 | Contributing stocks: positive `current_price`, `sma_50`, `sma_200` and non-NULL `price_growth` / `sma_50_growth` / `sma_200_growth` in week `w`; one set drives all three levels |
 | FR-37 | Per measure `x`: `g_x(w) = mean(x_growth_i(w))` from the stored growth columns (equal weight, reset weekly) — RFC-016 |
 | FR-37a | Gap week (previous stored index week is not the previous calendar week): `g_x(w) = mean(x_i(w) / x_i(p) − 1)` over stocks positive in both weeks — RFC-016 |
-| FR-37b | Outlier guard: exclude stock-weeks whose growth (or gap-week ratio) is above `outlier_max_growth` (4.0) or below `outlier_min_growth` (−0.8) — RFC-017 |
+| FR-37b | Outlier guard: exclude stock-weeks whose growth (or gap-week ratio) is above `outlier_max_growth` (9.0) or below `outlier_min_growth` (−0.999) — RFC-017 |
 | FR-38 | `level_x(w) = level_x(p) × (1 + g_x(w))`, stored as `current_price` / `sma_50` / `sma_200` |
 | FR-39 | Base week: `current_price = 100`; `sma_50 = 100 × mean(sma_50_i / price_i)`; `sma_200 = 100 × mean(sma_200_i / price_i)` |
 | FR-40 | `momentum = sma_50 / sma_200` (NULL if `sma_200` is zero); no `z_score` |

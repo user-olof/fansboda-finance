@@ -54,6 +54,8 @@ Steps 1–10 upgrade the **legacy** single-set tables (`tickers` / `metrics` / `
 | 18 | `migrate_add_indices_table.sql` | Create the shared `indices` table (`US-IDX` / `SWE-IDX` / `UK-IDX`) in the v1 shape: PK `(ticker, week_start)`, `avg_return`, `index_price` (superseded by step 19) |
 | 19 | `migrate_indices_levels.sql` | If `indices` still has `week_start`, drop and recreate it in the v2 shape (PRD §5.8 / §6): PK `(ticker, trading_date)`, `ticker_count`, `current_price`, `sma_50`, `sma_200`, `momentum`. Index rows are derived, so they are rebuilt afterwards ([RFC-015](./rfc/RFC-015-equity-indices.md)) |
 | 20 | `migrate_add_growth_columns.sql` | Add `price_growth`, `sma_50_growth`, `sma_200_growth` `NUMERIC(18, 6)` to `us_metrics` / `swe_metrics` / `uk_metrics` (PRD FR-5a / §6). Additive and idempotent (`ADD COLUMN IF NOT EXISTS`) ([RFC-016](./rfc/RFC-016-weekly-growth-columns.md)) |
+| 21 | `migrate_indices_sectors.sql` | Add `currency`, `pct_uptrend`, `z_score` to `indices` for market + sector index rows; merge `name` into `sector` (`sector NOT NULL`, second column after `ticker` — the table is rebuilt and rows copied, since Postgres cannot reorder columns); index `idx_indices_country_trading_date` (PRD §5.8 / §6). Idempotent, not additive — apply together with the RFC-018 deploy ([RFC-018](./rfc/RFC-018-sector-indices.md)) |
+| 22 | `migrate_drop_by_sector_tables.sql` | `DROP TABLE IF EXISTS` `us_by_sector` / `swe_by_sector` / `uk_by_sector`, superseded by the sector index rows. Destructive: only after step 21, the RFC-018 deploy and rebuild, and once `fansboda` no longer reads them ([RFC-018](./rfc/RFC-018-sector-indices.md)) |
 
 **Outlier guard & email (PRD FR-37b, §5.9, [RFC-017](./rfc/RFC-017-outlier-guard-email.md)):** needs **no schema migration** — outliers are derived from the step-20 growth columns and the configured thresholds.
 
@@ -171,6 +173,19 @@ Run step 14 (`migrate_momentum_zscore.sql`), then
    add `ALERT_EMAIL_FROM` / `ALERT_EMAIL_TO` secrets, deploy, and run
    `scripts/send_test_email.py` on the VM. No schema change.
 
+**After step 20, before sector indices (RFC-018):**
+
+1. Between Saturday runs, run step 21 (`migrate_indices_sectors.sql`, safe
+   to repeat) and deploy the RFC-018 code together: step 21 drops `name`,
+   which the old code still writes, and the new code needs the step-21
+   columns. The new code no longer writes `*_by_sector`.
+2. Rebuild: `pipenv run python compute_indices.py` — creates sector index
+   history and fills the new columns on the market rows.
+3. Switch consumers (e.g. `fansboda`) from `*_by_sector` to `indices`
+   (`WHERE ticker LIKE '%-IDX-%'`; `sector` now holds the index label).
+4. Take a Neon branch snapshot, then run step 22
+   (`migrate_drop_by_sector_tables.sql`).
+
 ## Dev-backfill CI (`scripts/apply_migrations.sh`)
 
 Used by `.github/workflows/dev-backfill.yml` (manual `workflow_dispatch`) against the Neon **dev** branch:
@@ -178,9 +193,9 @@ Used by `.github/workflows/dev-backfill.yml` (manual `workflow_dispatch`) agains
 1. Apply `schema.sql` (country baseline, `CREATE IF NOT EXISTS`).
 2. If legacy `tickers` / `metrics` still exist, run pre-split migrations (steps 1, 4–10; skips destructive steps 2–3).
 3. If `us_metrics` still has `raw_50` (pre-step-14), run steps 11–14 (`migrate_split_us_swe_tables.sql`, `exchange_name`, UK tables, momentum/z_score). Otherwise skip them — they copy `raw_*` columns that step 14 dropped.
-4. Always run steps 15–19 (`migrate_week_buckets.sql`, `migrate_add_business_summary.sql`, `migrate_add_by_sector_tables.sql`, `migrate_add_indices_table.sql`, `migrate_indices_levels.sql`; no-ops once applied). Then step 20 (`migrate_add_growth_columns.sql`, RFC-016).
+4. Always run steps 15–19 (`migrate_week_buckets.sql`, `migrate_add_business_summary.sql`, `migrate_add_by_sector_tables.sql`, `migrate_add_indices_table.sql`, `migrate_indices_levels.sql`; no-ops once applied). Then step 20 (`migrate_add_growth_columns.sql`, RFC-016). Then steps 21–22 (`migrate_indices_sectors.sql`, `migrate_drop_by_sector_tables.sql`, RFC-018) — the dev branch has no `*_by_sector` consumers, so step 22 runs there unconditionally.
 
-Fresh databases get the target layout from `schema.sql`, so only steps 15–20 run (as no-ops).
+Fresh databases get the target layout from `schema.sql`, so only steps 15–22 run (step 17 recreates `*_by_sector`, step 22 drops them again; the rest are no-ops).
 
 ## Verify schema
 
@@ -198,4 +213,4 @@ And that each `*_tickers` table includes `exchange_name`.
 
 ## Rollback
 
-Migrations are forward-only. Take a Neon branch snapshot before applying destructive steps (especially `migrate_one_row_per_ticker.sql`, which deletes duplicate rows, and step 11, which drops legacy tables).
+Migrations are forward-only. Take a Neon branch snapshot before applying destructive steps (especially `migrate_one_row_per_ticker.sql`, which deletes duplicate rows, step 11, which drops legacy tables, and step 22, which drops `*_by_sector`).

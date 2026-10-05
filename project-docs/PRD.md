@@ -266,8 +266,8 @@ object instead of calling `os.getenv` directly.
 | `backfill_history_days` | 730 | 730 | Days of OHLCV history per backfill batch download |
 | `backfill_batch_size` | 25 | 25 | Symbols per yfinance batch during backfill |
 | `backfill_batch_delay_seconds` | 5.0 | 5.0 | Delay between backfill batches |
-| `outlier_max_growth` | 4.0 | 4.0 | Weekly growth above this (more than ×5) is an outlier (FR-37b) |
-| `outlier_min_growth` | −0.8 | −0.8 | Weekly growth below this (below ÷5) is an outlier (FR-37b) |
+| `outlier_max_growth` | 9.0 | 9.0 | Weekly growth above this (more than ×10) is an outlier (FR-37b) |
+| `outlier_min_growth` | −0.999 | −0.999 | Weekly growth below this (a fall of more than 99.9%) is an outlier (FR-37b) |
 | `alert_email_enabled` | `false` | `true` | Send the outlier email (FR-51); when off, log it instead |
 | `alert_email_from` | from `.env` (optional) | from VM `.env` (required when enabled) | Workspace mailbox the service account sends as (FR-49) |
 | `alert_email_to` | from `.env` (optional) | from VM `.env` (required when enabled) | Owner's work email address (FR-49) |
@@ -313,10 +313,16 @@ Derived entirely from the stored `*_metrics` growth columns (FR-5a) and
 
   plus one sector index per sector key `<s>` present in the set's tickers
   table: ticker `<market ticker>-<S>` (sector key upper-cased, e.g.
-  `US-IDX-TECHNOLOGY`, `SWE-IDX-FINANCIAL-SERVICES`), name
-  `<index name> – <Sector>` (sector key title-cased with spaces, e.g.
-  `US Equity Index – Financial Services`), `sector = <s>`, same currency.
-  Market index rows have `sector = NULL`.
+  `US-IDX-TECHNOLOGY`, `SWE-IDX-FINANCIAL-SERVICES`), `sector` label = the
+  sector name only (sector key title-cased with spaces, e.g.
+  `Financial Services` — no market-name prefix), same currency. The same
+  label appears once per country set (e.g. `Technology` for `us`, `swe`,
+  and `uk`) but never twice within one country, since sector keys are
+  unique per set. Market index rows have `sector` = the index name (e.g.
+  `US Equity Index`). The `sector`
+  column is the index label (the former `name` column is merged into it);
+  market rows are the three tickers without a sector suffix, sector rows
+  match `ticker LIKE '%-IDX-%'`.
 - **FR-34a Sector membership:** A stock belongs to the sector index of its
   current `*_tickers.sector`, normalized to the yfinance `sectorKey` form
   (`lower`, trimmed, spaces → `-`) so a display-name fallback such as
@@ -355,16 +361,18 @@ Derived entirely from the stored `*_metrics` growth columns (FR-5a) and
   positive values in both weeks).
 - **FR-37b Outlier guard:** A stock-week is an **outlier** when any of its
   three weekly growth values (FR-5a, or the FR-37a ratio in a gap week) is
-  above `outlier_max_growth` (default `4.0`, i.e. more than ×5) or below
-  `outlier_min_growth` (default `−0.8`, i.e. below ÷5). Outliers are excluded
+  above `outlier_max_growth` (default `9.0`, i.e. more than ×10) or below
+  `outlier_min_growth` (default `−0.999`, i.e. a fall of more than 99.9%). In
+  practice this is a price rule: SMAs move far less than the price, so an SMA
+  only crosses these bounds after the price has. Outliers are excluded
   from that week's contributing set — for the market index and its sector
   index alike — for all three levels, `pct_uptrend`, and `N`, so one broken
   series — typically a split Yahoo failed to adjust, e.g. `WYLD.ST` 1:500 on
   2025-12-05 — cannot move an index. The exclusion is per week: the stock
   contributes again in later weeks whose growth is within the bounds. A
-  genuine ×5 move is also excluded; with equal weights that bias is small for
+  genuine ×10 move is also excluded; with equal weights that bias is small for
   the market index, but larger for sector indices with few stocks. Smaller
-  residual SMA drift after an unadjusted split (SMA growth below ×5 in the
+  residual SMA drift after an unadjusted split (SMA growth below ×10 in the
   following weeks) is not caught; fixing the series itself is §11 future
   work. Base weeks (FR-39) have no growth and are not guarded.
 - **FR-38 Index levels:** Chain-link each level onto its previous value:
@@ -552,9 +560,8 @@ all of its sector indices, one row per index ticker per calendar week.
 | Column | Type | Notes |
 |--------|------|-------|
 | `ticker` | TEXT | Market index `US-IDX` / `SWE-IDX` / `UK-IDX`, or sector index `<market ticker>-<SECTOR>` (e.g. `US-IDX-TECHNOLOGY`) |
-| `name` | TEXT | e.g. `US Equity Index`, `US Equity Index – Technology` |
+| `sector` | TEXT | Index label, NOT NULL: the index name on market rows (`US Equity Index`), the sector name alone on sector rows (`Technology`; unique per `country`); replaces the former `name` column |
 | `country` | TEXT | Country set: `us`, `swe`, or `uk` |
-| `sector` | TEXT | Sector key (`sectorKey` form, e.g. `technology`); NULL for market indices |
 | `currency` | TEXT | Country set currency: `USD`, `SEK`, or `GBP` |
 | `trading_date` | DATE | Latest `trading_date` among the contributing stocks that week |
 | `updated_at` | TIMESTAMPTZ | When the row was written |
@@ -569,9 +576,12 @@ all of its sector indices, one row per index ticker per calendar week.
 Primary key on `(ticker, trading_date)`, with at most one row per ticker per
 calendar week (FR-35). Rows with `trading_date` older than one year are
 deleted on each weekly run (FR-44, same retention as the metrics tables).
-Upgrading an existing database: a migration adds `sector`, `currency`,
-`pct_uptrend`, and `z_score` and drops `us_by_sector` / `swe_by_sector` /
-`uk_by_sector`; then rebuild with `compute_indices.py`.
+Upgrading an existing database: migration step 21 adds `currency`,
+`pct_uptrend`, and `z_score`, moves `name` into `sector`, drops `name`, and
+rebuilds the table so `sector` is the second column —
+apply it together with the deploy, then rebuild with `compute_indices.py`;
+step 22 later drops `us_by_sector` / `swe_by_sector` / `uk_by_sector`
+(MIGRATIONS.md, RFC-018).
 
 Deleting a row from `us_tickers`, `swe_tickers`, or `uk_tickers` cascades to all
 of its rows in the matching metrics table.
@@ -764,9 +774,9 @@ Python 3.11+. Key libraries: `yfinance`, `pandas`, `psycopg2-binary`,
   (and the same against `swe_market_metrics` / `uk_market_metrics`)
 - Market and sector indices (after the indices migration, rebuild history
   once with `pipenv run python compute_indices.py`):
-  `SELECT ticker, trading_date, current_price, sma_50, sma_200, momentum, ticker_count FROM indices WHERE sector IS NULL ORDER BY ticker, trading_date DESC;`
+  `SELECT ticker, trading_date, current_price, sma_50, sma_200, momentum, ticker_count FROM indices WHERE ticker IN ('US-IDX', 'SWE-IDX', 'UK-IDX') ORDER BY ticker, trading_date DESC;`
 - Sector ranking for the latest week:
-  `SELECT ticker, ticker_count, momentum, z_score, pct_uptrend FROM indices WHERE country = 'us' AND sector IS NOT NULL AND date_trunc('week', trading_date) = (SELECT date_trunc('week', MAX(trading_date)) FROM indices WHERE country = 'us') ORDER BY z_score DESC;`
+  `SELECT ticker, sector, ticker_count, momentum, z_score, pct_uptrend FROM indices WHERE country = 'us' AND ticker LIKE '%-IDX-%' AND date_trunc('week', trading_date) = (SELECT date_trunc('week', MAX(trading_date)) FROM indices WHERE country = 'us') ORDER BY z_score DESC;`
 
 ## 11. Future Considerations (Out of Current Scope)
 

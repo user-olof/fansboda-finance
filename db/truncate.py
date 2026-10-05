@@ -7,7 +7,6 @@ import psycopg2
 TRUNCATE_DEV_TABLES_SQL = """
 TRUNCATE TABLE
     indices,
-    us_by_sector, swe_by_sector, uk_by_sector,
     us_market_metrics, swe_market_metrics, uk_market_metrics,
     us_metrics, swe_metrics, uk_metrics,
     us_tickers, swe_tickers, uk_tickers

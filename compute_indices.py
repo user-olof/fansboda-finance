@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Compute equal-weighted weekly country indices into ``indices`` (PRD §5.8).
+"""Compute equal-weighted weekly market and sector indices into ``indices`` (PRD §5.8).
 
-US-IDX / SWE-IDX / UK-IDX store price, SMA-50 and SMA-200 levels (each chained
-by the plain average of the stocks' stored weekly growth in that measure) plus
-momentum, from ``*_metrics``. Stock-weeks with implausible growth are excluded
-and logged (FR-37b). No yfinance calls. Runs standalone (full rebuild by
-default) and from ``fetch_sma.py`` for the weeks it wrote.
+Per country set: the market index (US-IDX / SWE-IDX / UK-IDX) and one index per
+sector (e.g. US-IDX-TECHNOLOGY), each storing price, SMA-50 and SMA-200 levels
+(chained by the plain average of the members' stored weekly growth in that
+measure), momentum, pct_uptrend, currency, and — for sector rows — a z-score vs
+the set's other sectors (RFC-018). Stock-weeks with implausible growth are
+excluded and logged (FR-37b). No yfinance calls. Runs standalone (full rebuild
+by default) and from ``fetch_sma.py`` for the weeks it wrote.
 """
 
 from __future__ import annotations
@@ -40,9 +42,9 @@ def refresh_indices(
     max_growth: float = DEFAULT_OUTLIER_MAX_GROWTH,
     min_growth: float = DEFAULT_OUTLIER_MIN_GROWTH,
 ) -> int:
-    """Recompute country indices; returns rows written.
+    """Recompute market and sector indices; returns rows written.
 
-    ``week_starts=None`` rebuilds each index from its earliest stored metrics
+    ``week_starts=None`` rebuilds every index from its earliest stored metrics
     week (price base = 100). Otherwise every stored metrics week from the earliest
     given week onward is recomputed, so later rows stay chained correctly.
     """
@@ -79,7 +81,7 @@ def refresh_indices(
             outliers = [o for o in outliers if o.week_start != weeks[0]]
         for outlier in outliers:
             logger.warning(
-                "Outlier excluded from %s index: %s trading_date=%s "
+                "Outlier excluded from %s indices: %s trading_date=%s "
                 "price_growth=%s sma_50_growth=%s sma_200_growth=%s (%s)",
                 set_key.value,
                 outlier.ticker,
@@ -91,14 +93,15 @@ def refresh_indices(
             )
         if outliers:
             logger.info(
-                "Index %s: %d outlier stock-week(s) excluded",
+                "Indices %s: %d outlier stock-week(s) excluded",
                 set_key.value,
                 len(outliers),
             )
-        for row in rows:
+        market_rows = [row for row in rows if row.sector_key is None]
+        for row in market_rows:
             logger.info(
                 "Index %s trading_date=%s ticker_count=%d current_price=%.4f "
-                "sma_50=%.4f sma_200=%.4f momentum=%s",
+                "sma_50=%.4f sma_200=%.4f momentum=%s pct_uptrend=%s",
                 row.ticker,
                 row.trading_date.isoformat(),
                 row.ticker_count,
@@ -106,7 +109,15 @@ def refresh_indices(
                 row.sma_50,
                 row.sma_200,
                 "n/a" if row.momentum is None else f"{row.momentum:.6f}",
+                "n/a" if row.pct_uptrend is None else f"{row.pct_uptrend:.1f}",
             )
+        logger.info(
+            "Indices %s: wrote %d market and %d sector row(s) for %d week(s)",
+            set_key.value,
+            len(market_rows),
+            len(rows) - len(market_rows),
+            len(weeks),
+        )
         written += len(rows)
 
     return written
@@ -115,8 +126,8 @@ def refresh_indices(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Rebuild equal-weighted weekly country indices (US-IDX / SWE-IDX / "
-            "UK-IDX) from stored metrics (no yfinance)"
+            "Rebuild equal-weighted weekly market and sector indices (US-IDX / "
+            "SWE-IDX / UK-IDX and their sectors) from stored metrics (no yfinance)"
         ),
     )
     parser.add_argument(

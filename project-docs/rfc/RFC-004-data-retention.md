@@ -78,8 +78,9 @@ Indexes on each `*_metrics.trading_date` (RFC-001) support efficient deletes. `*
 - [x] Parameterized SQL in `db/metrics.py` and `db/market.py`
 - [x] Unit tests in `tests/test_retention.py` assert UK purge alongside US/SWE
 
-`*_by_sector` has no cutoff of its own — weeks absent from `*_metrics` are
-pruned by the sector refresh after this purge ([RFC-014](./RFC-014-sector-trends.md)).
+Sector trends are sector index rows in `indices` ([RFC-018](./RFC-018-sector-indices.md))
+and follow its `trading_date` purge; the former `*_by_sector` tables
+(RFC-014) are dropped by migration step 22.
 
 ## Open questions
 

@@ -37,12 +37,6 @@ def _stub_outliers():
         yield mock
 
 
-@pytest.fixture(autouse=True)
-def _stub_sector_trends():
-    with patch("fetch_sma.refresh_sector_trends", return_value=(0, 0)) as mock:
-        yield mock
-
-
 def test_retention_cutoff_subtracts_days_from_utc_today() -> None:
     assert retention_cutoff(365, today=date(2026, 6, 6)) == date(2025, 6, 6)
     assert retention_cutoff(30, today=date(2026, 3, 31)) == date(2026, 3, 1)
@@ -228,35 +222,8 @@ def test_main_purges_when_all_tickers_already_fresh(caplog) -> None:
     assert "purged_market_metrics=1" in caplog.text
 
 
-def test_main_refreshes_sector_trends_after_purge(
-    _stub_sector_trends, _stub_indices
-) -> None:
-    calls: list[str] = []
-    _stub_sector_trends.side_effect = lambda *a, **k: calls.append("sector") or (0, 0)
-
-    def _purge(*_args):
-        calls.append("purge")
-        return (0, 0, 0)
-
-    with patch("fetch_sma.get_config", return_value=_mock_config()):
-        with patch(
-            "fetch_sma.load_tickers_from_db",
-            return_value=[TickerEntry(symbol="AAA.ST", company="Alpha")],
-        ):
-            with patch(
-                "fetch_sma.filter_stale_tickers",
-                return_value=([], 1, date(2026, 6, 15)),
-            ):
-                with patch("fetch_sma.purge_stale_data", side_effect=_purge):
-                    assert main() == 0
-
-    assert calls == ["purge", "sector"]
-    _stub_sector_trends.assert_called_once_with("postgresql://example", [])
-    _stub_indices.assert_not_called()
-
-
-def test_main_returns_1_when_sector_trends_fail(_stub_sector_trends) -> None:
-    _stub_sector_trends.side_effect = RuntimeError("db down")
+def test_main_all_fresh_only_purges(_stub_indices) -> None:
+    """No new weeks: no index step (sector trends are index rows, RFC-018)."""
     with patch("fetch_sma.get_config", return_value=_mock_config()):
         with patch(
             "fetch_sma.load_tickers_from_db",
@@ -267,7 +234,9 @@ def test_main_returns_1_when_sector_trends_fail(_stub_sector_trends) -> None:
                 return_value=([], 1, date(2026, 6, 15)),
             ):
                 with patch("fetch_sma.purge_stale_data", return_value=(0, 0, 0)):
-                    assert main() == 1
+                    assert main() == 0
+
+    _stub_indices.assert_not_called()
 
 
 def test_main_purges_after_fetch_even_when_no_metrics_collected() -> None:
@@ -296,9 +265,7 @@ def test_main_purges_after_fetch_even_when_no_metrics_collected() -> None:
     mock_purge.assert_called_once_with("postgresql://example", 365)
 
 
-def test_main_fetches_stale_tickers_and_inserts(
-    _stub_sector_trends, _stub_indices
-) -> None:
+def test_main_fetches_stale_tickers_and_inserts(_stub_indices) -> None:
     metric_row = MetricRow(
         ticker="AAA.ST",
         company="Alpha",
@@ -359,14 +326,11 @@ def test_main_fetches_stale_tickers_and_inserts(
     assert market_row.market == "se_market"
     assert market_row.week_start == date(2026, 6, 1)
     assert market_row.momentum_mean == Decimal("0.5")
-    _stub_sector_trends.assert_called_once_with(
-        "postgresql://example", [date(2026, 6, 1)]
-    )
     _stub_indices.assert_called_once_with(
         "postgresql://example",
         [date(2026, 6, 1)],
-        max_growth=4.0,
-        min_growth=-0.8,
+        max_growth=9.0,
+        min_growth=-0.999,
     )
     inserted_rows = mock_insert.call_args[0][1]
     assert inserted_rows[0].company == "Alpha"

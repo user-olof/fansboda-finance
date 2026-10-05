@@ -72,26 +72,23 @@ WHERE c.conrelid IN (
   AND c.contype = 'p'
 ORDER BY 1;
 
--- us_by_sector / swe_by_sector / uk_by_sector (step 17)
-SELECT table_name, column_name
-FROM information_schema.columns
+-- *_by_sector must be gone after step 22 / fresh schema (RFC-018)
+SELECT table_name
+FROM information_schema.tables
 WHERE table_schema = 'public'
-  AND table_name IN ('us_by_sector', 'swe_by_sector', 'uk_by_sector')
-  AND column_name IN (
-    'sector', 'week_start', 'ticker_count', 'momentum_mean',
-    'momentum_median', 'z_score_mean', 'pct_uptrend'
-  )
-ORDER BY table_name, column_name;
--- expect 21 rows
+  AND table_name IN ('us_by_sector', 'swe_by_sector', 'uk_by_sector');
+-- expect 0 rows
 
--- indices (steps 18–19, v2 shape)
+-- indices (steps 18–19 v2 shape + step 21 sector columns)
 SELECT column_name, data_type, is_nullable
 FROM information_schema.columns
 WHERE table_schema = 'public'
   AND table_name = 'indices'
 ORDER BY ordinal_position;
--- expect 10 rows: ticker, name, country, trading_date, updated_at,
--- ticker_count, current_price, sma_50, sma_200, momentum (no week_start)
+-- expect 13 rows in this order: ticker, sector (NOT NULL, index label — name
+-- merged into it by step 21), country, trading_date, updated_at,
+-- ticker_count, current_price, sma_50, sma_200, momentum, currency,
+-- pct_uptrend, z_score (no week_start, no name)
 
 SELECT c.conname
 FROM pg_constraint c

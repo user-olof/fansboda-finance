@@ -26,7 +26,7 @@ Core weekly job (`fetch_sma.py`): load watchlists from `us_tickers`, `swe_ticker
 | FR-5b | Upsert aggregate row per `week_start` into `us_market_metrics` / `swe_market_metrics` / `uk_market_metrics` — `momentum_mean` / `momentum_std` from that country set's metrics in that week |
 | FR-6 | Upsert with `ON CONFLICT (ticker, week_start) DO UPDATE … WHERE EXCLUDED.trading_date > existing` into `us_metrics` / `swe_metrics` / `uk_metrics` (newer bar replaces the week's row) |
 | FR-7 | Retention purge after run (RFC-004) |
-| FR-7a / FR-7b | Refresh `*_by_sector` (RFC-014), then `indices` (RFC-015) for the weeks written |
+| FR-7a / FR-7b | FR-7a retired ([RFC-018](./RFC-018-sector-indices.md)); after the purge, `indices` (RFC-015 / RFC-018) gets market + sector index rows for the weeks written |
 | FR-7c | Email newly detected implausible weekly moves ([RFC-017](./RFC-017-outlier-guard-email.md)) |
 | FR-8 | Log batch progress, per-ticker results, summary; non-zero exit on fatal errors |
 

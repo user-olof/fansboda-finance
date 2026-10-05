@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dev-only: truncate indices and us_/swe_/uk_ by_sector, market_metrics,
+"""Dev-only: truncate indices and us_/swe_/uk_ market_metrics,
 metrics, and tickers.
 
 Refuses to run when APP_ENV is prod/production. Not for production use.
@@ -38,7 +38,7 @@ def main() -> int:
         logger.exception("Failed to truncate tables")
         return 1
 
-    logger.info("Truncated indices and us_/swe_/uk_ by_sector, market_metrics, metrics, and tickers")
+    logger.info("Truncated indices and us_/swe_/uk_ market_metrics, metrics, and tickers")
     return 0
 
 

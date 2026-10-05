@@ -74,6 +74,8 @@ if [[ "$has_legacy" == "no" && "$has_raw_ratios" == "no" ]]; then
   run_sql "$REPO_DIR/migrate_add_indices_table.sql"
   run_sql "$REPO_DIR/migrate_indices_levels.sql"
   run_sql "$REPO_DIR/migrate_add_growth_columns.sql"
+  run_sql "$REPO_DIR/migrate_indices_sectors.sql"
+  run_sql "$REPO_DIR/migrate_drop_by_sector_tables.sql"
   echo "All migrations applied (us_* / swe_* / uk_*)."
   exit 0
 fi
@@ -105,7 +107,7 @@ run_sql "$REPO_DIR/migrate_week_buckets.sql"
 # Step 16: business_summary on *_tickers.
 run_sql "$REPO_DIR/migrate_add_business_summary.sql"
 
-# Step 17: *_by_sector weekly sector trend tables.
+# Step 17: *_by_sector weekly sector trend tables (dropped again by step 22).
 run_sql "$REPO_DIR/migrate_add_by_sector_tables.sql"
 
 # Step 18: indices (US-IDX / SWE-IDX / UK-IDX).
@@ -116,5 +118,11 @@ run_sql "$REPO_DIR/migrate_indices_levels.sql"
 
 # Step 20: weekly growth columns on *_metrics (FR-5a).
 run_sql "$REPO_DIR/migrate_add_growth_columns.sql"
+
+# Step 21: sector / currency / pct_uptrend / z_score on indices (RFC-018).
+run_sql "$REPO_DIR/migrate_indices_sectors.sql"
+
+# Step 22: drop *_by_sector (superseded by sector index rows, RFC-018).
+run_sql "$REPO_DIR/migrate_drop_by_sector_tables.sql"
 
 echo "All migrations applied (us_* / swe_* / uk_*)."

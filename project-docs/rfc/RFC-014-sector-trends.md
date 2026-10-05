@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | **Priority** | P3 |
-| **Status** | **Implemented** |
+| **Status** | **Superseded** by [RFC-018](./RFC-018-sector-indices.md): sector indices in `indices` replace `*_by_sector`; `compute_sector_trends.py` / `db/sector.py` removed, tables dropped by migration step 22 |
 | **Depends on** | RFC-001, RFC-003, RFC-004, RFC-012 |
 | **PRD** | §5.1 (FR-7a), §5.7 (FR-27–FR-33), §6 |
 | **Feature** | [Sector trend averages](../FEATURES.md#sector-trend-averages) |

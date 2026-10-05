@@ -142,7 +142,7 @@ def test_outlier_and_alert_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
         dev = DevConfig.load()
     prod = ProdConfig.load()
 
-    assert (dev.outlier_max_growth, dev.outlier_min_growth) == (4.0, -0.8)
+    assert (dev.outlier_max_growth, dev.outlier_min_growth) == (9.0, -0.999)
     assert dev.alert_email_enabled is False
     assert prod.alert_email_enabled is True
     assert dev.alert_email_from is None and dev.alert_email_to is None

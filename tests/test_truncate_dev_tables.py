@@ -23,9 +23,7 @@ def test_truncate_sql_targets_expected_tables() -> None:
     assert "us_tickers" in sql
     assert "swe_tickers" in sql
     assert "uk_tickers" in sql
-    assert "us_by_sector" in sql
-    assert "swe_by_sector" in sql
-    assert "uk_by_sector" in sql
+    assert "by_sector" not in sql
     assert "indices" in sql
     assert "RESTART IDENTITY" in sql
 
