@@ -49,8 +49,8 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
   weekly `sma_50` / `sma_200` history that the `fansboda` repo uses for
   Golden / Death Cross detection (§5.6). Use **`momentum`** and **`z_score`**
   (vs peers in the same country set / listing `market` on that date via
-  `*_market_metrics`) to rank relative strength for heatmaps; sector views
-  via `*_by_sector` (§5.7).
+  `*_market_metrics`) to rank relative strength for heatmaps; market and
+  sector views via the market and sector index rows in `indices` (§5.8).
 - **Watchlist management:** add or remove symbols by editing `us_tickers`,
   `swe_tickers`, or `uk_tickers` (directly via SQL or by running the seeding
   script).
@@ -73,8 +73,8 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
                                               |       swe_market_metrics         |
                                               |   UK: uk_tickers, uk_metrics,    |
                                               |       uk_market_metrics          |
-                                              |   + us_/swe_/uk_by_sector        |
-                                              |   + indices (one table)          |
+                                              |   + indices (one table: market   |
+                                              |     + sector indices)            |
                                               +----------------------------------+
 ```
 
@@ -138,13 +138,12 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
   `swe_metrics` / `uk_metrics` (and the matching `*_market_metrics` tables,
   plus `indices`) where `trading_date` (`week_start` for `*_market_metrics`)
   is older than one year (`purge_stale_metrics`).
-- **FR-7a Sector trends:** After the retention purge, recompute the
-  `*_by_sector` rows for every week written in this run and prune sector weeks
-  that no longer exist in the metrics tables (§5.7, `refresh_sector_trends`).
-  A failure here is logged and exits non-zero.
-- **FR-7b Equity indices:** After sector trends, compute the `indices` row
-  for each country set for every week written in this run (§5.8). A failure
-  here is logged and exits non-zero.
+- **FR-7a Sector trends:** Retired — sector trends are the sector index rows
+  written by FR-7b (§5.7).
+- **FR-7b Equity indices:** After the retention purge, compute the `indices`
+  rows — each country's market index and all of its sector indices — for
+  every week written in this run (§5.8). A failure here is logged and exits
+  non-zero.
 - **FR-7c Outlier email:** After the indices, email newly detected
   implausible weekly moves in the weeks written this run (§5.9).
 - **FR-8 Observability:** Log per-batch progress, per-ticker results, insert
@@ -283,68 +282,63 @@ which reads the `us_metrics` / `swe_metrics` / `uk_metrics` SMA history this
 pipeline produces. This repo has no detection code; FR-19 – FR-26 are retired
 here (numbers are not reused).
 
-### 5.7 Sector trend averages (`compute_sector_trends.py`)
+### 5.7 Sector trend averages (retired)
 
-Equal-weighted weekly trend summary per sector, from an investor's
-perspective: every company counts once regardless of market cap. Derived
-entirely from stored data — no yfinance calls.
-
-- **FR-27 Source:** Join each country metrics table to its tickers table
-  (`us_metrics` ⋈ `us_tickers`, etc.) and group by `tickers.sector` and
-  `week_start`. Only rows with non-NULL `momentum` and a non-blank `sector`
-  contribute.
-- **FR-28 Sector key:** Normalize `sector` to the yfinance `sectorKey` form
-  (`lower`, trimmed, spaces → `-`) so a display-name fallback such as
-  "Financial Services" merges with `financial-services`.
-- **FR-29 Measures:** Per sector and week store `ticker_count`,
-  `momentum_mean` (average `sma_50 / sma_200`), `momentum_median`,
-  `z_score_mean` (average cross-sectional `z_score`), and `pct_uptrend`
-  (percentage 0–100 of companies with `sma_50 > sma_200`). All averages are
-  equal-weighted. Every sector is stored regardless of size; consumers filter
-  on `ticker_count` when they need a minimum sample.
-- **FR-30 Write semantics:** Each `(country, week)` is replaced atomically
-  (delete the week's rows, insert fresh aggregates, one transaction), so
-  re-runs are idempotent and sectors that lose all tickers disappear.
-- **FR-31 Retention:** Each run deletes `*_by_sector` weeks with no remaining
-  rows in the matching metrics table, so sector history follows the metrics
-  retention window (FR-7) without its own cutoff.
-- **FR-32 Invocation:** Runs as part of the weekly job (FR-7a) for the weeks
-  just written, and standalone via
-  `pipenv run python compute_sector_trends.py [--country us|swe|uk] [--week YYYY-MM-DD]`
-  — default recomputes every stored week for all three country sets; `--week`
-  is normalized to that week's Monday. Run it standalone after
-  `backfill_sma.py` / `backfill_market.py`, which do not refresh sector rows.
-- **FR-33 Observability:** Log scope and a summary line with rows written and
-  rows pruned. Exit non-zero on DB failure.
+Superseded by the sector indices in §5.8: each sector's equal-weighted trend
+is now a sector index row in `indices` (levels, momentum, `pct_uptrend`,
+`z_score`). FR-27–FR-33, `compute_sector_trends.py`, and the
+`us_by_sector` / `swe_by_sector` / `uk_by_sector` tables are removed (the
+tables are dropped by a migration). The old `momentum_median` and
+`z_score_mean` measures have no replacement.
 
 ### 5.8 Equal-weighted equity indices (`compute_indices.py`, `indices` table)
 
-One synthetic index per country set, built from the stocks in that set's
-watchlist and stored in the same shape as a `*_metrics` row: an index
-**price**, its **SMA-50** and **SMA-200** levels, and **momentum**. Every
-stock has equal weight. Derived entirely from stored `*_metrics` rows — no
-yfinance calls.
+Synthetic equal-weighted indices built from the stocks in each country set's
+watchlist: one **market index** per country set, plus one **sector index**
+per sector within that set. All are stored in the single `indices` table in
+the same shape: an index **price**, its **SMA-50** and **SMA-200** levels,
+**momentum**, **`z_score`**, **`pct_uptrend`**, the contributing
+**`ticker_count`**, and the set's **currency**. Every stock has equal weight.
+Derived entirely from the stored `*_metrics` growth columns (FR-5a) and
+`*_tickers.sector` — no yfinance calls.
 
-- **FR-34 Index definitions:**
+- **FR-34 Index definitions:** Per country set, one market index over all
+  of the set's stocks:
 
-  | Country set | Index name | Ticker | Source table |
-  |-------------|------------|--------|--------------|
-  | US | US Equity Index | `US-IDX` | `us_metrics` |
-  | Swedish | OMX Equity Index | `SWE-IDX` | `swe_metrics` |
-  | UK | FTSE Equity Index | `UK-IDX` | `uk_metrics` |
+  | Country set | Index name | Ticker | Currency | Source tables |
+  |-------------|------------|--------|----------|---------------|
+  | US | US Equity Index | `US-IDX` | `USD` | `us_metrics` ⋈ `us_tickers` |
+  | Swedish | OMX Equity Index | `SWE-IDX` | `SEK` | `swe_metrics` ⋈ `swe_tickers` |
+  | UK | FTSE Equity Index | `UK-IDX` | `GBP` | `uk_metrics` ⋈ `uk_tickers` |
 
-- **FR-35 One row per country per week:** Store one `indices` row per index
+  plus one sector index per sector key `<s>` present in the set's tickers
+  table: ticker `<market ticker>-<S>` (sector key upper-cased, e.g.
+  `US-IDX-TECHNOLOGY`, `SWE-IDX-FINANCIAL-SERVICES`), name
+  `<index name> – <Sector>` (sector key title-cased with spaces, e.g.
+  `US Equity Index – Financial Services`), `sector = <s>`, same currency.
+  Market index rows have `sector = NULL`.
+- **FR-34a Sector membership:** A stock belongs to the sector index of its
+  current `*_tickers.sector`, normalized to the yfinance `sectorKey` form
+  (`lower`, trimmed, spaces → `-`) so a display-name fallback such as
+  "Financial Services" merges with `financial-services`. Stocks with a blank
+  or NULL sector count only towards the market index. Every sector gets an
+  index regardless of size; consumers filter on `ticker_count` when they need
+  a minimum sample.
+- **FR-35 One row per index per week:** Store one `indices` row per index
   ticker per calendar week. The row's `trading_date` is the latest
-  `trading_date` among the contributing stocks' metrics rows for that week.
-  Key `(ticker, trading_date)`; at most one row per ticker per calendar week
-  — when a later bar in the same week is computed (e.g. a mid-week manual run
-  followed by the Saturday job), it replaces that week's row, mirroring FR-6.
-- **FR-36 Contributing stocks:** A stock contributes to week `w` when its
-  week-`w` metrics row has positive `current_price`, `sma_50`, and `sma_200`
-  and non-NULL `price_growth`, `sma_50_growth`, and `sma_200_growth` (FR-5a).
-  The same set of `N` stocks drives all three levels, so they stay
-  comparable. New listings, incomplete SMAs, and stocks without a
-  previous-week bar do not contribute that week.
+  `trading_date` among that index's contributing stocks' metrics rows for that
+  week. Key `(ticker, trading_date)`; at most one row per ticker per calendar
+  week — when a later bar in the same week is computed (e.g. a mid-week manual
+  run followed by the Saturday job), it replaces that week's row, mirroring
+  FR-6.
+- **FR-36 Contributing stocks:** A stock contributes to an index's week `w`
+  when it is a member of that index (the whole set, or the sector per
+  FR-34a) and its week-`w` metrics row has positive `current_price`,
+  `sma_50`, and `sma_200` and non-NULL `price_growth`, `sma_50_growth`, and
+  `sma_200_growth` (FR-5a). The same set of `N` stocks drives all three
+  levels and `pct_uptrend`, so they stay comparable. New listings,
+  incomplete SMAs, and stocks without a previous-week bar do not contribute
+  that week.
 - **FR-37 Equal-weighted growth per level:** For each measure, the index's
   weekly growth is the plain average of the contributing stocks' stored
   growth: `g_price(w) = (1 / N) × Σ price_growth_i(w)`, and likewise
@@ -357,27 +351,29 @@ yfinance calls.
   index's previous stored week `p` is not the previous calendar week (a week
   in between had no contributing stocks), that week instead uses the ratio of
   stored rows between `p` and `w`
-  (`g_x = (1 / N) × Σ (x_i(w) / x_i(p) − 1)`, over stocks with positive
-  values in both weeks).
+  (`g_x = (1 / N) × Σ (x_i(w) / x_i(p) − 1)`, over member stocks with
+  positive values in both weeks).
 - **FR-37b Outlier guard:** A stock-week is an **outlier** when any of its
   three weekly growth values (FR-5a, or the FR-37a ratio in a gap week) is
   above `outlier_max_growth` (default `4.0`, i.e. more than ×5) or below
   `outlier_min_growth` (default `−0.8`, i.e. below ÷5). Outliers are excluded
-  from that week's contributing set for all three levels (and from `N`), so
-  one broken series — typically a split Yahoo failed to adjust, e.g.
-  `WYLD.ST` 1:500 on 2025-12-05 — cannot move the index. The exclusion is
-  per week: the stock contributes again in later weeks whose growth is within
-  the bounds. A genuine ×5 move is also excluded; with equal weights across
-  hundreds of stocks that bias is negligible. Smaller residual SMA drift
-  after an unadjusted split (SMA growth below ×5 in the following weeks) is
-  not caught; fixing the series itself is §11 future work. Base weeks
-  (FR-39) have no growth and are not guarded.
+  from that week's contributing set — for the market index and its sector
+  index alike — for all three levels, `pct_uptrend`, and `N`, so one broken
+  series — typically a split Yahoo failed to adjust, e.g. `WYLD.ST` 1:500 on
+  2025-12-05 — cannot move an index. The exclusion is per week: the stock
+  contributes again in later weeks whose growth is within the bounds. A
+  genuine ×5 move is also excluded; with equal weights that bias is small for
+  the market index, but larger for sector indices with few stocks. Smaller
+  residual SMA drift after an unadjusted split (SMA growth below ×5 in the
+  following weeks) is not caught; fixing the series itself is §11 future
+  work. Base weeks (FR-39) have no growth and are not guarded.
 - **FR-38 Index levels:** Chain-link each level onto its previous value:
   `level_x(w) = level_x(p) × (1 + g_x(w))`, stored as the row's
   `current_price`, `sma_50`, and `sma_200`.
-- **FR-39 Base week:** The first week for an index (no earlier stored row)
-  uses every stock with positive `current_price`, `sma_50`, and `sma_200`
-  that week:
+- **FR-39 Base week:** The first week for an index (no earlier stored row for
+  that ticker — for a sector index, possibly later than its market index's
+  base week) uses every member stock with positive `current_price`,
+  `sma_50`, and `sma_200` that week:
   - `current_price = 100`
   - `sma_50 = 100 × (1 / N) × Σ (sma_50_i / current_price_i)`
   - `sma_200 = 100 × (1 / N) × Σ (sma_200_i / current_price_i)`
@@ -388,29 +384,46 @@ yfinance calls.
   unit-free, mixed price units within a set (e.g. GBp vs GBP) do not distort
   the index as long as each stock's own units are consistent over time.
 - **FR-40 Momentum:** `momentum = sma_50 / sma_200` on the index levels (NULL
-  if `sma_200` is zero), the same definition as for stocks (FR-5). No
-  `z_score` is calculated for indices.
-- **FR-41 Insufficient data:** If no stock contributes in a week (`N = 0`),
-  do not write a row for that week; the next week chains from the last stored
-  row.
-- **FR-42 Idempotent writes:** Recomputing a week overwrites that week's row;
+  if `sma_200` is zero), the same definition as for stocks (FR-5).
+- **FR-40a Uptrend share:** `pct_uptrend` = percentage (0–100) of the week's
+  `N` contributing stocks with `sma_50 > sma_200`.
+- **FR-40b Z-score (sector vs sectors):** For each country set and week, over
+  that set's sector index rows with non-NULL `momentum`:
+  `z_score = (momentum − mean) / std`, where `mean` and `std` are the
+  equal-weighted mean and population standard deviation of those sector
+  indices' momentum (the same population std as the stock-level `z_score`,
+  FR-5). NULL when fewer than two sector indices have momentum that week or
+  `std` is zero. Market index rows always have `z_score = NULL` (the market
+  is the whole country, not a peer of its sectors). Z-scores are recomputed
+  for every week whose sector rows are written.
+- **FR-40c Currency:** `currency` is the country set's currency (FR-34).
+  Index levels are unit-free (base 100); the column records which currency
+  the underlying stocks trade in.
+- **FR-41 Insufficient data:** If no stock contributes to an index in a week
+  (`N = 0`), do not write a row for that index and week; the next week chains
+  from that index's last stored row.
+- **FR-42 Idempotent writes:** Recomputing a week overwrites that week's rows;
   weeks are computed in ascending order so each week chains from the
-  already-stored previous week.
+  already-stored previous week. A sector that no longer has any member stocks
+  keeps its stored history until retention purges it.
 - **FR-43 Invocation:** Runs as part of the weekly job (FR-7b) for the weeks
   just written (recomputing any later stored weeks so the chain stays
-  consistent), and standalone for a full rebuild via
-  `pipenv run python compute_indices.py [--country us|swe|uk]`.
+  consistent), and standalone for a full rebuild of all market and sector
+  indices via `pipenv run python compute_indices.py [--country us|swe|uk]`.
   A full rebuild starts at the earliest week still in the metrics table, so
   the base week (and therefore index levels, but not weekly growth) moves
-  forward as retention purges old metrics.
+  forward as retention purges old metrics. Run it after `backfill_sma.py`,
+  `refresh_tickers.py` (sector changes), or filling the growth columns.
 - **FR-44 Retention:** Purge `indices` rows with the same window as the
   metrics tables (FR-7): delete rows whose `trading_date` is older than
   `METRICS_RETENTION_DAYS`. The weekly calculation only needs the previous
   stored week, so purging old rows does not break the chain.
-- **FR-45 Observability:** Log per index the `trading_date`, `ticker_count`,
-  the three levels, and `momentum`, plus a summary line. Log one `WARNING`
-  per excluded outlier (country, ticker, `trading_date`, the three growth
-  values) and the outlier count per index. Exit non-zero on DB failure.
+- **FR-45 Observability:** Log per country set the market index's
+  `trading_date`, `ticker_count`, the three levels, `momentum`, and
+  `pct_uptrend`, plus the number of sector indices written; summary line with
+  rows written per country. Log one `WARNING` per excluded outlier (country,
+  ticker, `trading_date`, the three growth values) and the outlier count per
+  country set. Exit non-zero on DB failure.
 
 ### 5.9 Data-quality email (implausible price moves)
 
@@ -457,11 +470,13 @@ thresholds — no extra table and no extra yfinance calls.
 Data is partitioned by listing country into three parallel table sets with the
 same column layouts.
 
-| Set | Watchlist | SMA history | Cross-sectional aggregates | Sector trends |
-|-----|-----------|-------------|----------------------------|---------------|
-| US stocks | `us_tickers` | `us_metrics` | `us_market_metrics` | `us_by_sector` |
-| Swedish stocks | `swe_tickers` | `swe_metrics` | `swe_market_metrics` | `swe_by_sector` |
-| UK stocks | `uk_tickers` | `uk_metrics` | `uk_market_metrics` | `uk_by_sector` |
+| Set | Watchlist | SMA history | Cross-sectional aggregates |
+|-----|-----------|-------------|----------------------------|
+| US stocks | `us_tickers` | `us_metrics` | `us_market_metrics` |
+| Swedish stocks | `swe_tickers` | `swe_metrics` | `swe_market_metrics` |
+| UK stocks | `uk_tickers` | `uk_metrics` | `uk_market_metrics` |
+
+Market and sector indices for all three sets share one `indices` table.
 
 **Country routing (seed / refresh / insert):**
 
@@ -529,46 +544,34 @@ Primary key on `(market, week_start)`. Rows with `week_start` older
 than one year are deleted on each weekly run (same retention as the metrics
 tables).
 
-### Sector trend tables (`us_by_sector` / `swe_by_sector` / `uk_by_sector`)
-
-Equal-weighted weekly trend averages per sector (§5.7); one row per
-`(sector, week_start)`.
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `sector` | TEXT | Normalized `tickers.sector` (`sectorKey` form, e.g. `technology`) |
-| `week_start` | DATE | Monday of the snapshot week |
-| `updated_at` | TIMESTAMPTZ | When the row was written |
-| `ticker_count` | INTEGER | Companies contributing (non-NULL `momentum`) |
-| `momentum_mean` | NUMERIC(18,6) | Average `momentum` |
-| `momentum_median` | NUMERIC(18,6) | Median `momentum` |
-| `z_score_mean` | NUMERIC(18,6) | Average `z_score` (NULL z-scores ignored) |
-| `pct_uptrend` | NUMERIC(18,6) | % of companies with `sma_50 > sma_200` (0–100) |
-
-Primary key on `(sector, week_start)`. Weeks absent from the matching metrics
-table are pruned on each run (FR-31).
-
 ### Index table (`indices`)
 
-A single table shared by all country sets (§5.8), shaped like the
-`*_metrics` tables; one row per index ticker per calendar week.
+A single table shared by all country sets (§5.8): each set's market index and
+all of its sector indices, one row per index ticker per calendar week.
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `ticker` | TEXT | `US-IDX`, `SWE-IDX`, or `UK-IDX` |
-| `name` | TEXT | `US Equity Index`, `OMX Equity Index`, or `FTSE Equity Index` |
+| `ticker` | TEXT | Market index `US-IDX` / `SWE-IDX` / `UK-IDX`, or sector index `<market ticker>-<SECTOR>` (e.g. `US-IDX-TECHNOLOGY`) |
+| `name` | TEXT | e.g. `US Equity Index`, `US Equity Index – Technology` |
 | `country` | TEXT | Country set: `us`, `swe`, or `uk` |
+| `sector` | TEXT | Sector key (`sectorKey` form, e.g. `technology`); NULL for market indices |
+| `currency` | TEXT | Country set currency: `USD`, `SEK`, or `GBP` |
 | `trading_date` | DATE | Latest `trading_date` among the contributing stocks that week |
 | `updated_at` | TIMESTAMPTZ | When the row was written |
 | `ticker_count` | INTEGER | Stocks contributing this week (`N`), after excluding outliers (FR-37b) |
-| `current_price` | NUMERIC(18,6) | Equal-weighted price index level (base week = 100) |
-| `sma_50` | NUMERIC(18,6) | Equal-weighted SMA-50 index level (base = 100 × average `sma_50 / current_price`) |
-| `sma_200` | NUMERIC(18,6) | Equal-weighted SMA-200 index level (base = 100 × average `sma_200 / current_price`) |
+| `current_price` | NUMERIC(18,6) | Equal-weighted price index level, chained from `price_growth` (base week = 100) |
+| `sma_50` | NUMERIC(18,6) | Equal-weighted SMA-50 index level, chained from `sma_50_growth` (base = 100 × average `sma_50 / current_price`) |
+| `sma_200` | NUMERIC(18,6) | Equal-weighted SMA-200 index level, chained from `sma_200_growth` (base = 100 × average `sma_200 / current_price`) |
+| `pct_uptrend` | NUMERIC(18,6) | % of contributing stocks with `sma_50 > sma_200` (0–100) |
 | `momentum` | NUMERIC(18,6) | `sma_50 / sma_200` |
+| `z_score` | NUMERIC(18,6) | Sector index momentum vs the set's sector indices that week (FR-40b); NULL for market indices |
 
 Primary key on `(ticker, trading_date)`, with at most one row per ticker per
 calendar week (FR-35). Rows with `trading_date` older than one year are
 deleted on each weekly run (FR-44, same retention as the metrics tables).
+Upgrading an existing database: a migration adds `sector`, `currency`,
+`pct_uptrend`, and `z_score` and drops `us_by_sector` / `swe_by_sector` /
+`uk_by_sector`; then rebuild with `compute_indices.py`.
 
 Deleting a row from `us_tickers`, `swe_tickers`, or `uk_tickers` cascades to all
 of its rows in the matching metrics table.
@@ -759,12 +762,11 @@ Python 3.11+. Key libraries: `yfinance`, `pandas`, `psycopg2-binary`,
 - Market snapshot:
   `SELECT * FROM us_market_metrics ORDER BY trading_date DESC, market LIMIT 10;`
   (and the same against `swe_market_metrics` / `uk_market_metrics`)
-- Sector trends (after migration step 17, fill history once with
-  `pipenv run python compute_sector_trends.py`):
-  `SELECT * FROM us_by_sector WHERE week_start = (SELECT MAX(week_start) FROM us_by_sector) ORDER BY z_score_mean DESC;`
-- Equity indices (after migration step 18, build history once with
-  `pipenv run python compute_indices.py`):
-  `SELECT ticker, trading_date, current_price, sma_50, sma_200, momentum, ticker_count FROM indices ORDER BY ticker, trading_date DESC;`
+- Market and sector indices (after the indices migration, rebuild history
+  once with `pipenv run python compute_indices.py`):
+  `SELECT ticker, trading_date, current_price, sma_50, sma_200, momentum, ticker_count FROM indices WHERE sector IS NULL ORDER BY ticker, trading_date DESC;`
+- Sector ranking for the latest week:
+  `SELECT ticker, ticker_count, momentum, z_score, pct_uptrend FROM indices WHERE country = 'us' AND sector IS NOT NULL AND date_trunc('week', trading_date) = (SELECT date_trunc('week', MAX(trading_date)) FROM indices WHERE country = 'us') ORDER BY z_score DESC;`
 
 ## 11. Future Considerations (Out of Current Scope)
 
@@ -779,4 +781,4 @@ Python 3.11+. Key libraries: `yfinance`, `pandas`, `psycopg2-binary`,
   guard: recording splits from yfinance (`actions=True`) in a
   corporate-actions table, and correcting series Yahoo failed to
   split-adjust (e.g. `WYLD.ST`, 1:500 on 2025-12-05) before computing SMAs,
-  `momentum`, `z_score`, and sector trends.
+  `momentum`, `z_score`, and the indices.
