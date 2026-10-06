@@ -24,7 +24,7 @@ thresholds; no extra table, no schema migration, no extra yfinance calls.
 
 | ID | Requirement |
 |----|-------------|
-| FR-37b | Outlier = any of `price_growth` / `sma_50_growth` / `sma_200_growth` (or the FR-37a gap-week ratio) `> outlier_max_growth` (9.0) or `< outlier_min_growth` (−0.999). Excluded from all three levels and `N` that week; base weeks not guarded |
+| FR-37b | Outlier = any of `price_growth` / `sma_50_growth` / `sma_200_growth` (or the FR-37a gap-week ratio) `> outlier_max_growth` (9.0) or `< outlier_min_growth` (−0.999). Excluded from all three levels and `N` that week; base weeks use the FR-39a SMA-to-price ratio guard (10 / 0.001) instead |
 | FR-45 | `WARNING` log per excluded outlier + outlier count per index |
 | FR-7c / FR-46 | Only the weekly job emails, once per run, after indices; standalone `compute_indices.py` / backfills only log |
 | FR-47 | Email only outliers whose stock was **not** an outlier in the previous calendar week; no outliers → no email; report count of continuing outliers |

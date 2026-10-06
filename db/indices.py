@@ -37,6 +37,8 @@ ORDER BY ticker, trading_date DESC
 
 # Per-week stats are grouped with GROUPING SETS ((), (sector)): the grand
 # total (GROUPING = 1) is the market index, each sector group a sector index.
+# Base-week stocks with an SMA-to-price ratio outside the outlier bounds
+# (1 + min_growth .. 1 + max_growth) are excluded (FR-39a).
 BASE_WEEK_STATS_SQL = sql_for_countries(
     f"""
 WITH s AS (
@@ -46,6 +48,8 @@ WITH s AS (
     JOIN {{tickers}} t ON t.symbol = m.ticker
     WHERE m.week_start = %s
       AND m.current_price > 0 AND m.sma_50 > 0 AND m.sma_200 > 0
+      AND m.sma_50 / m.current_price BETWEEN %s AND %s
+      AND m.sma_200 / m.current_price BETWEEN %s AND %s
 )
 SELECT
     GROUPING(sector),
@@ -190,10 +194,13 @@ def write_index_weeks(
     z-scores need the whole week). ``rebuild=True`` first deletes every row
     for the country, making each index's earliest week its base week. An index
     with no contributing stocks gets no row that week (FR-41). Stock-weeks with
-    growth outside ``[min_growth, max_growth]`` are excluded (FR-37b). One
-    transaction.
+    growth outside ``[min_growth, max_growth]`` are excluded (FR-37b), and
+    base-week stocks with an SMA-to-price ratio outside
+    ``[1 + min_growth, 1 + max_growth]`` (FR-39a). One transaction.
     """
-    bounds = (Decimal(str(min_growth)), Decimal(str(max_growth))) * 3
+    min_bound, max_bound = Decimal(str(min_growth)), Decimal(str(max_growth))
+    bounds = (min_bound, max_bound) * 3
+    ratio_bounds = (1 + min_bound, 1 + max_bound) * 2
     written: list[IndexRow] = []
     with psycopg2.connect(database_url) as conn:
         with conn.cursor() as cur:
@@ -202,16 +209,19 @@ def write_index_weeks(
             for week_start in sorted(set(week_starts)):
                 cur.execute(LOAD_PREVIOUS_INDICES_SQL, (country.value, week_start))
                 previous = {row[0]: row[1:] for row in cur.fetchall()}
-                cur.execute(BASE_WEEK_STATS_SQL[country], (week_start,))
+                cur.execute(BASE_WEEK_STATS_SQL[country], (week_start, *ratio_bounds))
                 base = _group_stats(cur.fetchall())
                 cur.execute(CHAINED_WEEK_STATS_SQL[country], (week_start, *bounds))
                 chained = _group_stats(cur.fetchall())
 
                 week_rows: list[IndexRow] = []
-                for sector in sorted(base, key=lambda key: (key is not None, key or "")):
+                sectors = set(base) | set(chained)
+                for sector in sorted(sectors, key=lambda key: (key is not None, key or "")):
                     definition = _definition(country, sector)
                     prev = previous.get(definition.ticker)
                     if prev is None:
+                        if sector not in base:
+                            continue
                         ticker_count, trading_date, sma_50_ratio, sma_200_ratio, pct = (
                             base[sector]
                         )

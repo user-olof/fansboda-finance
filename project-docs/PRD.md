@@ -374,14 +374,15 @@ Derived entirely from the stored `*_metrics` growth columns (FR-5a) and
   the market index, but larger for sector indices with few stocks. Smaller
   residual SMA drift after an unadjusted split (SMA growth below ×10 in the
   following weeks) is not caught; fixing the series itself is §11 future
-  work. Base weeks (FR-39) have no growth and are not guarded.
+  work. Base weeks (FR-39) have no growth; they use the ratio guard in
+  FR-39a instead.
 - **FR-38 Index levels:** Chain-link each level onto its previous value:
   `level_x(w) = level_x(p) × (1 + g_x(w))`, stored as the row's
   `current_price`, `sma_50`, and `sma_200`.
 - **FR-39 Base week:** The first week for an index (no earlier stored row for
   that ticker — for a sector index, possibly later than its market index's
   base week) uses every member stock with positive `current_price`,
-  `sma_50`, and `sma_200` that week:
+  `sma_50`, and `sma_200` that week, except FR-39a outliers:
   - `current_price = 100`
   - `sma_50 = 100 × (1 / N) × Σ (sma_50_i / current_price_i)`
   - `sma_200 = 100 × (1 / N) × Σ (sma_200_i / current_price_i)`
@@ -391,6 +392,14 @@ Derived entirely from the stored `*_metrics` growth columns (FR-5a) and
   of starting at exactly 1.0. Because every ratio and growth rate is
   unit-free, mixed price units within a set (e.g. GBp vs GBP) do not distort
   the index as long as each stock's own units are consistent over time.
+- **FR-39a Base-week outliers:** A stock whose `sma_50 / current_price` or
+  `sma_200 / current_price` is above `1 + outlier_max_growth` (10) or below
+  `1 + outlier_min_growth` (0.001) is excluded from the base week (levels,
+  `N`, `pct_uptrend`). Such ratios come from stocks that collapsed more than
+  90% (often after a reverse split Yahoo back-adjusts); a few of them would
+  dominate the equal-weighted mean ratio and shift the index's SMA levels —
+  and momentum — for good. The stock contributes from its next week via its
+  growth.
 - **FR-40 Momentum:** `momentum = sma_50 / sma_200` on the index levels (NULL
   if `sma_200` is zero), the same definition as for stocks (FR-5).
 - **FR-40a Uptrend share:** `pct_uptrend` = percentage (0–100) of the week's

@@ -43,6 +43,7 @@ W3 = date(2026, 6, 15)
 D1 = date(2026, 6, 5)
 D2 = date(2026, 6, 12)
 BOUNDS = (Decimal("-0.999"), Decimal("9.0")) * 3
+RATIO_BOUNDS = (Decimal("0.001"), Decimal("10.0")) * 2
 
 
 def _mock_config(**overrides: object) -> BaseConfig:
@@ -178,7 +179,9 @@ def test_index_sql_targets_country_metrics(country: CountrySet) -> None:
     assert "m.current_price > 0 AND m.sma_50 > 0 AND m.sma_200 > 0" in base
     assert "GROUP BY GROUPING SETS ((), (sector))" in base
     assert "100.0 * AVG(CASE WHEN sma_50 > sma_200 THEN 1 ELSE 0 END)" in base
-    assert base.count("%s") == 1
+    assert "m.sma_50 / m.current_price BETWEEN %s AND %s" in base
+    assert "m.sma_200 / m.current_price BETWEEN %s AND %s" in base
+    assert base.count("%s") == 5
     chained = " ".join(CHAINED_WEEK_STATS_SQL[country].split())
     assert f"FROM {prefix}_metrics m JOIN {prefix}_tickers t ON t.symbol = m.ticker" in chained
     assert "m.current_price > 0 AND m.sma_50 > 0 AND m.sma_200 > 0" in chained
@@ -247,7 +250,7 @@ def test_write_index_weeks_base_then_chained_week() -> None:
     executed = mock_cursor.execute.call_args_list
     assert executed[0] == call(DELETE_COUNTRY_INDICES_SQL, ("us",))
     assert executed[1] == call(LOAD_PREVIOUS_INDICES_SQL, ("us", W1))
-    assert executed[2] == call(BASE_WEEK_STATS_SQL[CountrySet.US], (W1,))
+    assert executed[2] == call(BASE_WEEK_STATS_SQL[CountrySet.US], (W1, *RATIO_BOUNDS))
     assert executed[3] == call(CHAINED_WEEK_STATS_SQL[CountrySet.US], (W1, *BOUNDS))
     assert executed[4] == call(DELETE_COUNTRY_WEEK_SQL, ("us", W1, W2))
     assert executed[5] == call(
@@ -412,6 +415,29 @@ def test_write_index_weeks_removes_week_without_contributors() -> None:
     assert mock_cursor.execute.call_args_list[-1] == call(
         DELETE_COUNTRY_WEEK_SQL, ("swe", W2, W3)
     )
+
+
+def test_write_index_weeks_chains_sector_missing_from_base_stats() -> None:
+    """Base-week ratio bounds drop a sector's stocks; it still chains, a new one is skipped."""
+    previous = [
+        ("US-IDX", D1, Decimal("100"), Decimal("95"), Decimal("90")),
+        ("US-IDX-ENERGY", D1, Decimal("100"), Decimal("100"), Decimal("100")),
+    ]
+    base = [(1, None, 2, D2, Decimal("1"), Decimal("1"), Decimal("50"))]
+    chained = [
+        (1, None, 3, D2, Decimal("0"), Decimal("0"), Decimal("0"), Decimal("50")),
+        (0, "energy", 1, D2, Decimal("0.1"), Decimal("0"), Decimal("0"), Decimal("0")),
+        (0, "utilities", 1, D2, Decimal("0.1"), Decimal("0"), Decimal("0"), Decimal("0")),
+    ]
+    mock_conn, _ = _mock_conn(fetchall=[previous, base, chained])
+
+    with patch("db.indices.psycopg2.connect", return_value=mock_conn):
+        rows = write_index_weeks("postgresql://example", [W2], country=CountrySet.US)
+
+    assert [(r.ticker, r.current_price) for r in rows] == [
+        ("US-IDX", Decimal("100")),
+        ("US-IDX-ENERGY", Decimal("110.0")),
+    ]
 
 
 def test_sector_index_definition() -> None:

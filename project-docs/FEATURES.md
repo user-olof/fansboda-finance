@@ -221,7 +221,7 @@ Equal-weighted weekly index per country set, stored like a `*_metrics` row
 | Momentum | `sma_50 / sma_200` on the index levels |
 | Inclusion | Stocks with positive price, SMA-50 and SMA-200 in both this and the previous stored week (one set for all three levels); weeks with none are skipped |
 | Growth chaining | Weekly growth = average of the stocks' stored growth columns (FR-37); stored-row ratio only for gap weeks (FR-37a); inclusion then requires non-NULL growth (FR-36) — [RFC-016](./rfc/RFC-016-weekly-growth-columns.md) |
-| Outlier guard | Stock-weeks with any growth above +900% (×10) or below −99.9% are excluded from all three levels and `ticker_count` that week (FR-37b) — [RFC-017](./rfc/RFC-017-outlier-guard-email.md) |
+| Outlier guard | Stock-weeks with any growth above +900% (×10) or below −99.9% are excluded from all three levels and `ticker_count` that week (FR-37b); in an index's base week, stocks with an SMA-to-price ratio above 10 or below 0.001 are excluded (FR-39a) — [RFC-017](./rfc/RFC-017-outlier-guard-email.md) |
 | Weekly job | `fetch_sma.py` computes the weeks it wrote (and re-chains later weeks), after the retention purge (FR-7b) |
 | Standalone | `compute_indices.py [--country us|swe|uk]` — full rebuild over all retained metrics weeks; no yfinance |
 | Retention | Rows with `trading_date` older than `METRICS_RETENTION_DAYS` are purged weekly (same window as metrics) |

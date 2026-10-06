@@ -35,6 +35,7 @@ size. Computed in SQL from stored `*_metrics`; no yfinance. No `z_score`.
 | FR-37b | Outlier guard: exclude stock-weeks whose growth (or gap-week ratio) is above `outlier_max_growth` (9.0) or below `outlier_min_growth` (−0.999) — RFC-017 |
 | FR-38 | `level_x(w) = level_x(p) × (1 + g_x(w))`, stored as `current_price` / `sma_50` / `sma_200` |
 | FR-39 | Base week: `current_price = 100`; `sma_50 = 100 × mean(sma_50_i / price_i)`; `sma_200 = 100 × mean(sma_200_i / price_i)` |
+| FR-39a | Base week excludes stocks with an SMA-to-price ratio above 10 or below 0.001 (`1 +` the outlier bounds) |
 | FR-40 | `momentum = sma_50 / sma_200` (NULL if `sma_200` is zero); no `z_score` |
 | FR-41 | No contributing stocks → no row; next week chains from the last stored row |
 | FR-42 | Recompute overwrites; weeks computed in ascending order |

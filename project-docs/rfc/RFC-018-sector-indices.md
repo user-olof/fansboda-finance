@@ -47,7 +47,7 @@ keys are. The `sectorKey` (`technology`) drives grouping and z-scores in code
 | FR-35 | One row per index ticker per calendar week; `trading_date` = latest contributing bar of that index |
 | FR-36 | Contributing stocks: members of the index with positive price / SMAs and non-NULL growth columns; one set `N` drives the levels and `pct_uptrend` |
 | FR-37 / 37a / 37b | Equal-weighted mean of stored growth; gap weeks use the stored-row ratio; outlier stock-weeks excluded from market **and** sector indices |
-| FR-38 / 39 | Chain-linked levels; base week (100 / SMA-to-price anchoring) per index ticker — a sector's base week can be later than its market's |
+| FR-38 / 39 | Chain-linked levels; base week (100 / SMA-to-price anchoring, ratios outside 0.001–10 excluded, FR-39a) per index ticker — a sector's base week can be later than its market's |
 | FR-40 | `momentum = sma_50 / sma_200` |
 | FR-40a | `pct_uptrend = 100 × share of the N contributing stocks with sma_50 > sma_200` |
 | FR-40b | Sector rows: `z_score = (momentum − mean) / std` over the set's sector index rows with non-NULL momentum that week (population std, like stock `z_score`); NULL with fewer than two sectors or `std = 0`; market rows always NULL |
