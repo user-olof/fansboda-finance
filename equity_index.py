@@ -61,6 +61,15 @@ class IndexLevels:
 
 
 @dataclass(frozen=True)
+class WeekLevels:
+    """An index's levels for one week, read from its daily series."""
+
+    trading_date: date
+    levels: IndexLevels
+    days_used: int
+
+
+@dataclass(frozen=True)
 class IndexRow:
     """One ``indices`` row. ``sector`` is the stored label (market rows: the index
     name, ``US Equity Index``; sector rows: the sector, ``Technology``); ``sector_key`` is the ``sectorKey`` used to
@@ -136,7 +145,7 @@ def _row(
     )
 
 
-def build_base_row(
+def build_index_row(
     definition: IndexDefinition,
     *,
     trading_date: date | None,
@@ -144,49 +153,12 @@ def build_base_row(
     levels: IndexLevels,
     pct_uptrend: Decimal | None = None,
 ) -> IndexRow | None:
-    """Start week of an index: price 100 and the initial SMA levels from its
-    reconstructed daily history (specs/001-index-initial-sma).
+    """One week of an index from its daily series levels (specs/002-index-true-sma).
 
     Returns ``None`` when no stock has a positive price and both SMAs (FR-41).
     """
-    if levels.current_price != BASE_INDEX_PRICE:
-        raise ValueError(
-            f"Base row price must be {BASE_INDEX_PRICE}, got {levels.current_price}"
-        )
     if ticker_count <= 0 or trading_date is None:
         return None
-    return _row(definition, trading_date, ticker_count, levels, pct_uptrend)
-
-
-def build_chained_row(
-    definition: IndexDefinition,
-    previous: IndexLevels,
-    *,
-    trading_date: date | None,
-    ticker_count: int,
-    growth_price: Decimal | None,
-    growth_sma_50: Decimal | None,
-    growth_sma_200: Decimal | None,
-    pct_uptrend: Decimal | None = None,
-) -> IndexRow | None:
-    """Chain each level by the equal-weighted mean growth of its measure.
-
-    Returns ``None`` when no stock contributes this week (FR-41).
-    """
-    if (
-        ticker_count <= 0
-        or trading_date is None
-        or growth_price is None
-        or growth_sma_50 is None
-        or growth_sma_200 is None
-    ):
-        return None
-    one = Decimal("1")
-    levels = IndexLevels(
-        current_price=previous.current_price * (one + growth_price),
-        sma_50=previous.sma_50 * (one + growth_sma_50),
-        sma_200=previous.sma_200 * (one + growth_sma_200),
-    )
     return _row(definition, trading_date, ticker_count, levels, pct_uptrend)
 
 

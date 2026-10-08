@@ -27,7 +27,9 @@ def _mock_config(**overrides: object) -> BaseConfig:
 
 @pytest.fixture(autouse=True)
 def _stub_indices():
-    with patch("fetch_sma._run_index_update") as mock:
+    with patch("fetch_sma._run_index_update") as mock, patch(
+        "fetch_sma._fold_missing_members"
+    ):
         yield mock
 
 
@@ -326,9 +328,10 @@ def test_main_fetches_stale_tickers_and_inserts(_stub_indices) -> None:
     assert market_row.market == "se_market"
     assert market_row.week_start == date(2026, 6, 1)
     assert market_row.momentum_mean == Decimal("0.5")
-    config, week_starts = _stub_indices.call_args.args
+    config, week_starts, history = _stub_indices.call_args.args
     assert config.database_url == "postgresql://example"
     assert week_starts == {date(2026, 6, 1)}
+    assert history.folded == set()
     inserted_rows = mock_insert.call_args[0][1]
     assert inserted_rows[0].company == "Alpha"
     assert inserted_rows[0].currency == "SEK"

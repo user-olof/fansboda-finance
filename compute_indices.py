@@ -2,13 +2,14 @@
 """One-off manual initialization of the equal-weighted indices (never cron).
 
 Per country set: the market index (US-IDX / SWE-IDX / UK-IDX) and one index per
-sector (e.g. US-IDX-TECHNOLOGY). Downloads daily history, sets each index's
-start levels — price 100 on INDEX_START_DATE (or, with fewer than
-INDEX_MIN_COMPONENTS listed members, on the first later week-end that has
-them) and SMA-50 / SMA-200 from the index's reconstructed daily price — and
-writes the full weekly series chained from the stored weekly growth
-(specs/001-index-initial-sma). A country is only replaced when every index it
-already has got its start levels. The weekly update lives in ``fetch_sma.py``.
+sector (e.g. US-IDX-TECHNOLOGY). Downloads daily history up to today and builds
+each index's daily price from its members' daily returns, at 100 on
+INDEX_START_DATE (or, with fewer than INDEX_MIN_COMPONENTS listed members, on
+the first later week-end that has them); every stored week's price and
+SMA-50 / SMA-200 (the 50- / 200-day means of that daily price) are written
+from it (specs/001-index-initial-sma, specs/002-index-true-sma). A country is
+only replaced when every index it already has got a series. The weekly update
+lives in ``fetch_sma.py``.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from db.metrics import load_distinct_week_starts
 from db.outliers import load_outliers
 from db.tickers import load_tickers_from_db
 from fetch_sma import log_excluded_outliers, log_market_rows
-from index_anchor import AnchorSettings, compute_anchors
+from index_anchor import AnchorSettings, compute_index_series, series_week_levels
 from models import week_start_of
 
 logging.basicConfig(
@@ -55,41 +56,43 @@ def _initialize_country(
         return 0
 
     entries = load_tickers_from_db(database_url, country=country)
-    result = compute_anchors(
-        entries, country, settings=settings, first_stored_week=weeks[0]
-    )
+    result = compute_index_series(entries, country, settings=settings)
     stored = load_index_tickers(database_url, country)
-    missing = sorted(stored - set(result.anchors) - result.below_minimum)
-    if missing or not result.anchors:
+    missing = sorted(stored - set(result.series) - result.below_minimum)
+    if missing or not result.series:
         logger.error(
-            "Indices %s left unchanged: no start levels for %s",
+            "Indices %s left unchanged: no daily series for %s",
             country.value,
             ", ".join(missing) or "any index",
         )
         return None
 
-    written = write_index_weeks(
-        database_url,
-        weeks,
-        country=country,
-        rebuild=True,
-        start_week=start_week,
-        anchors=result.anchors,
-        max_growth=settings.max_growth,
-        min_growth=settings.min_growth,
-    )
-    for anchor in sorted(result.anchors.values(), key=lambda a: a.ticker):
-        levels = anchor.levels
+    levels = series_week_levels(result.series.values(), weeks)
+    written = write_index_weeks(database_url, levels, country=country, rebuild=True)
+    for index in sorted(result.series.values(), key=lambda s: s.ticker):
+        rows = sorted(
+            (rows[index.ticker] for rows in levels.values() if index.ticker in rows),
+            key=lambda row: row.trading_date,
+        )
+        if not rows:
+            logger.warning(
+                "Index %s: no stored week from its start date %s",
+                index.ticker,
+                index.start_date.isoformat(),
+            )
+            continue
+        first = rows[0]
         logger.info(
-            "Index %s start_date=%s anchor_week=%s sma_50=%s sma_200=%s "
+            "Index %s start_date=%s first_row=%s last_row=%s sma_50=%s sma_200=%s "
             "momentum=%.6f days_used=%d",
-            anchor.ticker,
-            anchor.start_date.isoformat(),
-            anchor.week_start.isoformat(),
-            levels.sma_50,
-            levels.sma_200,
-            levels.sma_50 / levels.sma_200,
-            anchor.days_used,
+            index.ticker,
+            index.start_date.isoformat(),
+            first.trading_date.isoformat(),
+            rows[-1].trading_date.isoformat(),
+            first.levels.sma_50,
+            first.levels.sma_200,
+            first.levels.sma_50 / first.levels.sma_200,
+            first.days_used,
         )
     log_market_rows(logger, written.rows)
     outliers = load_outliers(
@@ -102,12 +105,13 @@ def _initialize_country(
     log_excluded_outliers(logger, country, outliers)
     market_rows = sum(1 for row in written.rows if row.sector_key is None)
     logger.info(
-        "Indices %s: anchors=%d not_started=%d missing_stocks=%d market_rows=%d "
-        "sector_rows=%d weeks=%d elapsed=%.0fs",
+        "Indices %s: series=%d not_started=%d missing_stocks=%d "
+        "dropped_daily_returns=%d market_rows=%d sector_rows=%d weeks=%d elapsed=%.0fs",
         country.value,
-        len(result.anchors),
+        len(result.series),
         len(result.below_minimum),
         len(result.missing_symbols),
+        result.dropped_returns,
         market_rows,
         len(written.rows) - market_rows,
         len(weeks),
@@ -139,9 +143,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "One-off manual initialization (never cron): downloads daily data, "
-            "sets the index start levels on INDEX_START_DATE, and writes the full "
-            "weekly series of the market and sector indices (US-IDX / SWE-IDX / "
-            "UK-IDX and their sectors)"
+            "builds each index's daily price from 100 on INDEX_START_DATE, and "
+            "writes every stored week's price and SMA-50 / SMA-200 of the market "
+            "and sector indices (US-IDX / SWE-IDX / UK-IDX and their sectors)"
         ),
     )
     parser.add_argument(

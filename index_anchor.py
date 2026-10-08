@@ -1,10 +1,12 @@
-"""Index start levels from reconstructed daily history (specs/001-index-initial-sma).
+"""Index daily series from member stocks' daily returns (specs/001-index-initial-sma,
+specs/002-index-true-sma).
 
-Pure logic: sector keys, daily stock returns, the index's daily level worked
-backwards from 100 on its start date, initial SMA-50 / SMA-200 as averages of
-those levels, the start-date rule (at least ``min_components`` members with a
-close), and the weekly bridge over weeks no longer stored. ``compute_anchors``
-is the one I/O wrapper (batched yfinance download); no SQL.
+Pure logic: sector keys, daily stock returns folded into per-index averages,
+the index's daily level series pinned at one known point (price 100 on its
+start date, or its latest stored row), weekly price / SMA-50 / SMA-200 read
+from that series, and the start-date rule (at least ``min_components`` members
+with a close). ``compute_index_series`` is the one I/O wrapper (batched
+yfinance download); no SQL.
 """
 
 from __future__ import annotations
@@ -36,9 +38,10 @@ from equity_index import (
     BASE_INDEX_PRICE,
     INDEX_DEFINITIONS,
     IndexLevels,
+    WeekLevels,
     sector_index_definition,
 )
-from models import MetricRow, TickerEntry, week_start_of
+from models import TickerEntry, week_start_of
 from yfinance_client import download_batch
 
 logger = logging.getLogger(__name__)
@@ -78,27 +81,20 @@ class AnchorSettings:
 
 
 @dataclass(frozen=True)
-class Anchor:
-    """Levels an index chains from when it has no stored row.
-
-    ``week_start`` is the index's start week (base row, price 100) or, when the
-    weeks after the start date are no longer stored, the week before the oldest
-    stored week (levels bridged from the start date).
-    """
+class IndexSeries:
+    """An index's daily levels, pinned at 100 on its start date."""
 
     ticker: str
     start_date: date
-    week_start: date
-    trading_date: date
-    levels: IndexLevels
-    days_used: int
+    levels: dict[date, float]
 
 
 @dataclass
-class AnchorResult:
-    anchors: dict[str, Anchor] = field(default_factory=dict)
+class SeriesResult:
+    series: dict[str, IndexSeries] = field(default_factory=dict)
     below_minimum: set[str] = field(default_factory=set)
     missing_symbols: list[str] = field(default_factory=list)
+    dropped_returns: int = 0
 
 
 def sector_key(raw: str | None) -> str | None:
@@ -149,6 +145,33 @@ def _bar_dates(close: pd.Series) -> list[date]:
     return [pd.Timestamp(ts).date() for ts in close.index]
 
 
+def _returns(
+    close: pd.Series,
+    *,
+    max_growth: float,
+    min_growth: float,
+    until: date | None = None,
+    after: date | None = None,
+) -> tuple[dict[date, float], int]:
+    """Daily returns on the stock's own consecutive bars, and the count dropped
+    as outliers (above ``max_growth`` or below ``min_growth``)."""
+    values = close.dropna()
+    returns: dict[date, float] = {}
+    dropped = 0
+    previous: float | None = None
+    for day, value in zip(_bar_dates(values), values.to_numpy(dtype=float)):
+        if until is not None and day > until:
+            break
+        if previous is not None and previous > 0 and (after is None or day > after):
+            change = value / previous - 1
+            if min_growth <= change <= max_growth:
+                returns[day] = change
+            else:
+                dropped += 1
+        previous = value
+    return returns, dropped
+
+
 def daily_returns(
     close: pd.Series,
     *,
@@ -156,22 +179,10 @@ def daily_returns(
     max_growth: float,
     min_growth: float,
 ) -> dict[date, float]:
-    """Daily close-to-close returns of one stock up to ``end_date``.
-
-    Returns use the stock's own consecutive bars; a return above ``max_growth``
-    or below ``min_growth`` is dropped (same limits as the weekly outlier rule).
-    """
-    values = close.dropna()
-    returns: dict[date, float] = {}
-    previous: float | None = None
-    for day, value in zip(_bar_dates(values), values.to_numpy(dtype=float)):
-        if day > end_date:
-            break
-        if previous is not None and previous > 0:
-            change = value / previous - 1
-            if min_growth <= change <= max_growth:
-                returns[day] = change
-        previous = value
+    """Daily close-to-close returns of one stock up to ``end_date``."""
+    returns, _ = _returns(
+        close, max_growth=max_growth, min_growth=min_growth, until=end_date
+    )
     return returns
 
 
@@ -198,21 +209,45 @@ class DailyAccumulator:
         }
 
 
-def reconstruct_levels(
-    averages: dict[date, float], start_date: date, trading_days: int
-) -> list[float]:
-    """Daily index levels, oldest first, ending with 100 on ``start_date``.
+def fold_close(
+    accumulator: DailyAccumulator,
+    index_tickers: Iterable[str],
+    close: pd.Series,
+    *,
+    max_growth: float,
+    min_growth: float,
+    until: date | None = None,
+    after: date | None = None,
+) -> int:
+    """Add one stock's daily returns (``≤ until`` / ``> after``) to its indices;
+    returns the number of daily returns dropped as outliers."""
+    returns, dropped = _returns(
+        close, max_growth=max_growth, min_growth=min_growth, until=until, after=after
+    )
+    accumulator.add(index_tickers, returns)
+    return dropped
 
-    Uses the last ``trading_days`` dates with an average return up to the start
-    date: the level before a day equals that day's level / (1 + its average).
+
+def daily_levels(
+    averages: dict[date, float], pin_date: date, pin_level: float
+) -> dict[date, float]:
+    """The index's daily levels with ``level(pin_date) = pin_level``.
+
+    Later levels are multiplied forward by one plus the day's average return,
+    earlier ones divided backward by it. A pin date without an average return
+    is part of the series with no change on that day.
     """
-    days = sorted(day for day in averages if day <= start_date)[-trading_days:]
-    level = float(BASE_INDEX_PRICE)
-    levels = [level]
-    for day in reversed(days):
-        level /= 1 + averages[day]
-        levels.append(level)
-    levels.reverse()
+    days = sorted(set(averages) | {pin_date})
+    pin = days.index(pin_date)
+    levels = {pin_date: pin_level}
+    level = pin_level
+    for day in days[pin + 1 :]:
+        level *= 1 + averages[day]
+        levels[day] = level
+    level = pin_level
+    for i in range(pin, 0, -1):
+        level /= 1 + averages.get(days[i], 0.0)
+        levels[days[i - 1]] = level
     return levels
 
 
@@ -220,15 +255,58 @@ def _to_decimal(value: float) -> Decimal:
     return Decimal(str(round(value, 6)))
 
 
-def initial_smas(levels: list[float]) -> tuple[Decimal, Decimal, int]:
-    """Mean of the last 50 and last 200 levels (fewer when not available)."""
-    last_50 = levels[-SMA_50_DAYS:]
-    last_200 = levels[-SMA_200_DAYS:]
-    return (
-        _to_decimal(sum(last_50) / len(last_50)),
-        _to_decimal(sum(last_200) / len(last_200)),
-        len(last_200),
+def week_levels(
+    levels: dict[date, float], week_start: date, *, row_date: date | None = None
+) -> WeekLevels | None:
+    """Price and SMA-50 / SMA-200 of the week's row.
+
+    The row date is the last series date in the week (``row_date`` when given,
+    e.g. the start date on the start week). SMAs are the means of the last 50 /
+    200 levels up to and including it (fewer when not available).
+    """
+    week_end = week_start + timedelta(days=7)
+    if row_date is not None:
+        if row_date not in levels or not week_start <= row_date < week_end:
+            return None
+        day = row_date
+    else:
+        in_week = [d for d in levels if week_start <= d < week_end]
+        if not in_week:
+            return None
+        day = max(in_week)
+    history = [levels[d] for d in sorted(d for d in levels if d <= day)]
+    last_50 = history[-SMA_50_DAYS:]
+    last_200 = history[-SMA_200_DAYS:]
+    return WeekLevels(
+        trading_date=day,
+        levels=IndexLevels(
+            current_price=_to_decimal(levels[day]),
+            sma_50=_to_decimal(sum(last_50) / len(last_50)),
+            sma_200=_to_decimal(sum(last_200) / len(last_200)),
+        ),
+        days_used=len(last_200),
     )
+
+
+def series_week_levels(
+    series: Iterable[IndexSeries], weeks: Iterable[date]
+) -> dict[date, dict[str, WeekLevels]]:
+    """Week → index ticker → levels, for every week from each index's start week."""
+    result: dict[date, dict[str, WeekLevels]] = defaultdict(dict)
+    week_list = sorted(set(weeks))
+    for index in series:
+        start_week = week_start_of(index.start_date)
+        for week in week_list:
+            if week < start_week:
+                continue
+            row = week_levels(
+                index.levels,
+                week,
+                row_date=index.start_date if week == start_week else None,
+            )
+            if row is not None:
+                result[week][index.ticker] = row
+    return dict(result)
 
 
 def candidate_dates(trading_dates: Iterable[date], start_date: date) -> list[date]:
@@ -252,111 +330,7 @@ def find_start_date(
     return None
 
 
-def _eligible_growth(
-    row: MetricRow, *, max_growth: float, min_growth: float
-) -> tuple[Decimal, Decimal, Decimal] | None:
-    """Same filter as ``CHAINED_WEEK_STATS_SQL``: positive levels, all growth in bounds."""
-    if not (
-        row.current_price is not None
-        and row.sma_50 is not None
-        and row.sma_200 is not None
-        and row.current_price > 0
-        and row.sma_50 > 0
-        and row.sma_200 > 0
-    ):
-        return None
-    growths = (row.price_growth, row.sma_50_growth, row.sma_200_growth)
-    if any(g is None or not min_growth <= float(g) <= max_growth for g in growths):
-        return None
-    return growths  # type: ignore[return-value]
-
-
-class WeeklyAccumulator:
-    """Per index ticker and week: count, growth sums, and latest trading date."""
-
-    def __init__(self) -> None:
-        self._weeks: dict[str, dict[date, list]] = defaultdict(dict)
-
-    def add(
-        self,
-        index_tickers: Iterable[str],
-        rows: Iterable[MetricRow],
-        *,
-        max_growth: float,
-        min_growth: float,
-    ) -> None:
-        tickers = list(index_tickers)
-        for row in rows:
-            growth = _eligible_growth(row, max_growth=max_growth, min_growth=min_growth)
-            if growth is None:
-                continue
-            for ticker in tickers:
-                stats = self._weeks[ticker].setdefault(
-                    row.week_start, [0, Decimal(0), Decimal(0), Decimal(0), row.trading_date]
-                )
-                stats[0] += 1
-                for i, value in enumerate(growth, start=1):
-                    stats[i] += value
-                stats[4] = max(stats[4], row.trading_date)
-
-    def chain(
-        self, ticker: str, levels: IndexLevels, weeks: Iterable[date]
-    ) -> tuple[IndexLevels, date | None]:
-        """Chain ``levels`` through ``weeks`` by the mean growth; empty weeks carry over."""
-        last_date: date | None = None
-        one = Decimal(1)
-        for week in sorted(weeks):
-            stats = self._weeks.get(ticker, {}).get(week)
-            if not stats:
-                continue
-            count, g_price, g_sma_50, g_sma_200, trading_date = stats
-            levels = IndexLevels(
-                current_price=levels.current_price * (one + g_price / count),
-                sma_50=levels.sma_50 * (one + g_sma_50 / count),
-                sma_200=levels.sma_200 * (one + g_sma_200 / count),
-            )
-            last_date = trading_date
-        return levels, last_date
-
-
-def _bridge_weeks(start_date: date, first_stored_week: date | None) -> list[date]:
-    """Calendar weeks after the start week and before the oldest stored week."""
-    if first_stored_week is None:
-        return []
-    weeks = []
-    week = week_start_of(start_date) + timedelta(days=7)
-    while week < first_stored_week:
-        weeks.append(week)
-        week += timedelta(days=7)
-    return weeks
-
-
-def build_anchor(
-    ticker: str,
-    averages: dict[date, float],
-    weekly: WeeklyAccumulator,
-    *,
-    start_date: date,
-    trading_days: int,
-    first_stored_week: date | None,
-) -> Anchor | None:
-    """Initial levels on ``start_date``, bridged to the week before the oldest stored week."""
-    if not averages:
-        return None
-    sma_50, sma_200, days_used = initial_smas(
-        reconstruct_levels(averages, start_date, trading_days)
-    )
-    levels = IndexLevels(BASE_INDEX_PRICE, sma_50, sma_200)
-    week_start, trading_date = week_start_of(start_date), start_date
-    bridge = _bridge_weeks(start_date, first_stored_week)
-    if bridge:
-        levels, last_date = weekly.chain(ticker, levels, bridge)
-        week_start = bridge[-1]
-        trading_date = last_date or start_date
-    return Anchor(ticker, start_date, week_start, trading_date, levels, days_used)
-
-
-def _closes(data: pd.DataFrame, batch: list[str]) -> dict[str, pd.Series]:
+def closes_from_download(data: pd.DataFrame, batch: list[str]) -> dict[str, pd.Series]:
     """Non-empty ``Close`` series per ticker from a batch download."""
     closes: dict[str, pd.Series] = {}
     if data.empty:
@@ -378,12 +352,12 @@ def _closes(data: pd.DataFrame, batch: list[str]) -> dict[str, pd.Series]:
 @dataclass
 class _Scan:
     daily: DailyAccumulator = field(default_factory=DailyAccumulator)
-    weekly: WeeklyAccumulator = field(default_factory=WeeklyAccumulator)
     counts: dict[str, dict[date, int]] = field(
         default_factory=lambda: defaultdict(lambda: defaultdict(int))
     )
     trading_dates: set[date] = field(default_factory=set)
     missing_symbols: list[str] = field(default_factory=list)
+    dropped: int = 0
 
 
 def _scan(
@@ -392,18 +366,19 @@ def _scan(
     settings: AnchorSettings,
     *,
     start_date: date,
-    first_stored_week: date | None,
     scope: set[str] | None,
 ) -> _Scan:
-    """Download the members once and fold each batch into per-index sums."""
-    from backfill_sma import metric_rows_from_weekly_samples
+    """Download the members once (to today) and fold each batch into per-index sums.
+
+    Returns up to the start date come only from members with a close on it;
+    later returns from every member with data.
+    """
     from fetch_sma import chunked
 
     scan = _Scan()
     by_symbol = {entry.symbol: entry for entry in entries}
-    bridge = _bridge_weeks(start_date, first_stored_week)
-    start_week = week_start_of(start_date)
     batches = chunked(list(by_symbol), settings.batch_size)
+    bounds = {"max_growth": settings.max_growth, "min_growth": settings.min_growth}
     for i, batch in enumerate(batches):
         logger.info(
             "Index history batch %d/%d (%d tickers, start date %s)",
@@ -419,7 +394,7 @@ def _scan(
                 max_retries=settings.max_retries,
                 retry_base_seconds=settings.retry_base_seconds,
             )
-            closes = _closes(data, batch)
+            closes = closes_from_download(data, batch)
         except Exception:
             logger.exception("Failed index history batch %d/%d", i + 1, len(batches))
             closes = {}
@@ -440,62 +415,53 @@ def _scan(
                     for ticker in tickers:
                         scan.counts[ticker][day] += 1
             if start_date in days:
-                scan.daily.add(
-                    tickers,
-                    daily_returns(
-                        close,
-                        end_date=start_date,
-                        max_growth=settings.max_growth,
-                        min_growth=settings.min_growth,
-                    ),
+                scan.dropped += fold_close(
+                    scan.daily, tickers, close, until=start_date, **bounds
                 )
-            if bridge:
-                bridge_end = pd.Timestamp(bridge[-1] + timedelta(days=7))
-                history = pd.DataFrame({"Close": close[close.index < bridge_end]})
-                rows = [
-                    row
-                    for row in metric_rows_from_weekly_samples(symbol, history, company=None)
-                    if row.week_start > start_week
-                ]
-                scan.weekly.add(
-                    tickers,
-                    rows,
-                    max_growth=settings.max_growth,
-                    min_growth=settings.min_growth,
-                )
+            scan.dropped += fold_close(
+                scan.daily, tickers, close, after=start_date, **bounds
+            )
         if i < len(batches) - 1:
             time.sleep(settings.batch_delay_seconds)
     return scan
 
 
-def compute_anchors(
+def _series(
+    ticker: str, scan: _Scan, start_date: date, trading_days: int
+) -> IndexSeries | None:
+    """Series pinned at 100 on the start date, from the last ``trading_days``
+    return dates up to it and every later one."""
+    averages = scan.daily.averages(ticker)
+    if not averages:
+        return None
+    kept = set(sorted(day for day in averages if day <= start_date)[-trading_days:])
+    averages = {
+        day: value for day, value in averages.items() if day > start_date or day in kept
+    }
+    return IndexSeries(
+        ticker, start_date, daily_levels(averages, start_date, float(BASE_INDEX_PRICE))
+    )
+
+
+def compute_index_series(
     entries: list[TickerEntry],
     country: CountrySet,
     *,
     settings: AnchorSettings,
-    first_stored_week: date | None = None,
     index_tickers: set[str] | None = None,
-) -> AnchorResult:
-    """Anchors for the country's market and sector indices (or ``index_tickers``).
+) -> SeriesResult:
+    """Daily series for the country's market and sector indices (or ``index_tickers``).
 
     An index starts on ``settings.start_date`` when at least
     ``settings.min_components`` members have a close on it; otherwise on the
     first later week's last trading date that reaches the minimum, computed by
-    a second download of just those indices' members. Members are the stocks
-    with a close on the index's start date. When ``first_stored_week`` is after
-    the start week, the levels are bridged to the week before it.
+    a second download of just those indices' members.
     """
-    result = AnchorResult()
+    result = SeriesResult()
     scope = index_tickers
-    scan = _scan(
-        entries,
-        country,
-        settings,
-        start_date=settings.start_date,
-        first_stored_week=first_stored_week,
-        scope=scope,
-    )
+    scan = _scan(entries, country, settings, start_date=settings.start_date, scope=scope)
     result.missing_symbols = scan.missing_symbols
+    result.dropped_returns = scan.dropped
     if scan.missing_symbols:
         logger.warning(
             "%s: no daily history for %d stock(s): %s",
@@ -515,16 +481,9 @@ def compute_anchors(
     for ticker in sorted(tickers):
         counts = scan.counts.get(ticker, {})
         if counts.get(settings.start_date, 0) >= settings.min_components:
-            anchor = build_anchor(
-                ticker,
-                scan.daily.averages(ticker),
-                scan.weekly,
-                start_date=settings.start_date,
-                trading_days=settings.trading_days,
-                first_stored_week=first_stored_week,
-            )
-            if anchor is not None:
-                result.anchors[ticker] = anchor
+            index = _series(ticker, scan, settings.start_date, settings.trading_days)
+            if index is not None:
+                result.series[ticker] = index
             continue
         start = find_start_date(counts, candidates, settings.min_components)
         if start is None:
@@ -551,23 +510,10 @@ def compute_anchors(
             settings.start_date.isoformat(),
             start.isoformat(),
         )
-        second = _scan(
-            members,
-            country,
-            settings,
-            start_date=start,
-            first_stored_week=first_stored_week,
-            scope=group,
-        )
+        second = _scan(members, country, settings, start_date=start, scope=group)
+        result.dropped_returns += second.dropped
         for ticker in sorted(group):
-            anchor = build_anchor(
-                ticker,
-                second.daily.averages(ticker),
-                second.weekly,
-                start_date=start,
-                trading_days=settings.trading_days,
-                first_stored_week=first_stored_week,
-            )
-            if anchor is not None:
-                result.anchors[ticker] = anchor
+            index = _series(ticker, second, start, settings.trading_days)
+            if index is not None:
+                result.series[ticker] = index
     return result

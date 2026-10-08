@@ -510,17 +510,98 @@ def test_insert_metrics_routes_uk_ticker_to_uk_metrics() -> None:
 
 IDX_W1 = date(2026, 6, 1)
 IDX_W2 = date(2026, 6, 8)
+IDX_D1 = date(2026, 6, 5)
 IDX_D2 = date(2026, 6, 12)
 IDX_START = date(2026, 5, 29)
 
 
-def _index_config() -> "BaseConfig":
+def _index_config(**overrides) -> "BaseConfig":
     from config import BaseConfig
 
-    return BaseConfig(database_url="postgresql://example", index_start_date=IDX_START)
+    return BaseConfig(
+        database_url="postgresql://example",
+        index_start_date=IDX_START,
+        yf_batch_delay_seconds=0,
+        **overrides,
+    )
 
 
-def _patch_index_io(stored_tickers: dict, *, tickers=None, anchors=None):
+def _closes_frame(closes: dict[str, list[float]], start: str = "2026-06-01") -> pd.DataFrame:
+    index = pd.bdate_range(start, periods=len(next(iter(closes.values()))))
+    return pd.concat(
+        {symbol: pd.DataFrame({"Close": values}, index=index) for symbol, values in closes.items()},
+        axis=1,
+    )
+
+
+def test_fold_index_history_adds_returns_to_market_and_sector() -> None:
+    from db.country import CountrySet
+    from fetch_sma import IndexHistory, fold_index_history
+
+    entries = {
+        "AAA": TickerEntry("AAA", "A", sector="Energy"),
+        "BBB.ST": TickerEntry("BBB.ST", "B"),
+    }
+    data = _closes_frame(
+        {"AAA": [10.0, 11.0, 12.1], "BBB.ST": [5.0, 100.0, 100.0], "ZZZ": [1.0, 1.0, 1.0]}
+    )
+    history = IndexHistory()
+    fold_index_history(
+        history, data, ["AAA", "BBB.ST", "ZZZ"], entries, max_growth=9.0, min_growth=-0.999
+    )
+
+    assert history.folded == {"AAA", "BBB.ST"}
+    assert history.accumulator.averages("US-IDX") == pytest.approx(
+        {date(2026, 6, 2): 0.1, date(2026, 6, 3): 0.1}
+    )
+    assert history.accumulator.averages("US-IDX-ENERGY") == history.accumulator.averages(
+        "US-IDX"
+    )
+    assert history.accumulator.averages("SWE-IDX") == pytest.approx({date(2026, 6, 3): 0.0})
+    assert history.dropped == {CountrySet.US: 0, CountrySet.SWE: 1}
+
+
+def test_fold_missing_members_downloads_only_unfolded(caplog) -> None:
+    from fetch_sma import IndexHistory, _fold_missing_members
+
+    watchlist = [TickerEntry(s, s, sector="Energy") for s in ("A", "B", "C")]
+    history = IndexHistory()
+    history.folded.add("A")
+    start = date(2025, 5, 1)
+
+    def download(batch, start, **kwargs):
+        if batch == ["B"]:
+            raise RuntimeError("rate limited")
+        return _closes_frame({s: [1.0, 1.1] for s in batch})
+
+    with patch("fetch_sma.download_batch", side_effect=download) as mock_download:
+        with caplog.at_level("INFO", logger="fetch_sma"):
+            _fold_missing_members(_index_config(yf_batch_size=1), watchlist, history, start)
+
+    assert [c.args for c in mock_download.call_args_list] == [(["B"], start), (["C"], start)]
+    assert history.folded == {"A", "C"}
+    assert "downloading 2 member(s) not in this run" in caplog.text
+    assert "Failed index history batch 1/2" in caplog.text
+
+    with patch("fetch_sma.download_batch") as mock_download:
+        _fold_missing_members(_index_config(), watchlist[:1], history, start)
+    mock_download.assert_not_called()
+
+
+def _history(averages: dict[str, dict[date, float]]):
+    from fetch_sma import IndexHistory
+
+    history = IndexHistory()
+    for ticker, returns in averages.items():
+        history.accumulator.add([ticker], returns)
+    return history
+
+
+def _week_days(week: date, changes: list[float]) -> dict[date, float]:
+    return {week + timedelta(days=i): change for i, change in enumerate(changes)}
+
+
+def _patch_index_io(stored_tickers: dict, *, pins=None, tickers=None, series=None):
     from contextlib import ExitStack
 
     from db.indices import IndexWriteResult
@@ -533,6 +614,12 @@ def _patch_index_io(stored_tickers: dict, *, tickers=None, anchors=None):
                 side_effect=lambda url, country: stored_tickers.get(country, set()),
             )
         ),
+        "previous": stack.enter_context(
+            patch(
+                "fetch_sma.load_previous_indices",
+                side_effect=lambda url, country, before: (pins or {}).get(country, {}),
+            )
+        ),
         "weeks": stack.enter_context(
             patch(
                 "fetch_sma.load_distinct_week_starts",
@@ -540,115 +627,181 @@ def _patch_index_io(stored_tickers: dict, *, tickers=None, anchors=None):
             )
         ),
         "write": stack.enter_context(
-            patch("fetch_sma.write_index_weeks", return_value=IndexWriteResult([], set()))
+            patch("fetch_sma.write_index_weeks", return_value=IndexWriteResult([]))
         ),
         "outliers": stack.enter_context(patch("fetch_sma.load_outliers", return_value=[])),
         "tickers": stack.enter_context(
             patch("fetch_sma.load_tickers_from_db", return_value=tickers or [])
         ),
-        "anchors": stack.enter_context(
-            patch("fetch_sma.compute_anchors", return_value=anchors)
+        "series": stack.enter_context(
+            patch("fetch_sma.compute_index_series", return_value=series)
         ),
     }
     return stack, mocks
 
 
-def test_run_index_update_chains_existing_indices_without_download() -> None:
+def test_run_index_update_chains_price_from_previous_row() -> None:
+    """Spec US2 scenario 1: 105 and a +1% day → 105 × 1.01, SMAs from the series."""
     from db.country import CountrySet
     from fetch_sma import _run_index_update
 
-    stored = {country: {f"{country.value.upper()}-IDX"} for country in CountrySet}
-    stack, mocks = _patch_index_io(stored, tickers=[TickerEntry("A", "A", sector="Energy")])
+    history = _history(
+        {"US-IDX": {IDX_D1: 0.0, **_week_days(IDX_W2, [0.01, 0.0, 0.0, 0.0, 0.0])}}
+    )
+    stack, mocks = _patch_index_io(
+        {CountrySet.US: {"US-IDX"}},
+        pins={CountrySet.US: {"US-IDX": (IDX_D1, Decimal("105"))}},
+    )
     with stack:
-        _run_index_update(_index_config(), {IDX_W2})
+        _run_index_update(_index_config(), {IDX_W2}, history)
 
-    assert [c.kwargs["country"] for c in mocks["write"].call_args_list] == list(CountrySet)
-    first = mocks["write"].call_args_list[0]
-    assert first.args == ("postgresql://example", [IDX_W2])
-    assert first.kwargs["start_week"] == IDX_W1 - timedelta(days=7)
-    assert "anchors" not in first.kwargs
-    assert (first.kwargs["max_growth"], first.kwargs["min_growth"]) == (9.0, -0.999)
-    mocks["anchors"].assert_not_called()
-    assert mocks["outliers"].call_count == 3
+    mocks["previous"].assert_called_once_with("postgresql://example", CountrySet.US, IDX_W2)
+    (url, levels), kwargs = mocks["write"].call_args
+    assert kwargs == {"country": CountrySet.US, "only_tickers": {"US-IDX"}}
+    row = levels[IDX_W2]["US-IDX"]
+    assert row.trading_date == IDX_D2
+    assert row.levels.current_price == Decimal("106.05")
+    assert row.levels.sma_50 == Decimal(str(round((105 + 5 * 106.05) / 6, 6)))
+    assert row.days_used == 6
+    assert mocks["outliers"].call_count == 1
+
+
+def test_run_index_update_chains_over_missed_week() -> None:
+    """Spec US2 scenario 2: every day since the pin counts once."""
+    from db.country import CountrySet
+    from fetch_sma import _run_index_update
+
+    history = _history(
+        {
+            "US-IDX": {
+                IDX_START: 0.0,
+                **_week_days(IDX_W1, [0.01, 0.0, 0.0, 0.0, 0.0]),
+                **_week_days(IDX_W2, [0.01, 0.0, 0.0, 0.0, 0.0]),
+            }
+        }
+    )
+    stack, mocks = _patch_index_io(
+        {CountrySet.US: {"US-IDX"}},
+        pins={CountrySet.US: {"US-IDX": (IDX_START, Decimal("105"))}},
+    )
+    with stack:
+        _run_index_update(_index_config(), {IDX_W2}, history)
+
+    levels = mocks["write"].call_args.args[1]
+    assert list(levels) == [IDX_W2]
+    assert levels[IDX_W2]["US-IDX"].levels.current_price == Decimal("107.1105")
+
+
+def test_run_index_update_errors_when_pin_older_than_history(caplog) -> None:
+    from db.country import CountrySet
+    from fetch_sma import _run_index_update
+
+    history = _history({"US-IDX": _week_days(IDX_W2, [0.01, 0.0])})
+    stack, mocks = _patch_index_io(
+        {CountrySet.US: {"US-IDX", "US-IDX-ENERGY"}},
+        pins={
+            CountrySet.US: {
+                "US-IDX": (date(2025, 1, 3), Decimal("90")),
+                "US-IDX-ENERGY": (IDX_D1, Decimal("100")),
+            }
+        },
+    )
+    with stack, caplog.at_level("WARNING", logger="fetch_sma"):
+        _run_index_update(_index_config(), {IDX_W2}, history)
+
+    mocks["write"].assert_not_called()
+    assert (
+        "Index US-IDX: latest stored row 2025-01-03 is older than the downloaded daily "
+        "history; run compute_indices.py --country us"
+    ) in caplog.text
+    assert "Index US-IDX-ENERGY: latest stored row" in caplog.text
+
+
+def test_run_index_update_warns_when_week_has_no_daily_data(caplog) -> None:
+    from db.country import CountrySet
+    from fetch_sma import _run_index_update
+
+    history = _history({"US-IDX": {IDX_START: 0.0, IDX_D1: 0.01}})
+    stack, mocks = _patch_index_io(
+        {CountrySet.US: {"US-IDX"}},
+        pins={CountrySet.US: {"US-IDX": (IDX_START, Decimal("100"))}},
+    )
+    with stack, caplog.at_level("WARNING", logger="fetch_sma"):
+        _run_index_update(_index_config(), {IDX_W2}, history)
+
+    mocks["write"].assert_not_called()
+    assert f"Index US-IDX: no daily data in week {IDX_W2.isoformat()}" in caplog.text
 
 
 def test_run_index_update_warns_for_country_without_indices(caplog) -> None:
     from db.country import CountrySet
-    from fetch_sma import _run_index_update
+    from fetch_sma import IndexHistory, _run_index_update
 
     stack, mocks = _patch_index_io({CountrySet.US: {"US-IDX"}})
     with stack, caplog.at_level("WARNING", logger="fetch_sma"):
-        _run_index_update(_index_config(), {IDX_W2})
+        _run_index_update(_index_config(), {IDX_W2}, IndexHistory())
 
-    assert [c.kwargs["country"] for c in mocks["write"].call_args_list] == [CountrySet.US]
+    assert [c.args[1] for c in mocks["previous"].call_args_list] == [CountrySet.US]
     assert "country swe has no indices; run compute_indices.py --country swe" in caplog.text
     assert "country uk has no indices" in caplog.text
 
 
-def test_run_index_update_starts_new_sector_from_its_anchor() -> None:
+def test_run_index_update_starts_new_sector_from_its_series() -> None:
     from db.country import CountrySet
-    from equity_index import IndexLevels
-    from fetch_sma import _run_index_update
-    from index_anchor import Anchor, AnchorResult
+    from fetch_sma import IndexHistory, _run_index_update
+    from index_anchor import IndexSeries, SeriesResult
 
     members = [TickerEntry(s, s, sector="Utilities") for s in "ABCDE"]
-    anchor = Anchor(
-        "US-IDX-UTILITIES",
-        IDX_START,
-        IDX_W1,
-        IDX_START,
-        IndexLevels(Decimal("100"), Decimal("98"), Decimal("95")),
-        200,
-    )
+    days = pd.bdate_range(IDX_START, IDX_D2)
+    series = IndexSeries("US-IDX-UTILITIES", IDX_START, {d.date(): 100.0 for d in days})
     stack, mocks = _patch_index_io(
         {CountrySet.US: {"US-IDX", "US-IDX-ENERGY"}},
         tickers=[TickerEntry("X", "X", sector="Energy"), *members],
-        anchors=AnchorResult(anchors={anchor.ticker: anchor}),
+        series=SeriesResult(series={series.ticker: series}),
     )
     with stack:
-        _run_index_update(_index_config(), {IDX_W2})
+        _run_index_update(_index_config(), {IDX_W2}, IndexHistory())
 
-    anchors_call = mocks["anchors"].call_args
-    assert anchors_call.args == (members, CountrySet.US)
-    assert anchors_call.kwargs["first_stored_week"] == IDX_W1
-    assert anchors_call.kwargs["index_tickers"] == {"US-IDX-UTILITIES"}
-    assert anchors_call.kwargs["settings"].start_date == IDX_START
-    new_sector = mocks["write"].call_args_list[1]
-    assert new_sector.args == ("postgresql://example", [IDX_W1, IDX_W2])
-    assert new_sector.kwargs["only_tickers"] == {"US-IDX-UTILITIES"}
-    assert new_sector.kwargs["anchors"] == {"US-IDX-UTILITIES": anchor}
+    series_call = mocks["series"].call_args
+    assert series_call.args == (members, CountrySet.US)
+    assert series_call.kwargs["index_tickers"] == {"US-IDX-UTILITIES"}
+    assert series_call.kwargs["settings"].start_date == IDX_START
+    (url, levels), kwargs = mocks["write"].call_args
+    assert kwargs == {"country": CountrySet.US, "only_tickers": {"US-IDX-UTILITIES"}}
+    assert sorted(levels) == [IDX_W1, IDX_W2]
+    assert levels[IDX_W2]["US-IDX-UTILITIES"].trading_date == IDX_D2
 
 
-def test_run_index_update_new_sector_without_anchor_warns(caplog) -> None:
+def test_run_index_update_new_sector_without_series_warns(caplog) -> None:
     from db.country import CountrySet
-    from fetch_sma import _run_index_update
-    from index_anchor import AnchorResult
+    from fetch_sma import IndexHistory, _run_index_update
+    from index_anchor import SeriesResult
 
     members = [TickerEntry(s, s, sector="Utilities") for s in "ABCDE"]
     stack, mocks = _patch_index_io(
         {CountrySet.US: {"US-IDX"}},
         tickers=members,
-        anchors=AnchorResult(below_minimum={"US-IDX-UTILITIES"}),
+        series=SeriesResult(below_minimum={"US-IDX-UTILITIES"}),
     )
     with stack, caplog.at_level("WARNING", logger="fetch_sma"):
-        _run_index_update(_index_config(), {IDX_W2})
+        _run_index_update(_index_config(), {IDX_W2}, IndexHistory())
 
-    assert mocks["write"].call_count == 1
+    mocks["write"].assert_not_called()
     assert "New sector index US-IDX-UTILITIES not started" in caplog.text
 
 
 def test_run_index_update_skips_sector_with_too_few_stocks() -> None:
     from db.country import CountrySet
-    from fetch_sma import _run_index_update
+    from fetch_sma import IndexHistory, _run_index_update
 
     stack, mocks = _patch_index_io(
         {CountrySet.US: {"US-IDX"}},
         tickers=[TickerEntry("A", "A", sector="Utilities")],
     )
     with stack:
-        _run_index_update(_index_config(), {IDX_W2})
+        _run_index_update(_index_config(), {IDX_W2}, IndexHistory())
 
-    mocks["anchors"].assert_not_called()
+    mocks["series"].assert_not_called()
 
 
 def test_run_index_update_new_sector_failure_does_not_stop_update(caplog) -> None:
@@ -656,13 +809,59 @@ def test_run_index_update_new_sector_failure_does_not_stop_update(caplog) -> Non
     from fetch_sma import _run_index_update
 
     members = [TickerEntry(s, s, sector="Utilities") for s in "ABCDE"]
-    stack, mocks = _patch_index_io({CountrySet.US: {"US-IDX"}}, tickers=members)
-    mocks["anchors"].side_effect = RuntimeError("yfinance down")
+    history = _history({"US-IDX": {IDX_D1: 0.0, IDX_D2: 0.01}})
+    stack, mocks = _patch_index_io(
+        {CountrySet.US: {"US-IDX"}},
+        pins={CountrySet.US: {"US-IDX": (IDX_D1, Decimal("100"))}},
+        tickers=members,
+    )
+    mocks["series"].side_effect = RuntimeError("yfinance down")
     with stack, caplog.at_level("ERROR", logger="fetch_sma"):
-        _run_index_update(_index_config(), {IDX_W2})
+        _run_index_update(_index_config(), {IDX_W2}, history)
 
     assert "Failed to start new us sector indices" in caplog.text
     assert mocks["write"].call_count == 1
+
+
+def test_main_folds_downloaded_batches_into_index_history() -> None:
+    from contextlib import ExitStack
+    from datetime import datetime, timezone
+
+    from fetch_sma import main
+
+    entry = TickerEntry("AAA", "Alpha", sector="Energy")
+    data = _closes_frame({"AAA": [10.0, 11.0]})
+    with ExitStack() as stack:
+        stack.enter_context(patch("fetch_sma.get_config", return_value=_index_config()))
+        stack.enter_context(patch("fetch_sma.load_tickers_from_db", return_value=[entry]))
+        stack.enter_context(
+            patch("fetch_sma.filter_stale_tickers", return_value=(["AAA"], 0, None))
+        )
+        stack.enter_context(patch("fetch_sma.load_currency_for_tickers", return_value={}))
+        download = stack.enter_context(patch("fetch_sma.download_batch", return_value=data))
+        stack.enter_context(
+            patch(
+                "fetch_sma.metric_rows_from_batch",
+                return_value=[
+                    MetricRow("AAA", "Alpha", date(2026, 6, 2), None, None, Decimal("11"))
+                ],
+            )
+        )
+        stack.enter_context(patch("fetch_sma.insert_metrics", return_value=1))
+        stack.enter_context(patch("fetch_sma.upsert_market_for_weeks"))
+        stack.enter_context(patch("fetch_sma.purge_stale_data", return_value=(0, 0, 0)))
+        stack.enter_context(patch("fetch_sma._run_outlier_email", return_value=(0, 0)))
+        update = stack.enter_context(patch("fetch_sma._run_index_update"))
+        assert main() == 0
+
+    download.assert_called_once()
+    today = datetime.now(timezone.utc).date()
+    assert download.call_args.args[1] == today - timedelta(days=400)
+    history = update.call_args.args[2]
+    assert history.folded == {"AAA"}
+    assert history.accumulator.averages("US-IDX-ENERGY") == pytest.approx(
+        {date(2026, 6, 2): 0.1}
+    )
 
 
 def test_fetch_sma_no_longer_imports_compute_indices() -> None:
