@@ -137,3 +137,16 @@ FROM information_schema.tables
 WHERE table_schema = 'public'
   AND table_name IN ('tickers', 'metrics', 'market_metrics', 'market');
 -- expect 0 rows
+
+-- step 23: market index rows carry the exchange labels (spec 003)
+SELECT i.ticker, i.sector, count(*) AS rows
+FROM indices i
+JOIN (
+    VALUES
+        ('US-IDX', 'NYSE & Nasdaq'),
+        ('SWE-IDX', 'OMX Stockholm'),
+        ('UK-IDX', 'FTSE London')
+) AS v (ticker, label) ON v.ticker = i.ticker
+WHERE i.sector IS DISTINCT FROM v.label
+GROUP BY i.ticker, i.sector;
+-- expect 0 rows

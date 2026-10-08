@@ -28,6 +28,7 @@ MIGRATIONS = [
     REPO_ROOT / "migrate_add_growth_columns.sql",
     REPO_ROOT / "migrate_indices_sectors.sql",
     REPO_ROOT / "migrate_drop_by_sector_tables.sql",
+    REPO_ROOT / "migrate_rename_market_indices.sql",
 ]
 APPLY_MIGRATIONS_SH = REPO_ROOT / "scripts" / "apply_migrations.sh"
 COUNTRY_TABLES = (
@@ -534,4 +535,43 @@ def test_apply_migrations_runs_steps_21_22_last_in_both_paths() -> None:
             < find("migrate_add_growth_columns.sql")
             < find("migrate_indices_sectors.sql")
             < find("migrate_drop_by_sector_tables.sql")
+        )
+
+
+STEP_23_SQL = REPO_ROOT / "migrate_rename_market_indices.sql"
+
+
+def _sql_statements(path: Path) -> str:
+    lines = [
+        line for line in path.read_text(encoding="utf-8").splitlines()
+        if not line.strip().startswith("--")
+    ]
+    return " ".join(" ".join(lines).split())
+
+
+def test_step_23_relabels_only_market_tickers() -> None:
+    sql = _sql_statements(STEP_23_SQL)
+    for keyword in ("CREATE", "ALTER", "DROP", "TRUNCATE", "DELETE", "LIKE"):
+        assert keyword not in sql.upper()
+    assert "UPDATE indices" in sql
+    assert "i.ticker = v.ticker" in sql
+    assert "IS DISTINCT FROM v.label" in sql
+    for ticker in ("'US-IDX'", "'SWE-IDX'", "'UK-IDX'"):
+        assert ticker in sql
+
+
+def test_step_23_labels_match_index_definitions() -> None:
+    from equity_index import INDEX_DEFINITIONS
+
+    sql = _sql_statements(STEP_23_SQL)
+    for definition in INDEX_DEFINITIONS.values():
+        assert f"('{definition.ticker}', '{definition.name}')" in sql
+
+
+def test_apply_migrations_runs_step_23_after_step_22_in_both_paths() -> None:
+    script = APPLY_MIGRATIONS_SH.read_text(encoding="utf-8")
+    skip_block = script.split('"$has_raw_ratios" == "no"', 1)[1].split("fi\n", 1)[0]
+    for find in (skip_block.index, script.rindex):
+        assert find("migrate_drop_by_sector_tables.sql") < find(
+            "migrate_rename_market_indices.sql"
         )

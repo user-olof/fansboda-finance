@@ -31,9 +31,9 @@ class IndexDefinition:
 
 
 INDEX_DEFINITIONS: dict[CountrySet, IndexDefinition] = {
-    CountrySet.US: IndexDefinition("US-IDX", "US Equity Index", CountrySet.US),
-    CountrySet.SWE: IndexDefinition("SWE-IDX", "OMX Equity Index", CountrySet.SWE),
-    CountrySet.UK: IndexDefinition("UK-IDX", "FTSE Equity Index", CountrySet.UK),
+    CountrySet.US: IndexDefinition("US-IDX", "NYSE & Nasdaq", CountrySet.US),
+    CountrySet.SWE: IndexDefinition("SWE-IDX", "OMX Stockholm", CountrySet.SWE),
+    CountrySet.UK: IndexDefinition("UK-IDX", "FTSE London", CountrySet.UK),
 }
 
 
@@ -72,7 +72,7 @@ class WeekLevels:
 @dataclass(frozen=True)
 class IndexRow:
     """One ``indices`` row. ``sector`` is the stored label (market rows: the index
-    name, ``US Equity Index``; sector rows: the sector, ``Technology``); ``sector_key`` is the ``sectorKey`` used to
+    name, ``NYSE & Nasdaq``; sector rows: the sector, ``Technology``); ``sector_key`` is the ``sectorKey`` used to
     group sector rows (None on market rows) and is not stored."""
 
     ticker: str

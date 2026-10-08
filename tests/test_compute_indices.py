@@ -71,12 +71,35 @@ def _mock_conn(fetchall: list[object] | None = None) -> tuple[MagicMock, MagicMo
 
 def test_index_definitions_match_prd() -> None:
     assert {(d.ticker, d.name) for d in INDEX_DEFINITIONS.values()} == {
-        ("US-IDX", "US Equity Index"),
-        ("SWE-IDX", "OMX Equity Index"),
-        ("UK-IDX", "FTSE Equity Index"),
+        ("US-IDX", "NYSE & Nasdaq"),
+        ("SWE-IDX", "OMX Stockholm"),
+        ("UK-IDX", "FTSE London"),
     }
     for country, definition in INDEX_DEFINITIONS.items():
         assert definition.country is country
+
+
+YFINANCE_SECTOR_KEYS = (
+    "basic-materials",
+    "communication-services",
+    "consumer-cyclical",
+    "consumer-defensive",
+    "energy",
+    "financial-services",
+    "healthcare",
+    "industrials",
+    "real-estate",
+    "technology",
+    "utilities",
+)
+
+
+def test_market_labels_do_not_collide_with_sector_labels() -> None:
+    market_names = {d.name for d in INDEX_DEFINITIONS.values()}
+    assert len(market_names) == len(INDEX_DEFINITIONS)
+    for country in INDEX_DEFINITIONS:
+        for key in YFINANCE_SECTOR_KEYS:
+            assert sector_index_definition(country, key).name not in market_names
 
 
 def test_index_momentum() -> None:
@@ -93,7 +116,7 @@ def test_build_index_row_uses_series_levels() -> None:
     assert row.momentum == Decimal("95") / Decimal("90")
     assert (row.ticker, row.sector, row.country) == (
         "US-IDX",
-        "US Equity Index",
+        "NYSE & Nasdaq",
         CountrySet.US,
     )
 
@@ -182,7 +205,7 @@ def test_write_index_weeks_writes_series_levels_with_stats() -> None:
         INSERT_INDEX_SQL,
         (
             "US-IDX",
-            "US Equity Index",
+            "NYSE & Nasdaq",
             "us",
             "USD",
             D1,
@@ -227,7 +250,7 @@ def test_write_index_weeks_sector_rows_with_z_scores() -> None:
     assert list(by_ticker) == ["US-IDX", "US-IDX-ENERGY", "US-IDX-TECHNOLOGY"]
     market = by_ticker["US-IDX"]
     assert (market.sector, market.sector_key, market.currency, market.z_score) == (
-        "US Equity Index",
+        "NYSE & Nasdaq",
         None,
         "USD",
         None,
@@ -266,7 +289,7 @@ def test_write_index_weeks_only_tickers_keeps_other_rows_and_updates_z_scores() 
         (0, "technology", 2, D2, Decimal("100")),
     ]
     stored = [
-        ("US-IDX", "US Equity Index", "USD", D2, 3, Decimal("101"), Decimal("95"),
+        ("US-IDX", "NYSE & Nasdaq", "USD", D2, 3, Decimal("101"), Decimal("95"),
          Decimal("90"), Decimal("50"), Decimal("95") / Decimal("90")),
         ("US-IDX-TECHNOLOGY", "Technology", "USD", D2, 2, Decimal("105"),
          Decimal("120"), Decimal("100"), Decimal("100"), Decimal("1.2")),
@@ -411,7 +434,7 @@ def test_purge_stale_indices_uses_retention_cutoff() -> None:
 def _row(trading_date: date) -> IndexRow:
     return IndexRow(
         "US-IDX",
-        "US Equity Index",
+        "NYSE & Nasdaq",
         CountrySet.US,
         trading_date,
         2,

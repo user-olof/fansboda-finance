@@ -76,6 +76,7 @@ if [[ "$has_legacy" == "no" && "$has_raw_ratios" == "no" ]]; then
   run_sql "$REPO_DIR/migrate_add_growth_columns.sql"
   run_sql "$REPO_DIR/migrate_indices_sectors.sql"
   run_sql "$REPO_DIR/migrate_drop_by_sector_tables.sql"
+  run_sql "$REPO_DIR/migrate_rename_market_indices.sql"
   echo "All migrations applied (us_* / swe_* / uk_*)."
   exit 0
 fi
@@ -124,5 +125,8 @@ run_sql "$REPO_DIR/migrate_indices_sectors.sql"
 
 # Step 22: drop *_by_sector (superseded by sector index rows, RFC-018).
 run_sql "$REPO_DIR/migrate_drop_by_sector_tables.sql"
+
+# Step 23: market index labels (NYSE & Nasdaq / OMX Stockholm / FTSE London), spec 003.
+run_sql "$REPO_DIR/migrate_rename_market_indices.sql"
 
 echo "All migrations applied (us_* / swe_* / uk_*)."
