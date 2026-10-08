@@ -3,7 +3,10 @@
 
 Loads us_tickers + swe_tickers + uk_tickers, skips fresh symbols per country
 metrics table, batch-downloads OHLCV, appends SMA snapshots, upserts
-us_/swe_/uk_market_metrics, and purges stale history.
+us_/swe_/uk_market_metrics, purges stale history, and chains the weeks it wrote
+onto the stored indices; a new sector index is started from its own daily
+history (specs/001-index-initial-sma). Index initialization is the one-off
+``compute_indices.py``.
 """
 
 from __future__ import annotations
@@ -17,20 +20,23 @@ from decimal import Decimal
 
 import pandas as pd
 
-from compute_indices import refresh_indices
 from config import BaseConfig, get_config
 from db.country import CountrySet, country_set_for
+from db.indices import load_index_tickers, write_index_weeks
 from db.market import upsert_market_stats
 from db.metrics import (
     filter_stale_tickers,
     insert_metrics,
+    load_distinct_week_starts,
     load_momentum_by_market_for_week,
     update_z_scores_for_week,
 )
 from db.outliers import load_outliers
 from db.retention import purge_stale_data
 from db.tickers import load_tickers_from_db
+from equity_index import IndexRow
 from gmail_client import send_email
+from index_anchor import AnchorSettings, compute_anchors, missing_sector_indices
 from models import MarketRow, MetricRow, OutlierRow, week_start_of
 from outlier_email import build_outlier_email
 from yfinance_client import download_batch, load_currency_for_tickers
@@ -340,13 +346,164 @@ def _run_retention_purge(
     return metrics_purged, market_metrics_purged, indices_purged
 
 
-def _run_indices(config: BaseConfig, week_starts: set[date]) -> None:
-    written = refresh_indices(
-        config.database_url,
-        sorted(week_starts),
-        max_growth=config.outlier_max_growth,
-        min_growth=config.outlier_min_growth,
+def log_excluded_outliers(
+    log: logging.Logger, country: CountrySet, outliers: list[OutlierRow]
+) -> None:
+    """Log each stock-week excluded from the country's indices (FR-37b)."""
+    for outlier in outliers:
+        log.warning(
+            "Outlier excluded from %s indices: %s trading_date=%s "
+            "price_growth=%s sma_50_growth=%s sma_200_growth=%s (%s)",
+            country.value,
+            outlier.ticker,
+            outlier.trading_date.isoformat(),
+            outlier.price_growth,
+            outlier.sma_50_growth,
+            outlier.sma_200_growth,
+            outlier.bound,
+        )
+    if outliers:
+        log.info(
+            "Indices %s: %d outlier stock-week(s) excluded",
+            country.value,
+            len(outliers),
+        )
+
+
+def log_market_rows(log: logging.Logger, rows: list[IndexRow]) -> None:
+    for row in rows:
+        if row.sector_key is not None:
+            continue
+        log.info(
+            "Index %s trading_date=%s ticker_count=%d current_price=%.4f "
+            "sma_50=%.4f sma_200=%.4f momentum=%s pct_uptrend=%s",
+            row.ticker,
+            row.trading_date.isoformat(),
+            row.ticker_count,
+            row.current_price,
+            row.sma_50,
+            row.sma_200,
+            "n/a" if row.momentum is None else f"{row.momentum:.6f}",
+            "n/a" if row.pct_uptrend is None else f"{row.pct_uptrend:.1f}",
+        )
+
+
+def _start_new_sectors(
+    config: BaseConfig,
+    settings: AnchorSettings,
+    country: CountrySet,
+    stored_index_tickers: set[str],
+    stored_weeks: list[date],
+) -> int:
+    """Create sector indices without stored rows (FR-016, research R12)."""
+    entries = load_tickers_from_db(config.database_url, country=country)
+    missing = missing_sector_indices(
+        entries,
+        stored_index_tickers,
+        country,
+        min_components=settings.min_components,
     )
+    if not missing:
+        return 0
+    members = list(
+        {entry.symbol: entry for stocks in missing.values() for entry in stocks}.values()
+    )
+    logger.info(
+        "New sector index(es) %s: downloading daily history for %d stock(s)",
+        ", ".join(missing),
+        len(members),
+    )
+    result = compute_anchors(
+        members,
+        country,
+        settings=settings,
+        first_stored_week=stored_weeks[0] if stored_weeks else None,
+        index_tickers=set(missing),
+    )
+    for ticker in missing:
+        if ticker not in result.anchors:
+            logger.warning(
+                "New sector index %s not started (fewer than %d listed stocks or "
+                "no data); the next weekly run tries again",
+                ticker,
+                settings.min_components,
+            )
+    if not result.anchors:
+        return 0
+    first_week = min(anchor.week_start for anchor in result.anchors.values())
+    written = write_index_weeks(
+        config.database_url,
+        [week for week in stored_weeks if week >= first_week],
+        country=country,
+        start_week=week_start_of(settings.start_date),
+        anchors=result.anchors,
+        only_tickers=set(result.anchors),
+        max_growth=settings.max_growth,
+        min_growth=settings.min_growth,
+    )
+    for anchor in result.anchors.values():
+        logger.info(
+            "New sector index %s: start_date=%s sma_50=%s sma_200=%s days_used=%d",
+            anchor.ticker,
+            anchor.start_date.isoformat(),
+            anchor.levels.sma_50,
+            anchor.levels.sma_200,
+            anchor.days_used,
+        )
+    return len(written.rows)
+
+
+def _run_index_update(config: BaseConfig, week_starts: set[date]) -> None:
+    """Chain the weeks written onto the stored indices (FR-015) and start new
+    sector indices (FR-016). Countries without indices are left to the one-off
+    ``compute_indices.py``."""
+    settings = AnchorSettings.from_config(config)
+    start_week = week_start_of(settings.start_date)
+    first_week = min(week_starts)
+    written = 0
+    for country in CountrySet:
+        stored_index_tickers = load_index_tickers(config.database_url, country)
+        if not stored_index_tickers:
+            logger.warning(
+                "country %s has no indices; run compute_indices.py --country %s",
+                country.value,
+                country.value,
+            )
+            continue
+        stored_weeks = [
+            week
+            for week in load_distinct_week_starts(config.database_url, country=country)
+            if week >= start_week
+        ]
+        weeks = [week for week in stored_weeks if week >= first_week]
+        if weeks:
+            result = write_index_weeks(
+                config.database_url,
+                weeks,
+                country=country,
+                start_week=start_week,
+                max_growth=config.outlier_max_growth,
+                min_growth=config.outlier_min_growth,
+            )
+            log_market_rows(logger, result.rows)
+            log_excluded_outliers(
+                logger,
+                country,
+                load_outliers(
+                    config.database_url,
+                    weeks,
+                    country=country,
+                    max_growth=config.outlier_max_growth,
+                    min_growth=config.outlier_min_growth,
+                ),
+            )
+            written += len(result.rows)
+        try:
+            written += _start_new_sectors(
+                config, settings, country, stored_index_tickers, stored_weeks
+            )
+        except Exception:
+            logger.exception("Failed to start new %s sector indices", country.value)
     logger.info(
         "Indices: wrote %d market + sector index row(s) from week(s) %s",
         written,
@@ -579,7 +736,7 @@ def main() -> int:
     outliers_new = outliers_continuing = 0
     if week_starts:
         try:
-            _run_indices(config, week_starts)
+            _run_index_update(config, week_starts)
         except Exception:
             logger.exception("Failed to compute indices")
             return 1

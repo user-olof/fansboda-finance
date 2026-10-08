@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
@@ -506,3 +506,167 @@ def test_insert_metrics_routes_uk_ticker_to_uk_metrics() -> None:
     assert values[0][0] == "VOD.L"
     assert values[0][1] == "Vodafone"
     assert values[0][5] == "GBp"
+
+
+IDX_W1 = date(2026, 6, 1)
+IDX_W2 = date(2026, 6, 8)
+IDX_D2 = date(2026, 6, 12)
+IDX_START = date(2026, 5, 29)
+
+
+def _index_config() -> "BaseConfig":
+    from config import BaseConfig
+
+    return BaseConfig(database_url="postgresql://example", index_start_date=IDX_START)
+
+
+def _patch_index_io(stored_tickers: dict, *, tickers=None, anchors=None):
+    from contextlib import ExitStack
+
+    from db.indices import IndexWriteResult
+
+    stack = ExitStack()
+    mocks = {
+        "stored": stack.enter_context(
+            patch(
+                "fetch_sma.load_index_tickers",
+                side_effect=lambda url, country: stored_tickers.get(country, set()),
+            )
+        ),
+        "weeks": stack.enter_context(
+            patch(
+                "fetch_sma.load_distinct_week_starts",
+                return_value=[date(2026, 5, 18), IDX_W1, IDX_W2],
+            )
+        ),
+        "write": stack.enter_context(
+            patch("fetch_sma.write_index_weeks", return_value=IndexWriteResult([], set()))
+        ),
+        "outliers": stack.enter_context(patch("fetch_sma.load_outliers", return_value=[])),
+        "tickers": stack.enter_context(
+            patch("fetch_sma.load_tickers_from_db", return_value=tickers or [])
+        ),
+        "anchors": stack.enter_context(
+            patch("fetch_sma.compute_anchors", return_value=anchors)
+        ),
+    }
+    return stack, mocks
+
+
+def test_run_index_update_chains_existing_indices_without_download() -> None:
+    from db.country import CountrySet
+    from fetch_sma import _run_index_update
+
+    stored = {country: {f"{country.value.upper()}-IDX"} for country in CountrySet}
+    stack, mocks = _patch_index_io(stored, tickers=[TickerEntry("A", "A", sector="Energy")])
+    with stack:
+        _run_index_update(_index_config(), {IDX_W2})
+
+    assert [c.kwargs["country"] for c in mocks["write"].call_args_list] == list(CountrySet)
+    first = mocks["write"].call_args_list[0]
+    assert first.args == ("postgresql://example", [IDX_W2])
+    assert first.kwargs["start_week"] == IDX_W1 - timedelta(days=7)
+    assert "anchors" not in first.kwargs
+    assert (first.kwargs["max_growth"], first.kwargs["min_growth"]) == (9.0, -0.999)
+    mocks["anchors"].assert_not_called()
+    assert mocks["outliers"].call_count == 3
+
+
+def test_run_index_update_warns_for_country_without_indices(caplog) -> None:
+    from db.country import CountrySet
+    from fetch_sma import _run_index_update
+
+    stack, mocks = _patch_index_io({CountrySet.US: {"US-IDX"}})
+    with stack, caplog.at_level("WARNING", logger="fetch_sma"):
+        _run_index_update(_index_config(), {IDX_W2})
+
+    assert [c.kwargs["country"] for c in mocks["write"].call_args_list] == [CountrySet.US]
+    assert "country swe has no indices; run compute_indices.py --country swe" in caplog.text
+    assert "country uk has no indices" in caplog.text
+
+
+def test_run_index_update_starts_new_sector_from_its_anchor() -> None:
+    from db.country import CountrySet
+    from equity_index import IndexLevels
+    from fetch_sma import _run_index_update
+    from index_anchor import Anchor, AnchorResult
+
+    members = [TickerEntry(s, s, sector="Utilities") for s in "ABCDE"]
+    anchor = Anchor(
+        "US-IDX-UTILITIES",
+        IDX_START,
+        IDX_W1,
+        IDX_START,
+        IndexLevels(Decimal("100"), Decimal("98"), Decimal("95")),
+        200,
+    )
+    stack, mocks = _patch_index_io(
+        {CountrySet.US: {"US-IDX", "US-IDX-ENERGY"}},
+        tickers=[TickerEntry("X", "X", sector="Energy"), *members],
+        anchors=AnchorResult(anchors={anchor.ticker: anchor}),
+    )
+    with stack:
+        _run_index_update(_index_config(), {IDX_W2})
+
+    anchors_call = mocks["anchors"].call_args
+    assert anchors_call.args == (members, CountrySet.US)
+    assert anchors_call.kwargs["first_stored_week"] == IDX_W1
+    assert anchors_call.kwargs["index_tickers"] == {"US-IDX-UTILITIES"}
+    assert anchors_call.kwargs["settings"].start_date == IDX_START
+    new_sector = mocks["write"].call_args_list[1]
+    assert new_sector.args == ("postgresql://example", [IDX_W1, IDX_W2])
+    assert new_sector.kwargs["only_tickers"] == {"US-IDX-UTILITIES"}
+    assert new_sector.kwargs["anchors"] == {"US-IDX-UTILITIES": anchor}
+
+
+def test_run_index_update_new_sector_without_anchor_warns(caplog) -> None:
+    from db.country import CountrySet
+    from fetch_sma import _run_index_update
+    from index_anchor import AnchorResult
+
+    members = [TickerEntry(s, s, sector="Utilities") for s in "ABCDE"]
+    stack, mocks = _patch_index_io(
+        {CountrySet.US: {"US-IDX"}},
+        tickers=members,
+        anchors=AnchorResult(below_minimum={"US-IDX-UTILITIES"}),
+    )
+    with stack, caplog.at_level("WARNING", logger="fetch_sma"):
+        _run_index_update(_index_config(), {IDX_W2})
+
+    assert mocks["write"].call_count == 1
+    assert "New sector index US-IDX-UTILITIES not started" in caplog.text
+
+
+def test_run_index_update_skips_sector_with_too_few_stocks() -> None:
+    from db.country import CountrySet
+    from fetch_sma import _run_index_update
+
+    stack, mocks = _patch_index_io(
+        {CountrySet.US: {"US-IDX"}},
+        tickers=[TickerEntry("A", "A", sector="Utilities")],
+    )
+    with stack:
+        _run_index_update(_index_config(), {IDX_W2})
+
+    mocks["anchors"].assert_not_called()
+
+
+def test_run_index_update_new_sector_failure_does_not_stop_update(caplog) -> None:
+    from db.country import CountrySet
+    from fetch_sma import _run_index_update
+
+    members = [TickerEntry(s, s, sector="Utilities") for s in "ABCDE"]
+    stack, mocks = _patch_index_io({CountrySet.US: {"US-IDX"}}, tickers=members)
+    mocks["anchors"].side_effect = RuntimeError("yfinance down")
+    with stack, caplog.at_level("ERROR", logger="fetch_sma"):
+        _run_index_update(_index_config(), {IDX_W2})
+
+    assert "Failed to start new us sector indices" in caplog.text
+    assert mocks["write"].call_count == 1
+
+
+def test_fetch_sma_no_longer_imports_compute_indices() -> None:
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "fetch_sma.py").read_text()
+    assert "compute_indices import" not in source

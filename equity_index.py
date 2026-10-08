@@ -141,26 +141,20 @@ def build_base_row(
     *,
     trading_date: date | None,
     ticker_count: int,
-    avg_sma_50_ratio: Decimal | None,
-    avg_sma_200_ratio: Decimal | None,
+    levels: IndexLevels,
     pct_uptrend: Decimal | None = None,
 ) -> IndexRow | None:
-    """First week of an index: price 100, SMA levels at 100 × mean(sma / price).
+    """Start week of an index: price 100 and the initial SMA levels from its
+    reconstructed daily history (specs/001-index-initial-sma).
 
     Returns ``None`` when no stock has a positive price and both SMAs (FR-41).
     """
-    if (
-        ticker_count <= 0
-        or trading_date is None
-        or avg_sma_50_ratio is None
-        or avg_sma_200_ratio is None
-    ):
+    if levels.current_price != BASE_INDEX_PRICE:
+        raise ValueError(
+            f"Base row price must be {BASE_INDEX_PRICE}, got {levels.current_price}"
+        )
+    if ticker_count <= 0 or trading_date is None:
         return None
-    levels = IndexLevels(
-        current_price=BASE_INDEX_PRICE,
-        sma_50=BASE_INDEX_PRICE * avg_sma_50_ratio,
-        sma_200=BASE_INDEX_PRICE * avg_sma_200_ratio,
-    )
     return _row(definition, trading_date, ticker_count, levels, pct_uptrend)
 
 

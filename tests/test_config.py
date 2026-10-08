@@ -1,5 +1,6 @@
 """Tests for RFC-006 centralized configuration."""
 
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -166,3 +167,51 @@ def test_outlier_and_alert_env_overrides(monkeypatch: pytest.MonkeyPatch) -> Non
     assert dev.alert_email_from == "noreply@example.com"
     assert dev.alert_email_to == "owner@example.com"
     assert prod.alert_email_enabled is False
+
+
+def test_index_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://dev")
+    for name in (
+        "INDEX_START_DATE",
+        "INDEX_HISTORY_TRADING_DAYS",
+        "INDEX_MIN_COMPONENTS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    with patch("dotenv.load_dotenv"):
+        dev = DevConfig.load()
+
+    assert dev.index_start_date == date(2025, 10, 3)
+    assert dev.index_history_trading_days == 250
+    assert dev.index_min_components == 5
+
+
+def test_index_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://dev")
+    monkeypatch.setenv("INDEX_START_DATE", " 2025-10-10 ")
+    monkeypatch.setenv("INDEX_HISTORY_TRADING_DAYS", "200")
+    monkeypatch.setenv("INDEX_MIN_COMPONENTS", "3")
+
+    prod = ProdConfig.load()
+
+    assert prod.index_start_date == date(2025, 10, 10)
+    assert prod.index_history_trading_days == 200
+    assert prod.index_min_components == 3
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        ("INDEX_START_DATE", "2025/10/10", "ISO date"),
+        ("INDEX_HISTORY_TRADING_DAYS", "199", "at least 200"),
+        ("INDEX_MIN_COMPONENTS", "0", "at least 1"),
+    ],
+)
+def test_index_invalid_values(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str, message: str
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://dev")
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValueError, match=message):
+        ProdConfig.load()

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 import psycopg2
 
@@ -22,6 +24,9 @@ from equity_index import (
 )
 from models import week_start_of
 
+if TYPE_CHECKING:
+    from index_anchor import Anchor
+
 # Sector labels are normalized to the yfinance ``sectorKey`` form so a display
 # name fallback ("Consumer Cyclical") and a key ("consumer-cyclical") merge;
 # a blank sector becomes NULL (market index only, FR-34a).
@@ -37,27 +42,23 @@ ORDER BY ticker, trading_date DESC
 
 # Per-week stats are grouped with GROUPING SETS ((), (sector)): the grand
 # total (GROUPING = 1) is the market index, each sector group a sector index.
-# Base-week stocks with an SMA-to-price ratio outside the outlier bounds
-# (1 + min_growth .. 1 + max_growth) are excluded (FR-39a).
+# The start week only supplies count, trading date, and pct_uptrend; its levels
+# come from the index's anchor (specs/001-index-initial-sma).
 BASE_WEEK_STATS_SQL = sql_for_countries(
     f"""
 WITH s AS (
-    SELECT m.trading_date, m.current_price, m.sma_50, m.sma_200,
+    SELECT m.trading_date, m.sma_50, m.sma_200,
            {SECTOR_KEY_SQL} AS sector
     FROM {{metrics}} m
     JOIN {{tickers}} t ON t.symbol = m.ticker
     WHERE m.week_start = %s
       AND m.current_price > 0 AND m.sma_50 > 0 AND m.sma_200 > 0
-      AND m.sma_50 / m.current_price BETWEEN %s AND %s
-      AND m.sma_200 / m.current_price BETWEEN %s AND %s
 )
 SELECT
     GROUPING(sector),
     sector,
     COUNT(*),
     MAX(trading_date),
-    AVG(sma_50 / current_price),
-    AVG(sma_200 / current_price),
     100.0 * AVG(CASE WHEN sma_50 > sma_200 THEN 1 ELSE 0 END)
 FROM s
 GROUP BY GROUPING SETS ((), (sector))
@@ -138,6 +139,15 @@ WHERE country = %s AND trading_date >= %s AND trading_date < %s
 
 DELETE_COUNTRY_INDICES_SQL = "DELETE FROM indices WHERE country = %s"
 
+LOAD_COUNTRY_INDEX_TICKERS_SQL = "SELECT DISTINCT ticker FROM indices WHERE country = %s"
+
+LOAD_COUNTRY_WEEK_INDICES_SQL = """
+SELECT ticker, sector, currency, trading_date, ticker_count,
+       current_price, sma_50, sma_200, pct_uptrend, momentum
+FROM indices
+WHERE country = %s AND trading_date >= %s AND trading_date < %s
+"""
+
 DELETE_STALE_INDICES_SQL = "DELETE FROM indices WHERE trading_date < %s"
 
 _NO_STATS = (0, None, None, None, None, None)
@@ -177,39 +187,86 @@ def _insert_values(row: IndexRow) -> tuple:
     )
 
 
+@dataclass(frozen=True)
+class IndexWriteResult:
+    rows: list[IndexRow]
+    skipped: set[str]
+
+
+def _stored_row(country: CountrySet, values: tuple) -> IndexRow:
+    """An ``indices`` row read back, with ``sector_key`` derived from the ticker."""
+    (
+        ticker,
+        sector,
+        currency,
+        trading_date,
+        ticker_count,
+        current_price,
+        sma_50,
+        sma_200,
+        pct_uptrend,
+        momentum,
+    ) = values
+    market = INDEX_DEFINITIONS[country].ticker
+    key = ticker[len(market) + 1 :].lower() if ticker.startswith(f"{market}-") else None
+    return IndexRow(
+        ticker=ticker,
+        sector=sector,
+        country=country,
+        trading_date=trading_date,
+        ticker_count=ticker_count,
+        current_price=current_price,
+        sma_50=sma_50,
+        sma_200=sma_200,
+        momentum=momentum,
+        sector_key=key or None,
+        currency=currency,
+        pct_uptrend=pct_uptrend,
+    )
+
+
 def write_index_weeks(
     database_url: str,
     week_starts: list[date],
     *,
     country: CountrySet,
     rebuild: bool = False,
+    start_week: date | None = None,
+    anchors: dict[str, Anchor] | None = None,
+    only_tickers: set[str] | None = None,
     max_growth: float = DEFAULT_OUTLIER_MAX_GROWTH,
     min_growth: float = DEFAULT_OUTLIER_MIN_GROWTH,
-) -> list[IndexRow]:
+) -> IndexWriteResult:
     """Compute and store the country's market and sector indices per week.
 
-    Weeks run in ascending order and each index chains from its own latest
-    stored row before the week, so later weeks see rows written earlier in the
-    same call. All of the country's rows in the week are replaced (sector
-    z-scores need the whole week). ``rebuild=True`` first deletes every row
-    for the country, making each index's earliest week its base week. An index
+    Weeks run in ascending order (weeks before ``start_week`` are skipped) and
+    each index chains from its own latest stored row before the week, so later
+    weeks see rows written earlier in the same call. An index without a stored
+    row starts from its anchor: the base row (price 100, anchor SMAs) on the
+    anchor's week, or the anchor's levels as the previous row when the anchor
+    week is earlier. An index with neither is reported in ``skipped``.
+    ``rebuild=True`` first deletes every row for the country. All of the
+    country's rows in a week are replaced (sector z-scores need the whole
+    week); with ``only_tickers`` only those indices are computed, the other
+    stored rows of the week are kept and their z-scores recomputed. An index
     with no contributing stocks gets no row that week (FR-41). Stock-weeks with
-    growth outside ``[min_growth, max_growth]`` are excluded (FR-37b), and
-    base-week stocks with an SMA-to-price ratio outside
-    ``[1 + min_growth, 1 + max_growth]`` (FR-39a). One transaction.
+    growth outside ``[min_growth, max_growth]`` are excluded (FR-37b). One
+    transaction.
     """
-    min_bound, max_bound = Decimal(str(min_growth)), Decimal(str(max_growth))
-    bounds = (min_bound, max_bound) * 3
-    ratio_bounds = (1 + min_bound, 1 + max_bound) * 2
+    anchors = anchors or {}
+    bounds = (Decimal(str(min_growth)), Decimal(str(max_growth))) * 3
     written: list[IndexRow] = []
+    skipped: set[str] = set()
     with psycopg2.connect(database_url) as conn:
         with conn.cursor() as cur:
             if rebuild:
                 cur.execute(DELETE_COUNTRY_INDICES_SQL, (country.value,))
             for week_start in sorted(set(week_starts)):
+                if start_week is not None and week_start < start_week:
+                    continue
                 cur.execute(LOAD_PREVIOUS_INDICES_SQL, (country.value, week_start))
                 previous = {row[0]: row[1:] for row in cur.fetchall()}
-                cur.execute(BASE_WEEK_STATS_SQL[country], (week_start, *ratio_bounds))
+                cur.execute(BASE_WEEK_STATS_SQL[country], (week_start,))
                 base = _group_stats(cur.fetchall())
                 cur.execute(CHAINED_WEEK_STATS_SQL[country], (week_start, *bounds))
                 chained = _group_stats(cur.fetchall())
@@ -218,59 +275,91 @@ def write_index_weeks(
                 sectors = set(base) | set(chained)
                 for sector in sorted(sectors, key=lambda key: (key is not None, key or "")):
                     definition = _definition(country, sector)
+                    if only_tickers is not None and definition.ticker not in only_tickers:
+                        continue
                     prev = previous.get(definition.ticker)
-                    if prev is None:
+                    anchor = anchors.get(definition.ticker)
+                    if prev is not None:
+                        prev_date, prev_price, prev_sma_50, prev_sma_200 = prev
+                        prev_levels = IndexLevels(prev_price, prev_sma_50, prev_sma_200)
+                        prev_week = week_start_of(prev_date)
+                    elif anchor is None:
+                        skipped.add(definition.ticker)
+                        continue
+                    elif anchor.week_start > week_start:
+                        continue
+                    elif anchor.week_start == week_start:
                         if sector not in base:
                             continue
-                        ticker_count, trading_date, sma_50_ratio, sma_200_ratio, pct = (
-                            base[sector]
-                        )
+                        ticker_count, trading_date, pct = base[sector]
                         row = build_base_row(
                             definition,
                             trading_date=trading_date,
                             ticker_count=ticker_count,
-                            avg_sma_50_ratio=sma_50_ratio,
-                            avg_sma_200_ratio=sma_200_ratio,
+                            levels=anchor.levels,
                             pct_uptrend=pct,
                         )
+                        if row is not None:
+                            week_rows.append(row)
+                        continue
                     else:
-                        prev_date, prev_price, prev_sma_50, prev_sma_200 = prev
-                        prev_week = week_start_of(prev_date)
-                        if prev_week == week_start - timedelta(days=7):
-                            stats = chained.get(sector, _NO_STATS)
-                        else:
-                            cur.execute(
-                                GAP_WEEK_STATS_SQL[country],
-                                (prev_week, week_start, sector, sector, *bounds),
-                            )
-                            stats = cur.fetchone()
-                        ticker_count, trading_date, g_price, g_sma_50, g_sma_200, pct = (
-                            stats
+                        prev_levels, prev_week = anchor.levels, anchor.week_start
+
+                    if prev_week == week_start - timedelta(days=7):
+                        stats = chained.get(sector, _NO_STATS)
+                    else:
+                        cur.execute(
+                            GAP_WEEK_STATS_SQL[country],
+                            (prev_week, week_start, sector, sector, *bounds),
                         )
-                        row = build_chained_row(
-                            definition,
-                            IndexLevels(prev_price, prev_sma_50, prev_sma_200),
-                            trading_date=trading_date,
-                            ticker_count=ticker_count,
-                            growth_price=g_price,
-                            growth_sma_50=g_sma_50,
-                            growth_sma_200=g_sma_200,
-                            pct_uptrend=pct,
-                        )
+                        stats = cur.fetchone()
+                    ticker_count, trading_date, g_price, g_sma_50, g_sma_200, pct = stats
+                    row = build_chained_row(
+                        definition,
+                        prev_levels,
+                        trading_date=trading_date,
+                        ticker_count=ticker_count,
+                        growth_price=g_price,
+                        growth_sma_50=g_sma_50,
+                        growth_sma_200=g_sma_200,
+                        pct_uptrend=pct,
+                    )
                     if row is not None:
                         week_rows.append(row)
 
-                week_rows = with_sector_z_scores(week_rows)
-                cur.execute(
-                    DELETE_COUNTRY_WEEK_SQL,
-                    (country.value, week_start, week_start + timedelta(days=7)),
-                )
-                for row in week_rows:
+                week_end = week_start + timedelta(days=7)
+                if only_tickers is None:
+                    week_rows = with_sector_z_scores(week_rows)
+                    stored_rows = week_rows
+                else:
+                    if not week_rows:
+                        continue
+                    cur.execute(
+                        LOAD_COUNTRY_WEEK_INDICES_SQL,
+                        (country.value, week_start, week_end),
+                    )
+                    kept = [
+                        _stored_row(country, values)
+                        for values in cur.fetchall()
+                        if values[0] not in only_tickers
+                    ]
+                    stored_rows = with_sector_z_scores(kept + week_rows)
+                    week_rows = [r for r in stored_rows if r.ticker in only_tickers]
+                cur.execute(DELETE_COUNTRY_WEEK_SQL, (country.value, week_start, week_end))
+                for row in stored_rows:
                     cur.execute(INSERT_INDEX_SQL, _insert_values(row))
                 written.extend(week_rows)
         conn.commit()
 
-    return written
+    return IndexWriteResult(rows=written, skipped=skipped)
+
+
+def load_index_tickers(database_url: str, country: CountrySet) -> set[str]:
+    """Index tickers the country has stored rows for (R11 / R12)."""
+    with psycopg2.connect(database_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(LOAD_COUNTRY_INDEX_TICKERS_SQL, (country.value,))
+            return {row[0] for row in cur.fetchall()}
 
 
 def purge_stale_indices(database_url: str, retention_days: int) -> int:

@@ -7,7 +7,7 @@ alwaysApply: true
 
 Lightweight weekly pipeline: yfinance → SMA-50/200 + close → Neon Postgres. Runs on a GCP `e2-micro` VM via cron (Saturdays 11:00 UTC). ~$0/month target.
 
-**Source of truth:** `project-docs/PRD.md` — read it when changing behavior, schema, or infra. Also see `project-docs/FEATURES.md` (feature map), `project-docs/MIGRATIONS.md` (DDL upgrades), and `project-docs/rfc/` for design detail.
+**Source of truth:** `.specify/memory/constitution.md` (principles) and the Spec Kit features in `specs/` (new requirements, design, migration steps). `project-docs/` (`PRD.md`, `FEATURES.md`, `MIGRATIONS.md`, `rfc/`) is the **frozen** baseline through RFC-018 / migration step 22 — read it for context, **never edit it**; put all new documentation in the feature's `specs/` folder.
 
 ## Scope (do not add without explicit request)
 
@@ -23,6 +23,7 @@ Lightweight weekly pipeline: yfinance → SMA-50/200 + close → Neon Postgres. 
 |------|------|
 | `fetch_sma.py`, `seed_tickers.py`, `backfill_sma.py`, `backfill_market.py`, `refresh_tickers.py`, `compute_indices.py` | Job / ad-hoc entrypoints |
 | `symbols.py`, `yfinance_client.py`, `equity_index.py` | Shared symbol parsing, yfinance I/O, pure index-level chaining + outlier check |
+| `index_anchor.py` | Index start levels: start date (≥ `INDEX_MIN_COMPONENTS` closes), initial SMA-50/200 from reconstructed daily index price, weekly bridge when the start week is purged (specs/001-index-initial-sma) |
 | `outlier_email.py`, `gmail_client.py` | Pure outlier email builder; keyless Gmail API delivery (RFC-017) |
 | `config.py` | `BaseConfig`, `DevConfig`, `ProdConfig`, `get_config()` |
 | `models.py` | `TickerEntry`, `MetricRow` |
@@ -39,11 +40,11 @@ Dependencies: **Pipenv only** (`Pipfile` / `Pipfile.lock`). No `requirements.txt
 
 | Script | Role |
 |--------|------|
-| `fetch_sma.py` | Weekly job: load watchlist from DB, skip fresh tickers, batch-download ~300d OHLCV, compute SMAs, append metrics, purge rows older than retention (incl. `indices`), compute market + sector `indices` for the weeks it wrote (outlier stock-weeks excluded), email newly detected outliers |
+| `fetch_sma.py` | Weekly job: load watchlist from DB, skip fresh tickers, batch-download ~300d OHLCV, compute SMAs, append metrics, purge rows older than retention (incl. `indices`), chain market + sector `indices` for the weeks it wrote (outlier stock-weeks excluded), start new sector indices (daily download, same start-date rule), email newly detected outliers |
 | `seed_tickers.py` | Load symbols from file, resolve names via yfinance, upsert `us_tickers` / `swe_tickers` / `uk_tickers` (optional `--country us|swe|uk`); one-off `--update-business-summary` fills `business_summary` for stored tickers |
 | `backfill_sma.py` | One-off per country set (`--country us|swe|uk`, optional repeatable `--exchange NAME`): ~730d history, one SMA snapshot per calendar week (last bar of the week), upsert into matching `*_metrics`, upsert `*_market_metrics` |
 | `backfill_market.py` | One-off: recompute `momentum` from SMAs, then `*_market_metrics` + `z_score` (optional `--country`) |
-| `compute_indices.py` | Equal-weighted weekly market index (`US-IDX` / `SWE-IDX` / `UK-IDX`) and one index per sector (`US-IDX-TECHNOLOGY`, …): price / SMA-50 / SMA-200 levels, momentum, `pct_uptrend`, sector `z_score` into `indices` (RFC-015 / RFC-018); called by `fetch_sma.py`, or standalone full rebuild (`--country`); no yfinance |
+| `compute_indices.py` | Equal-weighted weekly market index (`US-IDX` / `SWE-IDX` / `UK-IDX`) and one index per sector (`US-IDX-TECHNOLOGY`, …): price / SMA-50 / SMA-200 levels, momentum, `pct_uptrend`, sector `z_score` into `indices` (RFC-015 / RFC-018); **one-off manual initialization** (`--country`, never cron): downloads daily history for the start levels, then rebuilds every stored week; all-or-nothing per country (exit 1 if any stored index can't be anchored) |
 
 | Utility | Role |
 |---------|------|
@@ -60,7 +61,7 @@ Reuse shared logic (`download_batch`, `compute_smas`, `metric_row_from_history`,
 ## Data model
 
 - **Country sets (PRD §6):** US (`us_tickers`, `us_metrics`, `us_market_metrics`), Swedish (`swe_*`), and UK (`uk_*`) with the same three tables, plus the shared `indices`
-- **`indices`** (one shared table, shaped like `*_metrics`): per country set the market index (`US-IDX`) and one index per `*_tickers.sector` key (`US-IDX-TECHNOLOGY`; sector normalized to `sectorKey` form, blank sector → market only); PK `(ticker, trading_date)`, at most one row per ticker per calendar week (`trading_date` = latest contributing bar; a later bar replaces the week's row); `sector` (second column; index label: market name on market rows (`US Equity Index`), sector name alone on sector rows (`Technology`, unique per country); no `name` column — sector rows are `ticker LIKE '%-IDX-%'`), `country`, `currency` (`USD` / `SEK` / `GBP`), `ticker_count`, `current_price`, `sma_50`, `sma_200`, `pct_uptrend`, `momentum`, `z_score` — each level chained weekly by the equal-weighted mean growth of that measure over member stocks; base week (per index) `current_price = 100`, SMA levels `100 ×` average `sma / current_price` (stocks with a ratio > 10 or < 0.001 excluded); `momentum = sma_50 / sma_200`; `z_score` = sector momentum vs the set's sector indices that week (population std), NULL on market rows (PRD §5.8, RFC-018)
+- **`indices`** (one shared table, shaped like `*_metrics`): per country set the market index (`US-IDX`) and one index per `*_tickers.sector` key (`US-IDX-TECHNOLOGY`; sector normalized to `sectorKey` form, blank sector → market only); PK `(ticker, trading_date)`, at most one row per ticker per calendar week (`trading_date` = latest contributing bar; a later bar replaces the week's row); `sector` (second column; index label: market name on market rows (`US Equity Index`), sector name alone on sector rows (`Technology`, unique per country); no `name` column — sector rows are `ticker LIKE '%-IDX-%'`), `country`, `currency` (`USD` / `SEK` / `GBP`), `ticker_count`, `current_price`, `sma_50`, `sma_200`, `pct_uptrend`, `momentum`, `z_score` — each level chained weekly by the equal-weighted mean growth of that measure over member stocks; start date `INDEX_START_DATE` (default 2025-10-03) if ≥ `INDEX_MIN_COMPONENTS` (5) members have a close on it, else the first later week's last trading day that has; `current_price = 100` on the start date, initial `sma_50` / `sma_200` = means of the last 50 / 200 levels of the daily index price reconstructed backwards from 100 (`INDEX_HISTORY_TRADING_DAYS`, outlier daily returns excluded); `momentum = sma_50 / sma_200`; `z_score` = sector momentum vs the set's sector indices that week (population std), NULL on market rows (PRD §5.8, RFC-018)
 - **`*_tickers`:** `symbol` (PK), `company`, `sector`, `industry`, `market`, `exchange_name`, `business_summary`, `updated_at`
 - **`*_metrics`:** `id` (PK), `ticker` (FK → matching `*_tickers.symbol` ON DELETE CASCADE), `company`, `week_start`, `trading_date`, `updated_at`, `sma_50`, `sma_200`, `current_price`, `momentum`, `z_score` — `NUMERIC(18, 6)` for prices/derived fields
 - One row per `(ticker, week_start)` within each set (`week_start` = Monday of `trading_date`); unique constraint `*_metrics_week_start_ticker_key`
@@ -116,4 +117,4 @@ Do not commit: `.env`, `.venv/`, `tickers.txt`, `all-tickers.txt`, `small-ticker
 2. Keep diffs minimal — no unrelated refactors.
 3. Do not commit `.env` or secrets.
 4. Commit `schema.sql`, `migrate_*.sql`, `Pipfile`, and `Pipfile.lock` together when deps or DDL change.
-5. Out-of-scope items belong in PRD §11 — ask before building.
+5. Out-of-scope items: ask before building; record agreed future work in a Spec Kit spec, not in `project-docs/`.

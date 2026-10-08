@@ -1,17 +1,15 @@
 <!--
 Sync Impact Report
-- Version change: (template) → 1.0.0
-- Modified principles: none (initial adoption; all placeholders replaced)
-- Added principles:
-  I. Weekly Batch Only
-  II. Near-Zero Cost
-  III. Data Pipeline Only — No UI or API
-  IV. Parameterized SQL in db/ Only
-  V. Keyless Authentication and No Secrets in the Repo
-  VI. Schema Changes Through schema.sql and migrate_*.sql
-  VII. Pure Logic Separated from I/O, with Unit Tests
-- Added sections: Operational Constraints; Development Workflow; Governance
+- Version change: 1.0.0 → 1.1.0 (MINOR: documentation policy materially expanded)
+- Modified principles:
+  VI. Schema Changes Through schema.sql and migrate_*.sql — migration steps are now documented
+  in the feature's spec folder instead of project-docs/MIGRATIONS.md
+- Modified sections: Development Workflow — all of project-docs/ (PRD, FEATURES, MIGRATIONS,
+  RFCs) is frozen; all new documentation lives in specs/
+- Added sections: none
 - Removed sections: none
+- Previous: 1.0.0 (2026-10-07) initial adoption with Principles I–VII, Operational
+  Constraints, Development Workflow, Governance
 - Templates checked: .specify/templates/plan-template.md, spec-template.md,
   tasks-template.md read the constitution at runtime — no edits required
 - Follow-up TODOs: none
@@ -83,7 +81,8 @@ Rationale: long-lived keys are the main leak risk for a small unattended system.
 
 Every DDL change MUST be made in `schema.sql` (fresh databases) and an idempotent
 `migrate_*.sql` file (existing databases), committed together, with its step and
-ordering documented in `project-docs/MIGRATIONS.md` and wired into
+ordering documented in the feature's `specs/` folder (continuing the step numbering of the
+frozen `project-docs/MIGRATIONS.md`, last step 22) and wired into
 `scripts/apply_migrations.sh` and `scripts/verify_schema.sql`. Python code MUST NOT
 issue ad-hoc DDL. Destructive steps (dropping tables or columns) MUST be separate
 migration steps applied only after every consumer has moved off the old structure,
@@ -123,9 +122,11 @@ Rationale: the job runs unattended; correctness is proven by fast, offline tests
 ## Development Workflow
 
 - New behavior starts as a Spec Kit feature (`/speckit-specify` → `/speckit-plan` →
-  `/speckit-tasks` → `/speckit-implement`) under `specs/`. `project-docs/PRD.md` and
-  `project-docs/rfc/` are the frozen baseline describing the system as built through
-  RFC-018; they are reference context, not the place for new requirements.
+  `/speckit-tasks` → `/speckit-implement`) under `specs/`.
+- Everything under `project-docs/` (`PRD.md`, `FEATURES.md`, `MIGRATIONS.md`, `rfc/`) is the
+  frozen baseline describing the system as built through RFC-018 and migration step 22. It is
+  reference context only and MUST NOT be edited; all new documentation (requirements, design,
+  migration steps, rollout notes) MUST live in the feature's `specs/` folder.
 - Plans MUST pass a Constitution Check against Principles I–VII; any deviation MUST be
   justified in the plan's Complexity Tracking table and approved by the owner.
 - Diffs MUST stay minimal and match surrounding naming and patterns; no unrelated
@@ -150,4 +151,4 @@ Every spec, plan, and pull request review MUST check compliance with the princip
 above; scope extensions (Principle III) require an explicit owner request before work
 starts.
 
-**Version**: 1.0.0 | **Ratified**: 2026-10-07 | **Last Amended**: 2026-10-07
+**Version**: 1.1.0 | **Ratified**: 2026-10-07 | **Last Amended**: 2026-10-07

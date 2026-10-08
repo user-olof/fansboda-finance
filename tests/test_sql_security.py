@@ -12,6 +12,7 @@ JOB_SCRIPTS = (
     "backfill_market.py",
     "refresh_tickers.py",
     "compute_indices.py",
+    "index_anchor.py",
     "outlier_email.py",
     "gmail_client.py",
     "scripts/send_test_email.py",

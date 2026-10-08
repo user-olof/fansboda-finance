@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
-from compute_indices import build_parser, main, refresh_indices
+from compute_indices import build_parser, initialize_indices, main
 from config import BaseConfig
 from db.country import CountrySet
 from db.indices import (
@@ -17,7 +17,11 @@ from db.indices import (
     DELETE_STALE_INDICES_SQL,
     GAP_WEEK_STATS_SQL,
     INSERT_INDEX_SQL,
+    LOAD_COUNTRY_INDEX_TICKERS_SQL,
+    LOAD_COUNTRY_WEEK_INDICES_SQL,
     LOAD_PREVIOUS_INDICES_SQL,
+    IndexWriteResult,
+    load_index_tickers,
     purge_stale_indices,
     write_index_weeks,
 )
@@ -34,7 +38,8 @@ from equity_index import (
     sector_index_definition,
     with_sector_z_scores,
 )
-from models import OutlierRow
+from index_anchor import Anchor, AnchorResult, AnchorSettings
+from models import OutlierRow, TickerEntry
 
 US = INDEX_DEFINITIONS[CountrySet.US]
 W1 = date(2026, 6, 1)
@@ -43,7 +48,11 @@ W3 = date(2026, 6, 15)
 D1 = date(2026, 6, 5)
 D2 = date(2026, 6, 12)
 BOUNDS = (Decimal("-0.999"), Decimal("9.0")) * 3
-RATIO_BOUNDS = (Decimal("0.001"), Decimal("10.0")) * 2
+BASE_LEVELS = IndexLevels(Decimal("100"), Decimal("95"), Decimal("90"))
+
+
+def _anchor(ticker: str, week: date, levels: IndexLevels = BASE_LEVELS) -> Anchor:
+    return Anchor(ticker, D1, week, D1, levels, 200)
 
 
 def _mock_config(**overrides: object) -> BaseConfig:
@@ -80,20 +89,14 @@ def test_index_momentum() -> None:
     assert index_momentum(Decimal("110"), Decimal("0")) is None
 
 
-def test_build_base_row_anchors_sma_levels_to_price_ratio() -> None:
-    row = build_base_row(
-        US,
-        trading_date=D1,
-        ticker_count=4,
-        avg_sma_50_ratio=Decimal("0.95"),
-        avg_sma_200_ratio=Decimal("0.90"),
-    )
+def test_build_base_row_uses_anchor_levels() -> None:
+    row = build_base_row(US, trading_date=D1, ticker_count=4, levels=BASE_LEVELS)
     assert row is not None
     assert row.trading_date == D1
     assert row.ticker_count == 4
     assert row.current_price == BASE_INDEX_PRICE
-    assert row.sma_50 == Decimal("95.00")
-    assert row.sma_200 == Decimal("90.00")
+    assert row.sma_50 == Decimal("95")
+    assert row.sma_200 == Decimal("90")
     assert row.momentum == Decimal("95") / Decimal("90")
     assert (row.ticker, row.sector, row.country) == (
         "US-IDX",
@@ -142,13 +145,22 @@ def test_equal_weighting_ignores_price_level() -> None:
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"trading_date": D1, "ticker_count": 0, "avg_sma_50_ratio": None, "avg_sma_200_ratio": None},
-        {"trading_date": None, "ticker_count": 2, "avg_sma_50_ratio": Decimal("1"), "avg_sma_200_ratio": Decimal("1")},
-        {"trading_date": D1, "ticker_count": 2, "avg_sma_50_ratio": None, "avg_sma_200_ratio": Decimal("1")},
+        {"trading_date": D1, "ticker_count": 0},
+        {"trading_date": None, "ticker_count": 2},
     ],
 )
 def test_build_base_row_skips_week_without_contributors(kwargs: dict) -> None:
-    assert build_base_row(US, **kwargs) is None
+    assert build_base_row(US, levels=BASE_LEVELS, **kwargs) is None
+
+
+def test_build_base_row_requires_price_100() -> None:
+    with pytest.raises(ValueError, match="100"):
+        build_base_row(
+            US,
+            trading_date=D1,
+            ticker_count=1,
+            levels=IndexLevels(Decimal("99"), Decimal("95"), Decimal("90")),
+        )
 
 
 def test_build_chained_row_skips_week_without_contributors() -> None:
@@ -174,14 +186,11 @@ def test_index_sql_targets_country_metrics(country: CountrySet) -> None:
     base = " ".join(BASE_WEEK_STATS_SQL[country].split())
     assert f"FROM {prefix}_metrics m JOIN {prefix}_tickers t ON t.symbol = m.ticker" in base
     assert sector_key in base
-    assert "AVG(sma_50 / current_price)" in base
-    assert "AVG(sma_200 / current_price)" in base
+    assert "sma_50 / current_price" not in base
     assert "m.current_price > 0 AND m.sma_50 > 0 AND m.sma_200 > 0" in base
     assert "GROUP BY GROUPING SETS ((), (sector))" in base
     assert "100.0 * AVG(CASE WHEN sma_50 > sma_200 THEN 1 ELSE 0 END)" in base
-    assert "m.sma_50 / m.current_price BETWEEN %s AND %s" in base
-    assert "m.sma_200 / m.current_price BETWEEN %s AND %s" in base
-    assert base.count("%s") == 5
+    assert base.count("%s") == 1
     chained = " ".join(CHAINED_WEEK_STATS_SQL[country].split())
     assert f"FROM {prefix}_metrics m JOIN {prefix}_tickers t ON t.symbol = m.ticker" in chained
     assert "m.current_price > 0 AND m.sma_50 > 0 AND m.sma_200 > 0" in chained
@@ -216,6 +225,12 @@ def test_static_index_sql_is_parameterized() -> None:
     )
     assert DELETE_COUNTRY_INDICES_SQL == "DELETE FROM indices WHERE country = %s"
     assert DELETE_STALE_INDICES_SQL == "DELETE FROM indices WHERE trading_date < %s"
+    assert LOAD_COUNTRY_INDEX_TICKERS_SQL == (
+        "SELECT DISTINCT ticker FROM indices WHERE country = %s"
+    )
+    week = " ".join(LOAD_COUNTRY_WEEK_INDICES_SQL.split())
+    assert "WHERE country = %s AND trading_date >= %s AND trading_date < %s" in week
+    assert week.count("%s") == 3
 
 
 def _inserted(mock_cursor: MagicMock) -> list[tuple]:
@@ -230,27 +245,33 @@ def test_write_index_weeks_base_then_chained_week() -> None:
     mock_conn, mock_cursor = _mock_conn(
         fetchall=[
             [],  # no previous rows before W1
-            [(1, None, 3, D1, Decimal("0.95"), Decimal("0.90"), Decimal("66.7"))],
+            [(1, None, 3, D1, Decimal("66.7"))],
             [(1, None, 0, None, None, None, None, None)],
             [("US-IDX", D1, Decimal("100"), Decimal("95"), Decimal("90"))],
-            [(1, None, 3, D2, Decimal("0.95"), Decimal("0.90"), Decimal("66.7"))],
+            [(1, None, 3, D2, Decimal("66.7"))],
             [(1, None, 2, D2, Decimal("0.1"), Decimal("0.02"), Decimal("0.01"), Decimal("50"))],
         ]
     )
 
     with patch("db.indices.psycopg2.connect", return_value=mock_conn):
-        rows = write_index_weeks(
-            "postgresql://example", [W2, W1], country=CountrySet.US, rebuild=True
+        result = write_index_weeks(
+            "postgresql://example",
+            [W2, W1],
+            country=CountrySet.US,
+            rebuild=True,
+            anchors={"US-IDX": _anchor("US-IDX", W1)},
         )
 
+    rows = result.rows
     assert [(r.trading_date, r.current_price, r.sma_50, r.sma_200) for r in rows] == [
-        (D1, Decimal("100"), Decimal("95.00"), Decimal("90.00")),
+        (D1, Decimal("100"), Decimal("95"), Decimal("90")),
         (D2, Decimal("110.0"), Decimal("96.90"), Decimal("90.90")),
     ]
+    assert result.skipped == set()
     executed = mock_cursor.execute.call_args_list
     assert executed[0] == call(DELETE_COUNTRY_INDICES_SQL, ("us",))
     assert executed[1] == call(LOAD_PREVIOUS_INDICES_SQL, ("us", W1))
-    assert executed[2] == call(BASE_WEEK_STATS_SQL[CountrySet.US], (W1, *RATIO_BOUNDS))
+    assert executed[2] == call(BASE_WEEK_STATS_SQL[CountrySet.US], (W1,))
     assert executed[3] == call(CHAINED_WEEK_STATS_SQL[CountrySet.US], (W1, *BOUNDS))
     assert executed[4] == call(DELETE_COUNTRY_WEEK_SQL, ("us", W1, W2))
     assert executed[5] == call(
@@ -263,10 +284,10 @@ def test_write_index_weeks_base_then_chained_week() -> None:
             D1,
             3,
             Decimal("100"),
-            Decimal("95.00"),
-            Decimal("90.00"),
+            Decimal("95"),
+            Decimal("90"),
             Decimal("66.7"),
-            Decimal("95.00") / Decimal("90.00"),
+            Decimal("95") / Decimal("90"),
             None,
         ),
     )
@@ -276,16 +297,16 @@ def test_write_index_weeks_base_then_chained_week() -> None:
 
 
 def test_write_index_weeks_builds_sector_indices_with_z_scores() -> None:
-    """Market chains; an existing sector chains; a new sector gets its base week."""
+    """Market chains; an existing sector chains; a new sector starts from its anchor."""
     previous = [
         ("US-IDX", D1, Decimal("100"), Decimal("95"), Decimal("90")),
         ("US-IDX-TECHNOLOGY", D1, Decimal("100"), Decimal("100"), Decimal("100")),
     ]
     base = [
-        (1, None, 3, D2, Decimal("1"), Decimal("1"), Decimal("50")),
-        (0, "energy", 1, D2, Decimal("0.9"), Decimal("1"), Decimal("0")),
-        (0, "technology", 2, D2, Decimal("1"), Decimal("1"), Decimal("100")),
-        (0, None, 0, D2, Decimal("1"), Decimal("1"), Decimal("0")),  # blank sector
+        (1, None, 3, D2, Decimal("50")),
+        (0, "energy", 1, D2, Decimal("0")),
+        (0, "technology", 2, D2, Decimal("100")),
+        (0, None, 0, D2, Decimal("0")),  # blank sector
     ]
     chained = [
         (1, None, 3, D2, Decimal("0"), Decimal("0"), Decimal("0"), Decimal("50")),
@@ -293,8 +314,14 @@ def test_write_index_weeks_builds_sector_indices_with_z_scores() -> None:
     ]
     mock_conn, mock_cursor = _mock_conn(fetchall=[previous, base, chained])
 
+    energy_levels = IndexLevels(Decimal("100"), Decimal("90.0"), Decimal("100"))
     with patch("db.indices.psycopg2.connect", return_value=mock_conn):
-        rows = write_index_weeks("postgresql://example", [W2], country=CountrySet.US)
+        rows = write_index_weeks(
+            "postgresql://example",
+            [W2],
+            country=CountrySet.US,
+            anchors={"US-IDX-ENERGY": _anchor("US-IDX-ENERGY", W2, energy_levels)},
+        ).rows
 
     by_ticker = {row.ticker: row for row in rows}
     assert list(by_ticker) == ["US-IDX", "US-IDX-ENERGY", "US-IDX-TECHNOLOGY"]
@@ -330,13 +357,13 @@ def test_write_index_weeks_uses_week_of_previous_trading_date() -> None:
     mock_conn, mock_cursor = _mock_conn(
         fetchall=[
             [("UK-IDX", date(2026, 6, 4), Decimal("100"), Decimal("95"), Decimal("90"))],
-            [(1, None, 1, D2, Decimal("1"), Decimal("1"), Decimal("0"))],
+            [(1, None, 1, D2, Decimal("0"))],
             [(1, None, 1, D2, Decimal("0"), Decimal("0"), Decimal("0"), Decimal("0"))],
         ]
     )
 
     with patch("db.indices.psycopg2.connect", return_value=mock_conn):
-        rows = write_index_weeks("postgresql://example", [W2], country=CountrySet.UK)
+        rows = write_index_weeks("postgresql://example", [W2], country=CountrySet.UK).rows
 
     assert rows[0].current_price == Decimal("100")
     assert rows[0].currency == "GBP"
@@ -349,7 +376,7 @@ def test_write_index_weeks_gap_week_uses_stored_row_ratio() -> None:
     mock_conn, mock_cursor = _mock_conn(
         fetchall=[
             [("US-IDX", D1, Decimal("100"), Decimal("95"), Decimal("90"))],
-            [(1, None, 2, date(2026, 6, 19), Decimal("1"), Decimal("1"), Decimal("0"))],
+            [(1, None, 2, date(2026, 6, 19), Decimal("0"))],
             [(1, None, 0, None, None, None, None, None)],
         ],
         fetchone=[(2, date(2026, 6, 19), Decimal("0.05"), Decimal("0"), Decimal("0"), Decimal("50"))],
@@ -362,7 +389,7 @@ def test_write_index_weeks_gap_week_uses_stored_row_ratio() -> None:
             country=CountrySet.US,
             max_growth=1.0,
             min_growth=-0.5,
-        )
+        ).rows
 
     assert call(
         GAP_WEEK_STATS_SQL[CountrySet.US],
@@ -377,8 +404,8 @@ def test_write_index_weeks_gap_week_filters_sector() -> None:
         fetchall=[
             [("SWE-IDX-ENERGY", D1, Decimal("100"), Decimal("95"), Decimal("90"))],
             [
-                (1, None, 1, D2, Decimal("1"), Decimal("1"), Decimal("0")),
-                (0, "energy", 1, D2, Decimal("1"), Decimal("1"), Decimal("0")),
+                (1, None, 1, D2, Decimal("0")),
+                (0, "energy", 1, D2, Decimal("0")),
             ],
             [],
         ],
@@ -400,15 +427,15 @@ def test_write_index_weeks_removes_week_without_contributors() -> None:
     mock_conn, mock_cursor = _mock_conn(
         fetchall=[
             [("SWE-IDX", D1, Decimal("100"), Decimal("95"), Decimal("90"))],
-            [(1, None, 0, None, None, None, None)],
+            [(1, None, 0, None, None)],
             [(1, None, 0, None, None, None, None, None)],
         ]
     )
 
     with patch("db.indices.psycopg2.connect", return_value=mock_conn):
-        rows = write_index_weeks("postgresql://example", [W2], country=CountrySet.SWE)
+        result = write_index_weeks("postgresql://example", [W2], country=CountrySet.SWE)
 
-    assert rows == []
+    assert result == IndexWriteResult(rows=[], skipped=set())
     sqls = [c.args[0] for c in mock_cursor.execute.call_args_list]
     assert INSERT_INDEX_SQL not in sqls
     assert DELETE_COUNTRY_INDICES_SQL not in sqls
@@ -417,13 +444,13 @@ def test_write_index_weeks_removes_week_without_contributors() -> None:
     )
 
 
-def test_write_index_weeks_chains_sector_missing_from_base_stats() -> None:
-    """Base-week ratio bounds drop a sector's stocks; it still chains, a new one is skipped."""
+def test_write_index_weeks_skips_index_without_row_or_anchor() -> None:
+    """A stored sector chains; a sector with neither a row nor an anchor is skipped."""
     previous = [
         ("US-IDX", D1, Decimal("100"), Decimal("95"), Decimal("90")),
         ("US-IDX-ENERGY", D1, Decimal("100"), Decimal("100"), Decimal("100")),
     ]
-    base = [(1, None, 2, D2, Decimal("1"), Decimal("1"), Decimal("50"))]
+    base = [(1, None, 2, D2, Decimal("50"))]
     chained = [
         (1, None, 3, D2, Decimal("0"), Decimal("0"), Decimal("0"), Decimal("50")),
         (0, "energy", 1, D2, Decimal("0.1"), Decimal("0"), Decimal("0"), Decimal("0")),
@@ -432,12 +459,108 @@ def test_write_index_weeks_chains_sector_missing_from_base_stats() -> None:
     mock_conn, _ = _mock_conn(fetchall=[previous, base, chained])
 
     with patch("db.indices.psycopg2.connect", return_value=mock_conn):
-        rows = write_index_weeks("postgresql://example", [W2], country=CountrySet.US)
+        result = write_index_weeks("postgresql://example", [W2], country=CountrySet.US)
 
-    assert [(r.ticker, r.current_price) for r in rows] == [
+    assert [(r.ticker, r.current_price) for r in result.rows] == [
         ("US-IDX", Decimal("100")),
         ("US-IDX-ENERGY", Decimal("110.0")),
     ]
+    assert result.skipped == {"US-IDX-UTILITIES"}
+
+
+def test_write_index_weeks_anchor_as_previous_week_and_start_week() -> None:
+    """Weeks before start_week are skipped; a bridged anchor (week before) chains."""
+    mock_conn, mock_cursor = _mock_conn(
+        fetchall=[
+            [],
+            [(1, None, 3, D2, Decimal("50"))],
+            [(1, None, 3, D2, Decimal("0.1"), Decimal("0"), Decimal("0"), Decimal("50"))],
+        ]
+    )
+
+    with patch("db.indices.psycopg2.connect", return_value=mock_conn):
+        result = write_index_weeks(
+            "postgresql://example",
+            [W1, W2],
+            country=CountrySet.US,
+            start_week=W2,
+            anchors={"US-IDX": _anchor("US-IDX", W1)},
+        )
+
+    assert [(r.trading_date, r.current_price) for r in result.rows] == [
+        (D2, Decimal("110.0"))
+    ]
+    sqls = [c.args for c in mock_cursor.execute.call_args_list]
+    assert (LOAD_PREVIOUS_INDICES_SQL, ("us", W1)) not in sqls
+
+
+def test_write_index_weeks_anchor_after_week_writes_nothing_yet() -> None:
+    mock_conn, _ = _mock_conn(
+        fetchall=[[], [(1, None, 3, D1, Decimal("50"))], [(1, None, 0, None, None, None, None, None)]]
+    )
+
+    with patch("db.indices.psycopg2.connect", return_value=mock_conn):
+        result = write_index_weeks(
+            "postgresql://example",
+            [W1],
+            country=CountrySet.US,
+            anchors={"US-IDX": _anchor("US-IDX", W2)},
+        )
+
+    assert result == IndexWriteResult(rows=[], skipped=set())
+
+
+def test_write_index_weeks_only_tickers_keeps_other_rows_and_updates_z_scores() -> None:
+    previous = [("US-IDX", D1, Decimal("100"), Decimal("95"), Decimal("90"))]
+    base = [
+        (1, None, 3, D2, Decimal("50")),
+        (0, "energy", 1, D2, Decimal("0")),
+        (0, "technology", 2, D2, Decimal("100")),
+    ]
+    chained = [(1, None, 3, D2, Decimal("0"), Decimal("0"), Decimal("0"), Decimal("50"))]
+    stored = [
+        ("US-IDX", "US Equity Index", "USD", D2, 3, Decimal("101"), Decimal("95"),
+         Decimal("90"), Decimal("50"), Decimal("95") / Decimal("90")),
+        ("US-IDX-TECHNOLOGY", "Technology", "USD", D2, 2, Decimal("105"),
+         Decimal("120"), Decimal("100"), Decimal("100"), Decimal("1.2")),
+        ("US-IDX-ENERGY", "Energy", "USD", D2, 1, Decimal("1"), Decimal("1"),
+         Decimal("1"), Decimal("0"), Decimal("1")),
+    ]
+    mock_conn, mock_cursor = _mock_conn(fetchall=[previous, base, chained, stored])
+    energy_levels = IndexLevels(Decimal("100"), Decimal("90"), Decimal("100"))
+
+    with patch("db.indices.psycopg2.connect", return_value=mock_conn):
+        result = write_index_weeks(
+            "postgresql://example",
+            [W2],
+            country=CountrySet.US,
+            anchors={"US-IDX-ENERGY": _anchor("US-IDX-ENERGY", W2, energy_levels)},
+            only_tickers={"US-IDX-ENERGY"},
+        )
+
+    assert [r.ticker for r in result.rows] == ["US-IDX-ENERGY"]
+    assert mock_cursor.execute.call_args_list[3] == call(
+        LOAD_COUNTRY_WEEK_INDICES_SQL, ("us", W2, W3)
+    )
+    inserted = {values[0]: values for values in _inserted(mock_cursor)}
+    assert set(inserted) == {"US-IDX", "US-IDX-TECHNOLOGY", "US-IDX-ENERGY"}
+    assert inserted["US-IDX"][6:9] == (Decimal("101"), Decimal("95"), Decimal("90"))
+    assert inserted["US-IDX-TECHNOLOGY"][6] == Decimal("105")
+    assert inserted["US-IDX-TECHNOLOGY"][11] == Decimal("1")
+    assert inserted["US-IDX-ENERGY"][6:9] == (Decimal("100"), Decimal("90"), Decimal("100"))
+    assert inserted["US-IDX-ENERGY"][11] == Decimal("-1")
+
+
+def test_load_index_tickers() -> None:
+    mock_conn, mock_cursor = _mock_conn(fetchall=[[("US-IDX",), ("US-IDX-ENERGY",)]])
+
+    with patch("db.indices.psycopg2.connect", return_value=mock_conn):
+        assert load_index_tickers("postgresql://example", CountrySet.US) == {
+            "US-IDX",
+            "US-IDX-ENERGY",
+        }
+
+    mock_cursor.execute.assert_called_once_with(LOAD_COUNTRY_INDEX_TICKERS_SQL, ("us",))
 
 
 def test_sector_index_definition() -> None:
@@ -523,30 +646,138 @@ def _row(trading_date: date) -> IndexRow:
     )
 
 
+SETTINGS = AnchorSettings(start_date=D1)
+
+
+def _entry(symbol: str, sector: str | None = "Energy") -> TickerEntry:
+    return TickerEntry(symbol, symbol, sector=sector)
+
+
 @pytest.fixture(autouse=True)
-def _stub_outliers():
-    with patch("compute_indices.load_outliers", return_value=[]) as mock:
-        yield mock
+def _stub_io():
+    with patch("compute_indices.load_outliers", return_value=[]) as outliers, patch(
+        "compute_indices.load_tickers_from_db", return_value=[_entry("A")]
+    ), patch("compute_indices.load_index_tickers", return_value=set()) as stored:
+        yield outliers, stored
 
 
-def test_refresh_indices_full_rebuild_uses_all_weeks() -> None:
+def _result(*tickers: str, below: set[str] | None = None) -> AnchorResult:
+    return AnchorResult(
+        anchors={ticker: _anchor(ticker, W1) for ticker in tickers},
+        below_minimum=below or set(),
+    )
+
+
+def test_initialize_indices_writes_from_start_week_with_anchors() -> None:
+    anchors = _result("US-IDX", "US-IDX-ENERGY")
     with patch(
-        "compute_indices.load_distinct_week_starts", return_value=[W1, W2]
-    ):
+        "compute_indices.load_distinct_week_starts",
+        return_value=[date(2026, 5, 25), W1, W2],
+    ), patch("compute_indices.compute_anchors", return_value=anchors) as mock_anchors:
         with patch(
-            "compute_indices.write_index_weeks", return_value=[_row(W1), _row(W2)]
+            "compute_indices.write_index_weeks",
+            return_value=IndexWriteResult([_row(D1), _row(D2)], set()),
         ) as mock_write:
-            written = refresh_indices("postgresql://example", country=CountrySet.US)
+            written, failed = initialize_indices(
+                "postgresql://example", country=CountrySet.US, settings=SETTINGS
+            )
 
-    assert written == 2
+    assert (written, failed) == (2, [])
+    mock_anchors.assert_called_once_with(
+        [_entry("A")], CountrySet.US, settings=SETTINGS, first_stored_week=W1
+    )
     mock_write.assert_called_once_with(
         "postgresql://example",
         [W1, W2],
         country=CountrySet.US,
         rebuild=True,
+        start_week=W1,
+        anchors=anchors.anchors,
         max_growth=9.0,
         min_growth=-0.999,
     )
+
+
+def test_initialize_indices_passes_oldest_stored_week_for_bridge() -> None:
+    with patch("compute_indices.load_distinct_week_starts", return_value=[W2, W3]):
+        with patch(
+            "compute_indices.compute_anchors", return_value=_result("US-IDX")
+        ) as mock_anchors, patch(
+            "compute_indices.write_index_weeks",
+            return_value=IndexWriteResult([], set()),
+        ):
+            initialize_indices(
+                "postgresql://example", country=CountrySet.US, settings=SETTINGS
+            )
+
+    assert mock_anchors.call_args.kwargs["first_stored_week"] == W2
+
+
+def test_initialize_indices_leaves_country_unchanged_when_stored_index_has_no_anchor(
+    _stub_io, caplog
+) -> None:
+    _stub_io[1].return_value = {"US-IDX", "US-IDX-ENERGY", "US-IDX-TINY"}
+    with patch("compute_indices.load_distinct_week_starts", return_value=[W1]):
+        with patch(
+            "compute_indices.compute_anchors",
+            return_value=_result("US-IDX", below={"US-IDX-TINY"}),
+        ), patch("compute_indices.write_index_weeks") as mock_write:
+            written, failed = initialize_indices(
+                "postgresql://example", country=CountrySet.US, settings=SETTINGS
+            )
+
+    assert (written, failed) == (0, [CountrySet.US])
+    mock_write.assert_not_called()
+    assert "US-IDX-ENERGY" in caplog.text and "US-IDX-TINY" not in caplog.text
+
+
+def test_initialize_indices_later_start_and_below_minimum_do_not_block() -> None:
+    later = Anchor("US-IDX-ENERGY", D2, W2, D2, BASE_LEVELS, 200)
+    result = AnchorResult(
+        anchors={"US-IDX": _anchor("US-IDX", W1), "US-IDX-ENERGY": later},
+        below_minimum={"US-IDX-TINY"},
+    )
+    with patch("compute_indices.load_index_tickers", return_value={"US-IDX", "US-IDX-TINY"}):
+        with patch("compute_indices.load_distinct_week_starts", return_value=[W1, W2]):
+            with patch("compute_indices.compute_anchors", return_value=result), patch(
+                "compute_indices.write_index_weeks",
+                return_value=IndexWriteResult([_row(D1)], set()),
+            ) as mock_write:
+                written, failed = initialize_indices(
+                    "postgresql://example", country=CountrySet.US, settings=SETTINGS
+                )
+
+    assert (written, failed) == (1, [])
+    assert mock_write.call_args.kwargs["anchors"]["US-IDX-ENERGY"].week_start == W2
+
+
+def test_initialize_indices_continues_after_failed_country() -> None:
+    def anchors(entries, country, **kwargs):
+        return AnchorResult() if country is CountrySet.US else _result("X")
+
+    with patch("compute_indices.load_distinct_week_starts", return_value=[W1]):
+        with patch("compute_indices.compute_anchors", side_effect=anchors), patch(
+            "compute_indices.write_index_weeks",
+            return_value=IndexWriteResult([_row(D1)], set()),
+        ) as mock_write:
+            written, failed = initialize_indices("postgresql://example", settings=SETTINGS)
+
+    assert failed == [CountrySet.US]
+    assert written == 2
+    assert [c.kwargs["country"] for c in mock_write.call_args_list] == [
+        CountrySet.SWE,
+        CountrySet.UK,
+    ]
+
+
+def test_initialize_indices_skips_country_without_metrics() -> None:
+    with patch("compute_indices.load_distinct_week_starts", return_value=[]):
+        with patch("compute_indices.compute_anchors") as mock_anchors:
+            assert initialize_indices(
+                "postgresql://example", country=CountrySet.UK, settings=SETTINGS
+            ) == (0, [])
+
+    mock_anchors.assert_not_called()
 
 
 def _outlier(week_start: date) -> OutlierRow:
@@ -566,94 +797,63 @@ def _outlier(week_start: date) -> OutlierRow:
     )
 
 
-def test_refresh_indices_logs_outliers_but_not_in_rebuild_base_week(
-    _stub_outliers, caplog
-) -> None:
-    _stub_outliers.return_value = [_outlier(W1), _outlier(W2)]
+def test_initialize_indices_logs_outliers(_stub_io, caplog) -> None:
+    _stub_io[0].return_value = [_outlier(W2)]
     with patch("compute_indices.load_distinct_week_starts", return_value=[W1, W2]):
-        with patch("compute_indices.write_index_weeks", return_value=[]):
+        with patch("compute_indices.compute_anchors", return_value=_result("US-IDX")), patch(
+            "compute_indices.write_index_weeks", return_value=IndexWriteResult([], set())
+        ):
             with caplog.at_level("WARNING", logger="compute_indices"):
-                refresh_indices(
-                    "postgresql://example",
-                    country=CountrySet.US,
-                    max_growth=2.0,
-                    min_growth=-0.5,
+                initialize_indices(
+                    "postgresql://example", country=CountrySet.US, settings=SETTINGS
                 )
 
-    _stub_outliers.assert_called_once_with(
-        "postgresql://example",
-        [W1, W2],
-        country=CountrySet.US,
-        max_growth=2.0,
-        min_growth=-0.5,
-    )
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
-    assert len(warnings) == 1
-    assert "WYLD" in warnings[0] and W2.isoformat() in warnings[0]
-
-
-def test_refresh_indices_recomputes_from_earliest_given_week() -> None:
-    with patch(
-        "compute_indices.load_distinct_week_starts", return_value=[W1, W2, W3]
-    ):
-        with patch(
-            "compute_indices.write_index_weeks", return_value=[_row(W2)]
-        ) as mock_write:
-            written = refresh_indices("postgresql://example", [W2])
-
-    assert written == 3
-    assert mock_write.call_args_list == [
-        call(
-            "postgresql://example",
-            [W2, W3],
-            country=c,
-            rebuild=False,
-            max_growth=9.0,
-            min_growth=-0.999,
-        )
-        for c in CountrySet
-    ]
-
-
-def test_refresh_indices_empty_weeks_is_noop() -> None:
-    with patch("compute_indices.load_distinct_week_starts", return_value=[W1]):
-        with patch("compute_indices.write_index_weeks") as mock_write:
-            assert refresh_indices("postgresql://example", []) == 0
-
-    mock_write.assert_not_called()
-
-
-def test_refresh_indices_skips_country_without_metrics() -> None:
-    with patch("compute_indices.load_distinct_week_starts", return_value=[]):
-        with patch("compute_indices.write_index_weeks") as mock_write:
-            assert refresh_indices("postgresql://example") == 0
-
-    mock_write.assert_not_called()
+    assert any("WYLD" in w and W2.isoformat() in w for w in warnings)
 
 
 def test_parser_accepts_country() -> None:
     assert build_parser().parse_args(["--country", "uk"]).country == "uk"
 
 
-def test_main_rebuilds_with_country(caplog) -> None:
-    with patch("compute_indices.get_config", return_value=_mock_config()):
-        with patch("compute_indices.refresh_indices", return_value=12) as mock_refresh:
+def test_main_initializes_with_country_and_settings_from_config(caplog) -> None:
+    config = _mock_config(index_start_date=date(2025, 10, 10), index_min_components=3)
+    with patch("compute_indices.get_config", return_value=config):
+        with patch(
+            "compute_indices.initialize_indices", return_value=(12, [])
+        ) as mock_init:
             with caplog.at_level("INFO", logger="compute_indices"):
                 assert main(["--country", "swe"]) == 0
 
-    mock_refresh.assert_called_once_with(
+    mock_init.assert_called_once_with(
         "postgresql://example",
-        None,
         country=CountrySet.SWE,
-        max_growth=9.0,
-        min_growth=-0.999,
+        settings=AnchorSettings.from_config(config),
     )
+    settings = mock_init.call_args.kwargs["settings"]
+    assert (settings.start_date, settings.min_components) == (date(2025, 10, 10), 3)
     assert "index_rows=12" in caplog.text
+
+
+def test_main_runs_all_countries_without_flag() -> None:
+    with patch("compute_indices.get_config", return_value=_mock_config()):
+        with patch("compute_indices.initialize_indices", return_value=(0, [])) as mock_init:
+            assert main([]) == 0
+
+    assert mock_init.call_args.kwargs["country"] is None
+
+
+def test_main_returns_1_when_a_country_failed() -> None:
+    with patch("compute_indices.get_config", return_value=_mock_config()):
+        with patch(
+            "compute_indices.initialize_indices", return_value=(5, [CountrySet.UK])
+        ):
+            assert main([]) == 1
 
 
 def test_main_returns_1_on_db_error() -> None:
     with patch("compute_indices.get_config", return_value=_mock_config()):
-        with patch("compute_indices.refresh_indices", side_effect=RuntimeError("down")):
+        with patch("compute_indices.initialize_indices", side_effect=RuntimeError("down")):
             assert main([]) == 1
 
 
