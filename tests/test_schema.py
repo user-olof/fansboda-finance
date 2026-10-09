@@ -157,7 +157,7 @@ def test_migrate_add_uk_tables() -> None:
     sql = (REPO_ROOT / "migrate_add_uk_tables.sql").read_text(encoding="utf-8")
     for table in ("uk_tickers", "uk_metrics", "uk_market_metrics"):
         assert f"CREATE TABLE IF NOT EXISTS {table}" in sql
-    assert "uk_market" in sql
+    assert "gb_market" in sql
     assert "%.L" in sql
     assert "exchange_name" in sql
 

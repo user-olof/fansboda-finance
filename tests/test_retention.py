@@ -357,7 +357,7 @@ def test_main_fetches_uk_ticker_and_upserts_uk_market() -> None:
                 TickerEntry(
                     symbol="VOD.L",
                     company="Vodafone",
-                    market="uk_market",
+                    market="gb_market",
                     exchange_name="LSE",
                 )
             ],
@@ -381,7 +381,7 @@ def test_main_fetches_uk_ticker_and_upserts_uk_market() -> None:
                                 with patch(
                                     "fetch_sma.load_momentum_by_market_for_week",
                                     return_value={
-                                        "uk_market": [Decimal("0.5")]
+                                        "gb_market": [Decimal("0.5")]
                                     },
                                 ):
                                     with patch(
@@ -400,5 +400,5 @@ def test_main_fetches_uk_ticker_and_upserts_uk_market() -> None:
     assert mock_insert.call_args[0][1][0].ticker == "VOD.L"
     mock_market.assert_called_once()
     market_row = mock_market.call_args[0][1]
-    assert market_row.market == "uk_market"
+    assert market_row.market == "gb_market"
     assert market_row.week_start == date(2026, 6, 1)

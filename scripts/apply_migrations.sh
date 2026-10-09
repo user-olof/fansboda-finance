@@ -97,7 +97,7 @@ run_sql "$REPO_DIR/migrate_split_us_swe_tables.sql"
 # Step 12: exchange_name on us_*/swe_* (and uk_* if already present; step 13 creates UK).
 run_sql "$REPO_DIR/migrate_add_exchange_name.sql"
 
-# Step 13: UK table set (uk_tickers / uk_metrics / uk_market_metrics); move .L / uk_market from us_*.
+# Step 13: UK table set (uk_tickers / uk_metrics / uk_market_metrics); move .L / gb_market from us_*.
 run_sql "$REPO_DIR/migrate_add_uk_tables.sql"
 
 # Step 14: momentum / z_score (drop raw_* columns).

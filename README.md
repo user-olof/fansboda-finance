@@ -88,7 +88,7 @@ previous week.
 ### Market z-score
 
 Stocks are grouped by their exchange market as reported by Yahoo Finance (for example
-`us_market`, `se_market`). For each market and week, over the $`N`$ stocks with a momentum value:
+`us_market`, `se_market`, `gb_market`). For each market and week, over the $`N`$ stocks with a momentum value:
 
 ```math
 \mu = \frac{1}{N}\sum_{j=1}^{N} m_j

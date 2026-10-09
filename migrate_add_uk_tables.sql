@@ -1,6 +1,6 @@
 -- Step 13: create UK country table set (PRD §6 / RFC-001).
 -- Idempotent CREATE IF NOT EXISTS.
--- Moves existing .L / uk_market rows from us_* into uk_* when present.
+-- Moves existing .L / gb_market rows from us_* into uk_* when present.
 
 CREATE TABLE IF NOT EXISTS uk_tickers (
     symbol         TEXT PRIMARY KEY,
@@ -65,7 +65,7 @@ BEGIN
             SELECT
                 symbol, company, sector, industry, market, exchange_name, updated_at
             FROM us_tickers
-            WHERE market = 'uk_market' OR symbol LIKE '%.L'
+            WHERE market = 'gb_market' OR symbol LIKE '%.L'
             ON CONFLICT (symbol) DO NOTHING;
         ELSE
             INSERT INTO uk_tickers (
@@ -74,7 +74,7 @@ BEGIN
             SELECT
                 symbol, company, sector, industry, market, updated_at
             FROM us_tickers
-            WHERE market = 'uk_market' OR symbol LIKE '%.L'
+            WHERE market = 'gb_market' OR symbol LIKE '%.L'
             ON CONFLICT (symbol) DO NOTHING;
         END IF;
     END IF;
@@ -101,7 +101,7 @@ BEGIN
             market, trading_date, updated_at,
             raw_mean_50, raw_mean_200, raw_std_50, raw_std_200
         FROM us_market_metrics
-        WHERE market = 'uk_market'
+        WHERE market = 'gb_market'
         ON CONFLICT (market, trading_date) DO NOTHING;
     END IF;
 
@@ -110,9 +110,9 @@ BEGIN
         WHERE ticker IN (SELECT symbol FROM uk_tickers);
 
         DELETE FROM us_market_metrics
-        WHERE market = 'uk_market';
+        WHERE market = 'gb_market';
 
         DELETE FROM us_tickers
-        WHERE market = 'uk_market' OR symbol LIKE '%.L';
+        WHERE market = 'gb_market' OR symbol LIKE '%.L';
     END IF;
 END $$;

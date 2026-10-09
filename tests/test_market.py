@@ -69,7 +69,7 @@ def test_upsert_market_stats_routes_uk_market_to_uk_table() -> None:
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
     row = MarketRow(
-        market="uk_market",
+        market="gb_market",
         week_start=date(2026, 6, 1),
         momentum_mean=Decimal("0.91"),
         momentum_std=Decimal("0.04"),

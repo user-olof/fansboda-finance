@@ -28,7 +28,7 @@ def test_upsert_tickers_routes_to_country_tables() -> None:
     rows = [
         ("AAPL", "Apple Inc.", "technology", "consumer-electronics", "us_market", "NasdaqGS", None),
         ("AAA.ST", "Alpha AB", "Industrials", "Machinery", "se_market", "STO", None),
-        ("VOD.L", "Vodafone", "communication-services", "telecom", "uk_market", "LSE", None),
+        ("VOD.L", "Vodafone", "communication-services", "telecom", "gb_market", "LSE", None),
     ]
 
     with patch("db.tickers.psycopg2.connect", return_value=mock_conn):
@@ -74,7 +74,7 @@ def test_resolve_and_upsert_symbols_resolves_market_and_upserts() -> None:
                 "Vodafone",
                 "communication-services",
                 "telecom",
-                "uk_market",
+                "gb_market",
                 "LSE",
                 None,
             ),
@@ -108,7 +108,7 @@ def test_resolve_and_upsert_symbols_resolves_market_and_upserts() -> None:
                 "Vodafone",
                 "communication-services",
                 "telecom",
-                "uk_market",
+                "gb_market",
                 "LSE",
                 None,
             ),
@@ -138,7 +138,7 @@ def test_seed_tickers_from_file_resolves_and_upserts(tmp_path) -> None:
                 "Vodafone",
                 "communication-services",
                 "telecom",
-                "uk_market",
+                "gb_market",
                 "LSE",
                 None,
             ),
@@ -172,7 +172,7 @@ def test_seed_tickers_from_file_resolves_and_upserts(tmp_path) -> None:
                 "Vodafone",
                 "communication-services",
                 "telecom",
-                "uk_market",
+                "gb_market",
                 "LSE",
                 None,
             ),
@@ -195,7 +195,7 @@ def test_seed_tickers_from_file_infers_market_on_resolve_failure(tmp_path) -> No
         [
             ("AAA.ST", None, None, None, "se_market", None, None),
             ("AAPL", None, None, None, "us_market", None, None),
-            ("VOD.L", None, None, None, "uk_market", None, None),
+            ("VOD.L", None, None, None, "gb_market", None, None),
         ],
     )
 
@@ -215,7 +215,7 @@ def test_resolve_and_upsert_symbols_filters_by_country() -> None:
             "Vodafone",
             "communication-services",
             "telecom",
-            "uk_market",
+            "gb_market",
             "LSE",
             None,
         ),
@@ -240,7 +240,7 @@ def test_resolve_and_upsert_symbols_filters_by_country() -> None:
                 "Vodafone",
                 "communication-services",
                 "telecom",
-                "uk_market",
+                "gb_market",
                 "LSE",
                 None,
             ),
@@ -292,7 +292,7 @@ def test_update_business_summaries_routes_to_country_tables() -> None:
 
     summaries = [
         (TickerEntry(symbol="AAPL", company=None, market="us_market"), "Apple."),
-        (TickerEntry(symbol="VOD.L", company=None, market="uk_market"), None),
+        (TickerEntry(symbol="VOD.L", company=None, market="gb_market"), None),
     ]
     with patch("db.tickers.psycopg2.connect", return_value=mock_conn):
         updated = update_business_summaries("postgresql://example", summaries)

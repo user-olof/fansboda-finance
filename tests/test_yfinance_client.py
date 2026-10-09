@@ -141,12 +141,12 @@ def test_resolve_watchlist_fields_infers_uk_market_for_l_suffix(caplog) -> None:
             "Vodafone Group",
             "communication-services",
             "telecom",
-            "uk_market",
+            "gb_market",
             "LSE",
             None,
         )
 
-    assert "No listing market found for VOD.L; inferring uk_market" in caplog.text
+    assert "No listing market found for VOD.L; inferring gb_market" in caplog.text
 
 
 def test_resolve_watchlist_fields_exchange_name_none_when_missing() -> None:

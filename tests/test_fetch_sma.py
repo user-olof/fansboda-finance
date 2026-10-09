@@ -31,7 +31,7 @@ def test_load_tickers_from_db() -> None:
     mock_cursor.fetchall.return_value = [
         ("AAA.ST", "Company A", "Industrials", "Machinery", "se_market", "STO"),
         ("BBB.ST", None, None, None, None, None),
-        ("VOD.L", "Vodafone", "communication-services", "telecom", "uk_market", "LSE"),
+        ("VOD.L", "Vodafone", "communication-services", "telecom", "gb_market", "LSE"),
     ]
 
     mock_conn = MagicMock()
@@ -56,7 +56,7 @@ def test_load_tickers_from_db() -> None:
             company="Vodafone",
             sector="communication-services",
             industry="telecom",
-            market="uk_market",
+            market="gb_market",
             exchange_name="LSE",
         ),
     ]
@@ -87,7 +87,7 @@ def test_load_tickers_from_db_scopes_to_country() -> None:
 
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = [
-        ("VOD.L", "Vodafone", None, None, "uk_market", "LSE"),
+        ("VOD.L", "Vodafone", None, None, "gb_market", "LSE"),
     ]
     mock_conn = MagicMock()
     mock_conn.__enter__.return_value = mock_conn
@@ -146,7 +146,7 @@ def test_load_momentum_by_market_for_week_groups_by_tickers_market() -> None:
         ("us_market", Decimal("0.5")),
         ("us_market", Decimal("0.7")),
         ("se_market", Decimal("0.6")),
-        ("uk_market", Decimal("0.8")),
+        ("gb_market", Decimal("0.8")),
         (None, Decimal("0.9")),
         ("us_market", None),
     ]
@@ -173,7 +173,7 @@ def test_load_momentum_by_market_for_week_groups_by_tickers_market() -> None:
     assert grouped == {
         "us_market": [Decimal("0.5"), Decimal("0.7")],
         "se_market": [Decimal("0.6")],
-        "uk_market": [Decimal("0.8")],
+        "gb_market": [Decimal("0.8")],
         None: [Decimal("0.9")],
     }
 
@@ -185,7 +185,7 @@ def test_upsert_market_for_weeks_upserts_per_listing_market() -> None:
         return_value={
             "us_market": [Decimal("1"), Decimal("3")],
             "se_market": [Decimal("0.6")],
-            "uk_market": [Decimal("0.8")],
+            "gb_market": [Decimal("0.8")],
         },
     ):
         with patch("fetch_sma.upsert_market_stats") as mock_upsert:
@@ -205,13 +205,13 @@ def test_upsert_market_for_weeks_upserts_per_listing_market() -> None:
     }
     us_row = rows_by_market["us_market"]
     se_row = rows_by_market["se_market"]
-    uk_row = rows_by_market["uk_market"]
+    uk_row = rows_by_market["gb_market"]
     assert us_row.week_start == week_start
     assert us_row.momentum_mean == Decimal("2")
     assert us_row.momentum_std == Decimal("1")
     assert se_row.market == "se_market"
     assert se_row.momentum_mean == Decimal("0.6")
-    assert uk_row.market == "uk_market"
+    assert uk_row.market == "gb_market"
     assert uk_row.momentum_mean == Decimal("0.8")
 
 

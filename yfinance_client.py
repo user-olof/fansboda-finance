@@ -84,7 +84,7 @@ def resolve_watchlist_fields(
     business_summary.
 
     Listing ``market`` comes from yfinance when present; otherwise it is inferred
-    from the symbol (``.ST`` → ``se_market``, ``.L`` → ``uk_market``, else
+    from the symbol (``.ST`` → ``se_market``, ``.L`` → ``gb_market``, else
     ``us_market``) for country-table routing (RFC-002). ``exchange_name`` comes
     from yfinance ``fullExchangeName``; ``business_summary`` from
     ``longBusinessSummary``.

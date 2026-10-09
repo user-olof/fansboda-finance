@@ -17,7 +17,7 @@ def country_set_for(*, market: str | None = None, symbol: str = "") -> CountrySe
     symbol_key = symbol.strip().upper()
     if market_key == "se_market" or symbol_key.endswith(".ST"):
         return CountrySet.SWE
-    if market_key == "uk_market" or symbol_key.endswith(".L"):
+    if market_key == "gb_market" or symbol_key.endswith(".L"):
         return CountrySet.UK
     return CountrySet.US
 
@@ -31,7 +31,7 @@ def infer_listing_market(*, market: str | None = None, symbol: str = "") -> str:
     if country is CountrySet.SWE:
         return "se_market"
     if country is CountrySet.UK:
-        return "uk_market"
+        return "gb_market"
     return "us_market"
 
 

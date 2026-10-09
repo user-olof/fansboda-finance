@@ -300,7 +300,7 @@ def test_upsert_market_for_weeks_scopes_to_country() -> None:
         return_value={
             "se_market": [Decimal("0.5")],
             "us_market": [Decimal("0.6")],
-            "uk_market": [Decimal("0.7")],
+            "gb_market": [Decimal("0.7")],
         },
     ):
         with patch("fetch_sma.upsert_market_stats") as mock_upsert:
@@ -503,7 +503,7 @@ def test_main_backfill_routes_uk_ticker() -> None:
                 TickerEntry(
                     symbol="VOD.L",
                     company="Vodafone",
-                    market="uk_market",
+                    market="gb_market",
                     exchange_name="LSE",
                 )
             ],
@@ -549,7 +549,7 @@ def test_upsert_market_for_weeks_includes_uk_market() -> None:
     with patch(
         "fetch_sma.load_momentum_by_market_for_week",
         return_value={
-            "uk_market": [Decimal("0.7")],
+            "gb_market": [Decimal("0.7")],
             "us_market": [Decimal("0.6")],
         },
     ):
@@ -562,14 +562,14 @@ def test_upsert_market_for_weeks_includes_uk_market() -> None:
 
     assert mock_upsert.call_count == 2
     markets = {call.args[1].market for call in mock_upsert.call_args_list}
-    assert markets == {"uk_market", "us_market"}
+    assert markets == {"gb_market", "us_market"}
 
 
 def test_upsert_market_for_weeks_scopes_to_uk_country() -> None:
     with patch(
         "fetch_sma.load_momentum_by_market_for_week",
         return_value={
-            "uk_market": [Decimal("0.7")],
+            "gb_market": [Decimal("0.7")],
             "us_market": [Decimal("0.6")],
             "se_market": [Decimal("0.5")],
         },
@@ -583,7 +583,7 @@ def test_upsert_market_for_weeks_scopes_to_uk_country() -> None:
                 )
 
     assert mock_upsert.call_count == 1
-    assert mock_upsert.call_args.args[1].market == "uk_market"
+    assert mock_upsert.call_args.args[1].market == "gb_market"
     mock_z.assert_called_once_with(
         "postgresql://example", date(2025, 6, 6), country=CountrySet.UK
     )
