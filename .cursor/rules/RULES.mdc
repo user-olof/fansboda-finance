@@ -109,7 +109,7 @@ Scripts read from the config object — not scattered `os.getenv` calls. Key tun
 
 ## Local / git-ignored files
 
-Do not commit: `.env`, `.venv/`, `tickers.txt`, `all-tickers.txt`, `small-tickers.txt`, `README.md` (local notes). Use a local ticker file path via `TICKERS_FILE` or pass a path to `seed_tickers.py`.
+Do not commit: `.env`, `.venv/`, `tickers.txt`, `all-tickers.txt`, `small-tickers.txt`. Use a local ticker file path via `TICKERS_FILE` or pass a path to `seed_tickers.py`.
 
 ## When implementing changes
 
@@ -118,3 +118,4 @@ Do not commit: `.env`, `.venv/`, `tickers.txt`, `all-tickers.txt`, `small-ticker
 3. Do not commit `.env` or secrets.
 4. Commit `schema.sql`, `migrate_*.sql`, `Pipfile`, and `Pipfile.lock` together when deps or DDL change.
 5. Out-of-scope items: ask before building; record agreed future work in a Spec Kit spec, not in `project-docs/`.
+6. A change to a published formula, window, threshold, default, or index name also updates `README.md` (specs/004-repo-readme).
