@@ -167,7 +167,9 @@ def with_sector_z_scores(rows: list[IndexRow]) -> list[IndexRow]:
 
     ``(momentum − mean) / std`` over the sector rows with momentum, using the
     population std (like the stock-level ``z_score``). NULL with fewer than two
-    such sectors or zero std; market rows (``sector_key is None``) stay NULL.
+    such sectors or zero std. Market rows (``sector_key is None``) get 0 — the
+    market is the reference its sectors are compared with — and never enter the
+    mean or std (specs/005-market-index-zero-z).
     """
     momenta = [
         row.momentum
@@ -181,7 +183,9 @@ def with_sector_z_scores(rows: list[IndexRow]) -> list[IndexRow]:
     result: list[IndexRow] = []
     for row in rows:
         z_score = None
-        if row.sector_key is not None and row.momentum is not None and std:
+        if row.sector_key is None:
+            z_score = Decimal(0)
+        elif row.momentum is not None and std:
             z_score = (row.momentum - mean) / std
         result.append(replace(row, z_score=z_score))
     return result

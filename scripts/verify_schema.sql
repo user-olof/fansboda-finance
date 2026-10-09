@@ -150,3 +150,11 @@ JOIN (
 WHERE i.sector IS DISTINCT FROM v.label
 GROUP BY i.ticker, i.sector;
 -- expect 0 rows
+
+-- step 24: market index rows have z_score 0 (spec 005)
+SELECT ticker, z_score, count(*) AS rows
+FROM indices
+WHERE ticker IN ('US-IDX', 'SWE-IDX', 'UK-IDX')
+  AND z_score IS DISTINCT FROM 0
+GROUP BY ticker, z_score;
+-- expect 0 rows

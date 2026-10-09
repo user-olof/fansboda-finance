@@ -215,7 +215,7 @@ def test_write_index_weeks_writes_series_levels_with_stats() -> None:
             Decimal("90"),
             Decimal("66.7"),
             Decimal("95") / Decimal("90"),
-            None,
+            Decimal("0"),
         ),
     )
     assert executed[4] == call(BASE_WEEK_STATS_SQL[CountrySet.US], (W2,))
@@ -253,7 +253,7 @@ def test_write_index_weeks_sector_rows_with_z_scores() -> None:
         "NYSE & Nasdaq",
         None,
         "USD",
-        None,
+        Decimal("0"),
     )
     energy = by_ticker["US-IDX-ENERGY"]
     assert (energy.sector, energy.sector_key, energy.ticker_count) == ("Energy", "energy", 1)
@@ -399,7 +399,7 @@ def test_with_sector_z_scores_uses_population_std_over_sectors() -> None:
     )
     std = (Decimal(2) / Decimal(3)).sqrt()
     assert [r.z_score for r in rows] == [
-        None,
+        Decimal("0"),
         Decimal("-1") / std,
         Decimal("0"),
         Decimal("1") / std,
@@ -417,6 +417,14 @@ def test_with_sector_z_scores_uses_population_std_over_sectors() -> None:
 def test_with_sector_z_scores_null_without_spread(momenta: list[Decimal]) -> None:
     rows = with_sector_z_scores([_sector_row(f"s{i}", m) for i, m in enumerate(momenta)])
     assert all(row.z_score is None for row in rows)
+
+
+def test_with_sector_z_scores_market_zero_without_momentum() -> None:
+    market, sector = with_sector_z_scores(
+        [_sector_row(None, None), _sector_row("a", Decimal("1"))]
+    )
+    assert market.z_score == Decimal("0")
+    assert sector.z_score is None
 
 
 def test_purge_stale_indices_uses_retention_cutoff() -> None:

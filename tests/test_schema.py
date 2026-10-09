@@ -29,6 +29,7 @@ MIGRATIONS = [
     REPO_ROOT / "migrate_indices_sectors.sql",
     REPO_ROOT / "migrate_drop_by_sector_tables.sql",
     REPO_ROOT / "migrate_rename_market_indices.sql",
+    REPO_ROOT / "migrate_market_index_zero_z.sql",
 ]
 APPLY_MIGRATIONS_SH = REPO_ROOT / "scripts" / "apply_migrations.sh"
 COUNTRY_TABLES = (
@@ -574,4 +575,34 @@ def test_apply_migrations_runs_step_23_after_step_22_in_both_paths() -> None:
     for find in (skip_block.index, script.rindex):
         assert find("migrate_drop_by_sector_tables.sql") < find(
             "migrate_rename_market_indices.sql"
+        )
+
+
+STEP_24_SQL = REPO_ROOT / "migrate_market_index_zero_z.sql"
+
+
+def test_step_24_zeroes_only_market_index_z_scores() -> None:
+    sql = _sql_statements(STEP_24_SQL)
+    for keyword in ("CREATE", "ALTER", "DROP", "TRUNCATE", "DELETE", "LIKE"):
+        assert keyword not in sql.upper()
+    assert "UPDATE indices" in sql
+    assert "SET z_score = 0" in sql
+    assert "ticker IN ('US-IDX', 'SWE-IDX', 'UK-IDX')" in sql
+    assert "z_score IS DISTINCT FROM 0" in sql
+
+
+def test_step_24_tickers_match_index_definitions() -> None:
+    from equity_index import INDEX_DEFINITIONS
+
+    sql = _sql_statements(STEP_24_SQL)
+    for definition in INDEX_DEFINITIONS.values():
+        assert f"'{definition.ticker}'" in sql
+
+
+def test_apply_migrations_runs_step_24_after_step_23_in_both_paths() -> None:
+    script = APPLY_MIGRATIONS_SH.read_text(encoding="utf-8")
+    skip_block = script.split('"$has_raw_ratios" == "no"', 1)[1].split("fi\n", 1)[0]
+    for find in (skip_block.index, script.rindex):
+        assert find("migrate_rename_market_indices.sql") < find(
+            "migrate_market_index_zero_z.sql"
         )

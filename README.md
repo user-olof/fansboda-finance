@@ -213,7 +213,8 @@ z_s = \frac{m_s - \bar m}{\sigma_S}
 ```
 
 A sector's z-score compares its momentum with the country's other sectors that week, using the
-population standard deviation as for stocks. Market index rows have no z-score.
+population standard deviation as for stocks. Market index rows have z-score 0 by convention: the
+market is the reference its sectors are compared with.
 
 ### When a value is empty
 
@@ -225,7 +226,7 @@ population standard deviation as for stocks. Market index rows have no z-score.
 | Stock `z_score` | momentum is missing, or the market's $`\sigma`$ is 0 (e.g. a market with one stock) |
 | Index row | no member has a positive price and both SMAs that week |
 | Index `momentum` | index SMA-200 is 0 |
-| Index `z_score` | always on market rows; on sector rows with fewer than 2 sectors or $`\sigma_S = 0`$ |
+| Index `z_score` | on sector rows with fewer than 2 sectors or $`\sigma_S = 0`$ (market rows are always 0) |
 
 ### Worked examples
 

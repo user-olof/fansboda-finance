@@ -5,7 +5,7 @@
 -- trading_date is the actual bar date within that week.
 -- indices holds the equal-weighted market index and one index per sector for
 -- each country set per week, shaped like *_metrics: price / SMA-50 / SMA-200
--- levels, momentum, pct_uptrend, and (sector rows) z_score. sector is the
+-- levels, momentum, pct_uptrend, and z_score (sector rows; 0 on market rows). sector is the
 -- index label: the index name on market rows ("NYSE & Nasdaq"), the sector
 -- name alone on sector rows ("Technology", unique per country).
 
