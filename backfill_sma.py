@@ -13,7 +13,11 @@ import pandas as pd
 
 from config import get_config
 from db.country import CountrySet
-from db.metrics import insert_metrics, load_existing_metric_keys
+from db.metrics import (
+    fill_missing_growth,
+    insert_metrics,
+    load_existing_metric_keys,
+)
 from db.tickers import load_tickers_from_db
 from fetch_sma import (
     SMA_200_WINDOW,
@@ -21,10 +25,11 @@ from fetch_sma import (
     chunked,
     compute_momentum,
     compute_smas,
+    compute_weekly_growth,
     trading_date_from_index,
     upsert_market_for_weeks,
 )
-from models import MetricRow, week_start_of
+from models import MetricRow, TickerEntry, week_start_of
 from yfinance_client import download_batch, load_currency_for_tickers
 
 logging.basicConfig(
@@ -69,6 +74,9 @@ def metric_rows_from_weekly_samples(
             continue
 
         sma_50, sma_200 = compute_smas(window_close)
+        price_growth, sma_50_growth, sma_200_growth = compute_weekly_growth(
+            close, pos
+        )
         rows.append(
             MetricRow(
                 ticker=ticker,
@@ -80,6 +88,9 @@ def metric_rows_from_weekly_samples(
                 currency=currency,
                 momentum=compute_momentum(sma_50, sma_200),
                 z_score=None,
+                price_growth=price_growth,
+                sma_50_growth=sma_50_growth,
+                sma_200_growth=sma_200_growth,
             )
         )
 
@@ -143,6 +154,33 @@ def filter_new_rows(
     ]
 
 
+def filter_existing_rows(
+    rows: list[MetricRow], existing: set[tuple[str, object]]
+) -> list[MetricRow]:
+    """Rows whose (ticker, trading_date) is already stored (FR-16 growth fill)."""
+    return [row for row in rows if (row.ticker, row.trading_date) in existing]
+
+
+def filter_by_exchange(
+    entries: list[TickerEntry],
+    exchanges: list[str] | None,
+) -> list[TickerEntry]:
+    """Keep tickers whose ``exchange_name`` matches one of ``exchanges``.
+
+    Matching is exact but case-insensitive. Returns all entries when
+    ``exchanges`` is empty or None.
+    """
+    if not exchanges:
+        return entries
+    wanted = {exchange.strip().casefold() for exchange in exchanges}
+    return [
+        entry
+        for entry in entries
+        if entry.exchange_name is not None
+        and entry.exchange_name.casefold() in wanted
+    ]
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -155,6 +193,16 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[c.value for c in CountrySet],
         required=True,
         help="Country set to backfill (us, swe, or uk)",
+    )
+    parser.add_argument(
+        "--exchange",
+        action="append",
+        metavar="NAME",
+        help=(
+            "Only backfill tickers whose exchange_name matches NAME "
+            "(case-insensitive, e.g. NasdaqGS, NYSE, Stockholm, LSE); "
+            "repeat to include several exchanges"
+        ),
     )
     return parser
 
@@ -187,6 +235,22 @@ def main(argv: list[str] | None = None) -> int:
         logger.exception("Failed to load tickers from database")
         return 1
 
+    if args.exchange:
+        selected = filter_by_exchange(watchlist, args.exchange)
+        if not selected:
+            available = sorted(
+                {entry.exchange_name for entry in watchlist if entry.exchange_name}
+            )
+            logger.error(
+                "No %s tickers on exchange(s) %s; available: %s",
+                country.value,
+                ", ".join(args.exchange),
+                ", ".join(available) or "none",
+            )
+            return 1
+        watchlist = selected
+
+    exchange_scope = ",".join(args.exchange) if args.exchange else "all"
     all_tickers = [entry.symbol for entry in watchlist]
     companies = {entry.symbol: entry.company for entry in watchlist}
     start = datetime.now(timezone.utc).date() - timedelta(days=history_days)
@@ -195,13 +259,15 @@ def main(argv: list[str] | None = None) -> int:
     total_generated = 0
     total_inserted = 0
     total_skipped_existing = 0
+    total_growth_filled = 0
     failed_batches = 0
     week_starts: set[date] = set()
 
     logger.info(
-        "Backfill starting: country=%s tickers=%d batches=%d "
+        "Backfill starting: country=%s exchange=%s tickers=%d batches=%d "
         "history_days=%d",
         country.value,
+        exchange_scope,
         len(all_tickers),
         len(batches),
         history_days,
@@ -236,21 +302,29 @@ def main(argv: list[str] | None = None) -> int:
             )
             new_rows = filter_new_rows(batch_rows, existing)
             inserted = insert_metrics(database_url, new_rows)
+            growth_filled = fill_missing_growth(
+                database_url,
+                filter_existing_rows(batch_rows, existing),
+                country=country,
+            )
             for row in batch_rows:
                 week_starts.add(row.week_start)
 
             total_generated += len(batch_rows)
             total_inserted += inserted
             total_skipped_existing += len(batch_rows) - len(new_rows)
+            total_growth_filled += growth_filled
 
             logger.info(
-                "Batch %d/%d: generated=%d new=%d inserted=%d skipped_existing=%d",
+                "Batch %d/%d: generated=%d new=%d inserted=%d skipped_existing=%d "
+                "growth_filled=%d",
                 i + 1,
                 len(batches),
                 len(batch_rows),
                 len(new_rows),
                 inserted,
                 len(batch_rows) - len(new_rows),
+                growth_filled,
             )
         except Exception:
             failed_batches += 1
@@ -280,12 +354,13 @@ def main(argv: list[str] | None = None) -> int:
 
     logger.info(
         "Backfill summary: country=%s tickers=%d generated=%d inserted=%d "
-        "skipped_existing=%d market_weeks=%d failed_batches=%d",
+        "skipped_existing=%d growth_filled=%d market_weeks=%d failed_batches=%d",
         country.value,
         len(all_tickers),
         total_generated,
         total_inserted,
         total_skipped_existing,
+        total_growth_filled,
         len(week_starts),
         failed_batches,
     )

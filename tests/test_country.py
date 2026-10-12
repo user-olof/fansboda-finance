@@ -19,7 +19,7 @@ def test_country_set_for_st_suffix() -> None:
 
 
 def test_country_set_for_uk_market() -> None:
-    assert country_set_for(market="uk_market", symbol="AAPL") is CountrySet.UK
+    assert country_set_for(market="gb_market", symbol="AAPL") is CountrySet.UK
 
 
 def test_country_set_for_l_suffix() -> None:
@@ -35,12 +35,12 @@ def test_country_set_for_us_default() -> None:
 def test_infer_listing_market_keeps_explicit_market() -> None:
     assert infer_listing_market(market="us_market", symbol="FOO.ST") == "us_market"
     assert infer_listing_market(market="se_market", symbol="AAPL") == "se_market"
-    assert infer_listing_market(market="uk_market", symbol="AAPL") == "uk_market"
+    assert infer_listing_market(market="gb_market", symbol="AAPL") == "gb_market"
 
 
 def test_infer_listing_market_from_symbol() -> None:
     assert infer_listing_market(symbol="VOLV-B.ST") == "se_market"
-    assert infer_listing_market(symbol="VOD.L") == "uk_market"
+    assert infer_listing_market(symbol="VOD.L") == "gb_market"
     assert infer_listing_market(symbol="AAPL") == "us_market"
 
 

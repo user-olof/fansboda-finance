@@ -10,7 +10,7 @@
 
 ## Summary
 
-GitHub Actions: run `pytest` on push/PR to `main`; deploy to Production VM on push to `main`. Branch protection requires tests to pass. Dev backfill (PRD §8.1) is [RFC-011](./RFC-011-dev-backfill-ci.md), not this RFC.
+GitHub Actions: run `pytest` on push/PR to `main`; deploy to Production VM only after the test workflow succeeds for a push to `main`. Branch protection requires tests to pass. Dev backfill (PRD §8.1) is [RFC-011](./RFC-011-dev-backfill-ci.md), not this RFC.
 
 Deploy ships a **tarball** from the runner checkout (not `git pull` on the VM), installs deps with Pipenv, and writes `.env`. SSH/SCP use IAP (RFC-009).
 
@@ -19,7 +19,7 @@ Deploy ships a **tarball** from the runner checkout (not `git pull` on the VM), 
 ## Requirements
 
 - **Test workflow:** `pytest` on push/PR to `main`
-- **Deploy workflow:** copy code to VM, ensure `pipenv`, `pipenv install --deploy`, write `.env`
+- **Deploy workflow:** triggered by `workflow_run` of Test; runs only when that run succeeded for a push to `main`, checking out its `head_sha`; copy code to VM, ensure `pipenv`, `pipenv install --deploy`, write `.env`
 - Deploy uses GitHub `PROD` environment
 - No credentials in repo
 - Deploy auth via WIF (RFC-009) — no `GCP_SA_KEY`
@@ -32,7 +32,7 @@ Deploy ships a **tarball** from the runner checkout (not `git pull` on the VM), 
 | Workflow | File | Trigger | Action |
 |----------|------|---------|--------|
 | Test | `.github/workflows/test.yml` | Push / PR to `main` | Python 3.11, `pipenv install --dev`, `pytest` |
-| Deploy | `.github/workflows/deploy.yml` | Push to `main` | WIF auth, IAP SCP/SSH, tarball unpack, deps, write `.env` |
+| Deploy | `.github/workflows/deploy.yml` | Test succeeded on push to `main` (`workflow_run`) | WIF auth, IAP SCP/SSH, tarball unpack, deps, write `.env` |
 
 ### Deploy steps
 
@@ -40,7 +40,7 @@ Deploy ships a **tarball** from the runner checkout (not `git pull` on the VM), 
 2. Package repo checkout as `fansboda-finance.tgz` (exclude `.git` / `.venv`)
 3. `gcloud compute scp --tunnel-through-iap` tarball to the VM
 4. `gcloud compute ssh --tunnel-through-iap` — unpack to `/opt/fansboda-finance`, ensure `fansboda` user + `pipenv`, run `PIPENV_VENV_IN_PROJECT=1 pipenv install --deploy` as `fansboda`
-5. Write `.env` with `DATABASE_URL` and `APP_ENV=dev` (temporary VM validation; cut over to `APP_ENV=production` later) via SCP + `install -o fansboda -g fansboda -m 600`
+5. Write `.env` with `DATABASE_URL` and `APP_ENV=dev` (temporary VM validation; cut over to `APP_ENV=production` later) via SCP + `install -o fansboda -g fansboda -m 600`. When the `ALERT_EMAIL_FROM` / `ALERT_EMAIL_TO` secrets are both set, also `ALERT_EMAIL_ENABLED=true` plus both addresses (RFC-017)
 
 Schema upgrades (including country-table steps 11–13) are applied manually per [MIGRATIONS.md](../MIGRATIONS.md) — not in this workflow.
 
@@ -54,6 +54,7 @@ Schema upgrades (including country-table steps 11–13) are applied manually per
 | `DATABASE_URL` | Neon production connection string |
 | `GCP_WORKLOAD_IDENTITY_PROVIDER` | WIF provider resource name |
 | `GCP_DEPLOY_SERVICE_ACCOUNT` | Deploy SA email |
+| `ALERT_EMAIL_FROM` / `ALERT_EMAIL_TO` | Optional (RFC-017) — outlier email sender / recipient (`production` environment) |
 
 ### Branch protection
 
@@ -79,7 +80,7 @@ CHECK_CONTEXT="Test / test" ./scripts/configure-branch-protection.sh
 ## Acceptance criteria
 
 - [x] `pytest` runs on push/PR to `main`
-- [x] Deploy runs on push to `main`
+- [x] Deploy runs if and only if Test succeeds for a push to `main`
 - [x] Deploy copies code via tarball (no `git pull` on VM)
 - [x] Deploy ensures `pipenv` when missing, then `pipenv install --deploy`
 - [x] Deploy writes `.env` with `fansboda:fansboda` ownership, mode 600

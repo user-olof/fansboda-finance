@@ -3,7 +3,12 @@
 
 Loads us_tickers + swe_tickers + uk_tickers, skips fresh symbols per country
 metrics table, batch-downloads OHLCV, appends SMA snapshots, upserts
-us_/swe_/uk_market_metrics, and purges stale history.
+us_/swe_/uk_market_metrics, purges stale history, and writes the weeks it
+wrote for the stored indices from each index's daily series, built from the
+same download and pinned at its latest stored row; a new sector index is
+started from its own daily history (specs/001-index-initial-sma,
+specs/002-index-true-sma). Index initialization is the one-off
+``compute_indices.py``.
 """
 
 from __future__ import annotations
@@ -12,23 +17,43 @@ import logging
 import statistics
 import sys
 import time
+from collections import defaultdict
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pandas as pd
 
-from config import get_config
+from config import BaseConfig, get_config
 from db.country import CountrySet, country_set_for
+from db.indices import load_index_tickers, load_previous_indices, write_index_weeks
 from db.market import upsert_market_stats
 from db.metrics import (
     filter_stale_tickers,
     insert_metrics,
+    load_distinct_week_starts,
     load_momentum_by_market_for_week,
     update_z_scores_for_week,
 )
+from db.outliers import load_outliers
 from db.retention import purge_stale_data
 from db.tickers import load_tickers_from_db
-from models import MarketRow, MetricRow
+from equity_index import IndexRow, WeekLevels
+from gmail_client import send_email
+from index_anchor import (
+    AnchorSettings,
+    DailyAccumulator,
+    closes_from_download,
+    compute_index_series,
+    daily_levels,
+    fold_close,
+    index_tickers_for,
+    missing_sector_indices,
+    series_week_levels,
+    week_levels,
+)
+from models import MarketRow, MetricRow, OutlierRow, TickerEntry, week_start_of
+from outlier_email import build_outlier_email
 from yfinance_client import download_batch, load_currency_for_tickers
 
 logging.basicConfig(
@@ -37,7 +62,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-HISTORY_DAYS = 300
+# Covers SMA-200 and the index daily series' 250 trading days (≈275 trading days).
+HISTORY_DAYS = 400
 SMA_50_WINDOW = 50
 SMA_200_WINDOW = 200
 
@@ -73,6 +99,48 @@ def trading_date_from_index(index: pd.DatetimeIndex) -> date:
     if hasattr(ts, "date"):
         return ts.date()
     return pd.Timestamp(ts).date()
+
+
+def previous_week_bar_position(index: pd.DatetimeIndex, pos: int) -> int | None:
+    """Position of the last bar in the calendar week before the bar at ``pos``."""
+    previous_week = week_start_of(pd.Timestamp(index[pos]).date()) - timedelta(days=7)
+    for candidate in range(pos - 1, -1, -1):
+        week = week_start_of(pd.Timestamp(index[candidate]).date())
+        if week == previous_week:
+            return candidate
+        if week < previous_week:
+            return None
+    return None
+
+
+def _growth(current: object, previous: object) -> Decimal | None:
+    if current is None or previous is None:
+        return None
+    previous_value = float(previous)
+    current_value = float(current)
+    if previous_value == 0 or pd.isna(previous_value) or pd.isna(current_value):
+        return None
+    return _to_decimal(current_value / previous_value - 1)
+
+
+def compute_weekly_growth(
+    close: pd.Series, pos: int
+) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
+    """Growth of close, SMA-50 and SMA-200 vs the previous calendar week (FR-5a).
+
+    Both ends come from the same (consistently adjusted) ``close`` series, each
+    SMA using only closes up to its own bar.
+    """
+    previous_pos = previous_week_bar_position(close.index, pos)
+    if previous_pos is None:
+        return None, None, None
+    sma_50, sma_200 = compute_smas(close.iloc[: pos + 1])
+    prev_sma_50, prev_sma_200 = compute_smas(close.iloc[: previous_pos + 1])
+    return (
+        _growth(close.iloc[pos], close.iloc[previous_pos]),
+        _growth(sma_50, prev_sma_50),
+        _growth(sma_200, prev_sma_200),
+    )
 
 
 def compute_momentum(
@@ -158,6 +226,9 @@ def metric_row_from_history(
     trading_date = trading_date_from_index(history.index)
     current_price = _to_decimal(close.iloc[-1])
     momentum = compute_momentum(sma_50, sma_200)
+    price_growth, sma_50_growth, sma_200_growth = compute_weekly_growth(
+        close, len(close) - 1
+    )
 
     return MetricRow(
         ticker=ticker,
@@ -169,6 +240,9 @@ def metric_row_from_history(
         currency=currency,
         momentum=momentum,
         z_score=None,
+        price_growth=price_growth,
+        sma_50_growth=sma_50_growth,
+        sma_200_growth=sma_200_growth,
     )
 
 
@@ -271,18 +345,374 @@ def upsert_market_for_weeks(
         update_z_scores_for_week(database_url, week_start, country=country)
 
 
-def _run_retention_purge(database_url: str, retention_days: int) -> tuple[int, int]:
-    metrics_purged, market_metrics_purged = purge_stale_data(
+def _run_retention_purge(
+    database_url: str, retention_days: int
+) -> tuple[int, int, int]:
+    metrics_purged, market_metrics_purged, indices_purged = purge_stale_data(
         database_url, retention_days
     )
     logger.info(
-        "Retention purge: deleted %d us_/swe_/uk_ metrics and %d us_/swe_/uk_ "
-        "market_metrics row(s) older than %d days",
+        "Retention purge: deleted %d us_/swe_/uk_ metrics, %d us_/swe_/uk_ "
+        "market_metrics, and %d indices row(s) older than %d days",
         metrics_purged,
         market_metrics_purged,
+        indices_purged,
         retention_days,
     )
-    return metrics_purged, market_metrics_purged
+    return metrics_purged, market_metrics_purged, indices_purged
+
+
+def log_excluded_outliers(
+    log: logging.Logger, country: CountrySet, outliers: list[OutlierRow]
+) -> None:
+    """Log each weekly outlier stock-week (FR-37b); indices drop outliers per day."""
+    for outlier in outliers:
+        log.warning(
+            "Weekly outlier in %s: %s trading_date=%s "
+            "price_growth=%s sma_50_growth=%s sma_200_growth=%s (%s)",
+            country.value,
+            outlier.ticker,
+            outlier.trading_date.isoformat(),
+            outlier.price_growth,
+            outlier.sma_50_growth,
+            outlier.sma_200_growth,
+            outlier.bound,
+        )
+    if outliers:
+        log.info(
+            "Indices %s: %d weekly outlier stock-week(s)",
+            country.value,
+            len(outliers),
+        )
+
+
+def log_market_rows(log: logging.Logger, rows: list[IndexRow]) -> None:
+    for row in rows:
+        if row.sector_key is not None:
+            continue
+        log.info(
+            "Index %s trading_date=%s ticker_count=%d current_price=%.4f "
+            "sma_50=%.4f sma_200=%.4f momentum=%s pct_uptrend=%s",
+            row.ticker,
+            row.trading_date.isoformat(),
+            row.ticker_count,
+            row.current_price,
+            row.sma_50,
+            row.sma_200,
+            "n/a" if row.momentum is None else f"{row.momentum:.6f}",
+            "n/a" if row.pct_uptrend is None else f"{row.pct_uptrend:.1f}",
+        )
+
+
+@dataclass
+class IndexHistory:
+    """This run's daily returns folded per index (specs/002-index-true-sma)."""
+
+    accumulator: DailyAccumulator = field(default_factory=DailyAccumulator)
+    folded: set[str] = field(default_factory=set)
+    dropped: dict[CountrySet, int] = field(default_factory=lambda: defaultdict(int))
+
+
+def fold_index_history(
+    history: IndexHistory,
+    data: pd.DataFrame,
+    batch: list[str],
+    entries: dict[str, TickerEntry],
+    *,
+    max_growth: float,
+    min_growth: float,
+) -> None:
+    """Add each downloaded stock's daily returns to its market and sector index."""
+    for symbol, close in closes_from_download(data, batch).items():
+        entry = entries.get(symbol)
+        if entry is None:
+            continue
+        country = country_set_for(market=entry.market, symbol=symbol)
+        history.dropped[country] += fold_close(
+            history.accumulator,
+            index_tickers_for(entry, country),
+            close,
+            max_growth=max_growth,
+            min_growth=min_growth,
+        )
+        history.folded.add(symbol)
+
+
+def _fold_missing_members(
+    config: BaseConfig,
+    watchlist: list[TickerEntry],
+    history: IndexHistory,
+    start: date,
+) -> None:
+    """Download members this run did not (skipped as fresh, failed batch) for the
+    index series (research R2)."""
+    entries = {entry.symbol: entry for entry in watchlist}
+    missing = [symbol for symbol in entries if symbol not in history.folded]
+    if not missing:
+        return
+    logger.info(
+        "Index history: downloading %d member(s) not in this run", len(missing)
+    )
+    batches = chunked(missing, config.yf_batch_size)
+    for i, batch in enumerate(batches):
+        try:
+            data = download_batch(
+                batch,
+                start,
+                max_retries=config.yf_max_retries,
+                retry_base_seconds=config.yf_retry_base_seconds,
+            )
+            fold_index_history(
+                history,
+                data,
+                batch,
+                entries,
+                max_growth=config.outlier_max_growth,
+                min_growth=config.outlier_min_growth,
+            )
+        except Exception:
+            logger.exception(
+                "Failed index history batch %d/%d (%d tickers)",
+                i + 1,
+                len(batches),
+                len(batch),
+            )
+        if i < len(batches) - 1:
+            time.sleep(config.yf_batch_delay_seconds)
+
+
+def _start_new_sectors(
+    config: BaseConfig,
+    settings: AnchorSettings,
+    country: CountrySet,
+    stored_index_tickers: set[str],
+    stored_weeks: list[date],
+) -> int:
+    """Create sector indices without stored rows (FR-016, research R12)."""
+    entries = load_tickers_from_db(config.database_url, country=country)
+    missing = missing_sector_indices(
+        entries,
+        stored_index_tickers,
+        country,
+        min_components=settings.min_components,
+    )
+    if not missing:
+        return 0
+    members = list(
+        {entry.symbol: entry for stocks in missing.values() for entry in stocks}.values()
+    )
+    logger.info(
+        "New sector index(es) %s: downloading daily history for %d stock(s)",
+        ", ".join(missing),
+        len(members),
+    )
+    result = compute_index_series(
+        members, country, settings=settings, index_tickers=set(missing)
+    )
+    for ticker in missing:
+        if ticker not in result.series:
+            logger.warning(
+                "New sector index %s not started (fewer than %d listed stocks or "
+                "no data); the next weekly run tries again",
+                ticker,
+                settings.min_components,
+            )
+    if not result.series:
+        return 0
+    levels = series_week_levels(result.series.values(), stored_weeks)
+    written = write_index_weeks(
+        config.database_url,
+        levels,
+        country=country,
+        only_tickers=set(result.series),
+    )
+    for index in result.series.values():
+        start = levels.get(week_start_of(index.start_date), {}).get(index.ticker)
+        logger.info(
+            "New sector index %s: start_date=%s sma_50=%s sma_200=%s days_used=%s",
+            index.ticker,
+            index.start_date.isoformat(),
+            start.levels.sma_50 if start else "n/a",
+            start.levels.sma_200 if start else "n/a",
+            start.days_used if start else "n/a",
+        )
+    return len(written.rows)
+
+
+def _country_week_levels(
+    database_url: str,
+    country: CountrySet,
+    weeks: list[date],
+    accumulator: DailyAccumulator,
+) -> dict[date, dict[str, WeekLevels]]:
+    """Each stored index's levels for ``weeks`` from its daily series pinned at
+    its latest stored row before the first week (FR-001–FR-003, research R4)."""
+    pins = load_previous_indices(database_url, country, min(weeks))
+    result: dict[date, dict[str, WeekLevels]] = defaultdict(dict)
+    for ticker, (pin_date, pin_price) in sorted(pins.items()):
+        averages = accumulator.averages(ticker)
+        if not averages or pin_date < min(averages):
+            logger.error(
+                "Index %s: latest stored row %s is older than the downloaded daily "
+                "history; run compute_indices.py --country %s",
+                ticker,
+                pin_date.isoformat(),
+                country.value,
+            )
+            continue
+        levels = daily_levels(averages, pin_date, float(pin_price))
+        for week in weeks:
+            row = week_levels(levels, week)
+            if row is None or row.trading_date <= pin_date:
+                logger.warning(
+                    "Index %s: no daily data in week %s; no row written",
+                    ticker,
+                    week.isoformat(),
+                )
+                continue
+            result[week][ticker] = row
+    return dict(result)
+
+
+def _run_index_update(
+    config: BaseConfig, week_starts: set[date], history: IndexHistory
+) -> None:
+    """Write the weeks written for the stored indices from their daily series
+    (FR-001–FR-003) and start new sector indices (FR-016). Countries without
+    indices are left to the one-off ``compute_indices.py``."""
+    settings = AnchorSettings.from_config(config)
+    start_week = week_start_of(settings.start_date)
+    weeks = sorted(week for week in week_starts if week >= start_week)
+    written = 0
+    for country in CountrySet:
+        stored_index_tickers = load_index_tickers(config.database_url, country)
+        if not stored_index_tickers:
+            logger.warning(
+                "country %s has no indices; run compute_indices.py --country %s",
+                country.value,
+                country.value,
+            )
+            continue
+        if weeks:
+            levels = _country_week_levels(
+                config.database_url, country, weeks, history.accumulator
+            )
+            tickers = {ticker for rows in levels.values() for ticker in rows}
+            if tickers:
+                result = write_index_weeks(
+                    config.database_url, levels, country=country, only_tickers=tickers
+                )
+                log_market_rows(logger, result.rows)
+                written += len(result.rows)
+            logger.info(
+                "Indices %s: %d daily return(s) dropped as outliers",
+                country.value,
+                history.dropped.get(country, 0),
+            )
+            log_excluded_outliers(
+                logger,
+                country,
+                load_outliers(
+                    config.database_url,
+                    weeks,
+                    country=country,
+                    max_growth=config.outlier_max_growth,
+                    min_growth=config.outlier_min_growth,
+                ),
+            )
+        try:
+            stored_weeks = [
+                week
+                for week in load_distinct_week_starts(config.database_url, country=country)
+                if week >= start_week
+            ]
+            written += _start_new_sectors(
+                config, settings, country, stored_index_tickers, stored_weeks
+            )
+        except Exception:
+            logger.exception("Failed to start new %s sector indices", country.value)
+    logger.info(
+        "Indices: wrote %d market + sector index row(s) from week(s) %s",
+        written,
+        ", ".join(week.isoformat() for week in sorted(week_starts)),
+    )
+
+
+def _run_outlier_email(config: BaseConfig, week_starts: set[date]) -> tuple[int, int]:
+    """Email newly detected outliers in the weeks written (FR-7c / §5.9).
+
+    Never raises: email problems must not fail the run (FR-50). Returns
+    ``(new, continuing)`` outlier counts.
+    """
+    try:
+        outliers: list[OutlierRow] = []
+        for country in CountrySet:
+            outliers.extend(
+                load_outliers(
+                    config.database_url,
+                    sorted(week_starts),
+                    country=country,
+                    max_growth=config.outlier_max_growth,
+                    min_growth=config.outlier_min_growth,
+                )
+            )
+    except Exception:
+        logger.exception("Failed to load outliers for the data-quality email")
+        return 0, 0
+
+    new_count = sum(1 for row in outliers if row.is_new)
+    continuing = len(outliers) - new_count
+    message = build_outlier_email(
+        outliers,
+        max_growth=config.outlier_max_growth,
+        min_growth=config.outlier_min_growth,
+        now=datetime.now(timezone.utc),
+    )
+    if message is None:
+        logger.info(
+            "Outlier email: no new outliers (%d continuing), nothing to send",
+            continuing,
+        )
+        return new_count, continuing
+
+    subject, body = message
+    if not config.alert_email_enabled:
+        logger.info(
+            "Outlier email disabled (ALERT_EMAIL_ENABLED off); would send:\n%s\n\n%s",
+            subject,
+            body,
+        )
+        return new_count, continuing
+    if not config.alert_email_from or not config.alert_email_to:
+        logger.error(
+            "Outlier email enabled but ALERT_EMAIL_FROM / ALERT_EMAIL_TO missing; "
+            "not sent:\n%s\n\n%s",
+            subject,
+            body,
+        )
+        return new_count, continuing
+
+    try:
+        message_id = send_email(
+            sender=config.alert_email_from,
+            recipient=config.alert_email_to,
+            subject=subject,
+            body=body,
+            max_retries=config.yf_max_retries,
+            retry_base_seconds=config.yf_retry_base_seconds,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to send outlier email; outliers were:\n%s\n\n%s", subject, body
+        )
+        return new_count, continuing
+
+    logger.info(
+        "Outlier email sent (%d new outlier(s), message id %s)",
+        new_count,
+        message_id,
+    )
+    return new_count, continuing
 
 
 def main() -> int:
@@ -311,6 +741,7 @@ def main() -> int:
 
     all_tickers = [entry.symbol for entry in watchlist]
     companies = {entry.symbol: entry.company for entry in watchlist}
+    entries = {entry.symbol: entry for entry in watchlist}
 
     try:
         stale_tickers, skipped_count, week_start = filter_stale_tickers(
@@ -333,19 +764,21 @@ def main() -> int:
             len(all_tickers),
         )
         try:
-            metrics_purged, market_metrics_purged = _run_retention_purge(
-                database_url, retention_days
+            metrics_purged, market_metrics_purged, indices_purged = (
+                _run_retention_purge(database_url, retention_days)
             )
         except Exception:
             logger.exception("Retention purge failed")
             return 1
         logger.info(
             "Summary: total=%d skipped=%d fetched=0 inserted=0 "
-            "purged_metrics=%d purged_market_metrics=%d failed_batches=0",
+            "purged_metrics=%d purged_market_metrics=%d purged_indices=%d "
+            "failed_batches=0",
             len(all_tickers),
             skipped_count,
             metrics_purged,
             market_metrics_purged,
+            indices_purged,
         )
         return 0
 
@@ -355,6 +788,7 @@ def main() -> int:
     inserted_count = 0
     failed_batches = 0
     week_starts: set[date] = set()
+    index_history = IndexHistory()
 
     for i, batch in enumerate(batches):
         logger.info(
@@ -376,6 +810,14 @@ def main() -> int:
             )
             batch_rows = metric_rows_from_batch(
                 data, batch, companies, currencies=batch_currencies
+            )
+            fold_index_history(
+                index_history,
+                data,
+                batch,
+                entries,
+                max_growth=config.outlier_max_growth,
+                min_growth=config.outlier_min_growth,
             )
             fetched_count += len(batch_rows)
             for row in batch_rows:
@@ -421,22 +863,37 @@ def main() -> int:
             return 1
 
     try:
-        metrics_purged, market_metrics_purged = _run_retention_purge(
-            database_url, retention_days
+        metrics_purged, market_metrics_purged, indices_purged = (
+            _run_retention_purge(database_url, retention_days)
         )
     except Exception:
         logger.exception("Retention purge failed")
         return 1
 
+    outliers_new = outliers_continuing = 0
+    if week_starts:
+        try:
+            _fold_missing_members(config, watchlist, index_history, start)
+            _run_index_update(config, week_starts, index_history)
+        except Exception:
+            logger.exception("Failed to compute indices")
+            return 1
+        outliers_new, outliers_continuing = _run_outlier_email(config, week_starts)
+
     logger.info(
         "Summary: total=%d skipped=%d fetched=%d inserted=%d "
-        "purged_metrics=%d purged_market_metrics=%d failed_batches=%d http_batches=%d",
+        "purged_metrics=%d purged_market_metrics=%d purged_indices=%d "
+        "outliers_new=%d outliers_continuing=%d "
+        "failed_batches=%d http_batches=%d",
         len(all_tickers),
         skipped_count,
         fetched_count,
         inserted_count,
         metrics_purged,
         market_metrics_purged,
+        indices_purged,
+        outliers_new,
+        outliers_continuing,
         failed_batches,
         len(batches),
     )

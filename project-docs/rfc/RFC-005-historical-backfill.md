@@ -21,9 +21,11 @@ One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **N
 | FR-13 | Download ~730 days OHLCV per batch (default 25 symbols/batch); retry/backoff; inter-batch delay |
 | FR-14 | One snapshot per calendar week (Monday-based `week_start`) at the week's last bar, using closes up to that bar; skip weeks with &lt;200 closes so far |
 | FR-15 | Upsert into the selected country `*_metrics` with the RFC-003 week upsert (`ON CONFLICT (ticker, week_start)`, newer bar wins) |
-| FR-16 | Skip `(ticker, trading_date)` pairs already in the matching country metrics table |
+| FR-15a | Compute `price_growth` / `sma_50_growth` / `sma_200_growth` per weekly snapshot (FR-5a) ([RFC-016](./RFC-016-weekly-growth-columns.md)) |
+| FR-16 | Skip `(ticker, trading_date)` pairs already in the matching country metrics table; rows whose growth columns are all NULL get only those columns filled (`fill_missing_growth`, RFC-016) |
 | FR-17 | Log per-batch generated/new/inserted/skipped counts and final summary |
 | FR-18 | Required `--country us|swe|uk`: load only that set's `*_tickers`; write only that set's `*_metrics` / `*_market_metrics` |
+| FR-18a | Optional, repeatable `--exchange NAME`: keep only tickers whose `exchange_name` matches (case-insensitive); fail with the available names when none match |
 | — | Set `momentum`, `z_score` on each inserted metrics row; upsert `momentum_mean` / `momentum_std` (RFC-012) |
 
 ## Implementation
@@ -32,7 +34,7 @@ One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **N
 
 | File | Role |
 |------|------|
-| `backfill_sma.py` | Calendar-week sampling, orchestration; required `--country` |
+| `backfill_sma.py` | Calendar-week sampling, orchestration; required `--country`, optional `--exchange` |
 | `fetch_sma.py` | Shared: `compute_smas`, `compute_momentum`, `chunked`, `_to_decimal`, `trading_date_from_index`, country-scoped `upsert_market_for_weeks` |
 | `yfinance_client.py` | Shared: `download_batch`, `load_currency_for_tickers` |
 | `db/metrics.py` | `insert_metrics`, `load_existing_metric_keys` |
@@ -47,6 +49,7 @@ One-off manual script to bootstrap ~2 years of rolling weekly SMA snapshots. **N
 | `last_bar_positions_per_week(index)` | Position of each calendar week's last bar |
 | `metric_rows_from_weekly_samples(...)` | One SMA row per week for one ticker |
 | `metric_rows_from_backfill_batch(...)` | Parse batch download for all tickers |
+| `filter_by_exchange(entries, exchanges)` | Keep tickers on the requested exchange(s) |
 | `filter_new_rows(rows, existing)` | Drop rows whose `(ticker, trading_date)` is already stored |
 | `build_parser()` / `main()` | Required `--country`; scoped load + market upsert |
 
@@ -100,3 +103,4 @@ pipenv run python backfill_sma.py --country us
 | RFC-002 | Seed `--country` used before backfill in the same bootstrap/dev-backfill run |
 | RFC-011 | Dev-backfill passes `--country` into this script |
 | RFC-012 | Scoped backfill only upserts market aggregates for the selected set |
+| RFC-016 | Re-running backfill per country fills the growth columns on stored history |

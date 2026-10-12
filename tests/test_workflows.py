@@ -45,10 +45,20 @@ def test_test_workflow_uses_python_311() -> None:
     assert 'python-version: "3.11"' in content
 
 
-def test_deploy_workflow_runs_on_main_push_only() -> None:
+def test_deploy_workflow_runs_only_after_successful_test_on_main_push() -> None:
     content = DEPLOY_YML.read_text(encoding="utf-8")
+    assert "on:\n  push:" not in content
+    assert "workflow_run:\n    workflows: [Test]\n    types: [completed]" in content
     assert "branches: [main]" in content
+    assert "github.event.workflow_run.conclusion == 'success'" in content
+    assert "github.event.workflow_run.event == 'push'" in content
+    assert "github.event.workflow_run.head_branch == 'main'" in content
+    assert "ref: ${{ github.event.workflow_run.head_sha }}" in content
     assert "environment: PROD" in content
+
+
+def test_deploy_trigger_matches_test_workflow_name() -> None:
+    assert "name: Test\n" in TEST_YML.read_text(encoding="utf-8")
 
 
 def test_deploy_workflow_uses_workload_identity_federation() -> None:
@@ -79,6 +89,16 @@ def test_deploy_workflow_writes_env_for_vm() -> None:
     content = DEPLOY_YML.read_text(encoding="utf-8")
     assert "APP_ENV=dev" in content
     assert "install -o fansboda -g fansboda -m 600" in content
+
+
+def test_deploy_workflow_writes_alert_email_env_only_when_configured() -> None:
+    """RFC-017: outlier email settings come from production secrets."""
+    content = DEPLOY_YML.read_text(encoding="utf-8")
+    assert "ALERT_EMAIL_FROM: ${{ secrets.ALERT_EMAIL_FROM }}" in content
+    assert "ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}" in content
+    assert '[ -n "$ALERT_EMAIL_FROM" ] && [ -n "$ALERT_EMAIL_TO" ]' in content
+    assert "ALERT_EMAIL_ENABLED=true" in content
+    assert content.index("set +x") < content.index("ALERT_EMAIL_ENABLED=true")
 
 
 def test_deploy_workflow_targets_production_vm_paths() -> None:

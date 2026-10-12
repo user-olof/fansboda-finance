@@ -100,7 +100,7 @@ def test_load_db_symbols_uses_country_tickers_loader() -> None:
                 "Vodafone",
                 "communication-services",
                 "telecom",
-                "uk_market",
+                "gb_market",
                 "LSE",
             ),
         ],
@@ -205,6 +205,7 @@ def test_main_refresh_resolves_listing_market_and_exchange_name() -> None:
                     "consumer-electronics",
                     "us_market",
                     "NasdaqGS",
+                    "Apple designs smartphones.",
                 ),
             ):
                 with patch("seed_tickers.upsert_tickers", return_value=1) as mock_upsert:
@@ -220,6 +221,7 @@ def test_main_refresh_resolves_listing_market_and_exchange_name() -> None:
                 "consumer-electronics",
                 "us_market",
                 "NasdaqGS",
+                "Apple designs smartphones.",
             )
         ],
     )
@@ -247,8 +249,9 @@ def test_main_refresh_uk_symbol_passes_exchange_name() -> None:
                     "Vodafone Group",
                     "communication-services",
                     "telecom",
-                    "uk_market",
+                    "gb_market",
                     "LSE",
+                    "Vodafone provides telecoms.",
                 ),
             ):
                 with patch("seed_tickers.upsert_tickers", return_value=1) as mock_upsert:
@@ -262,8 +265,9 @@ def test_main_refresh_uk_symbol_passes_exchange_name() -> None:
                 "Vodafone Group",
                 "communication-services",
                 "telecom",
-                "uk_market",
+                "gb_market",
                 "LSE",
+                "Vodafone provides telecoms.",
             )
         ],
     )

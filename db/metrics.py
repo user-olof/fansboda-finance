@@ -22,7 +22,8 @@ INSERT_METRICS_SQL = sql_for_countries(
     """
 INSERT INTO {metrics} (
     ticker, company, week_start, trading_date, updated_at,
-    currency, sma_50, sma_200, current_price, momentum, z_score
+    currency, sma_50, sma_200, current_price, momentum, z_score,
+    price_growth, sma_50_growth, sma_200_growth
 )
 VALUES %s
 ON CONFLICT (ticker, week_start) DO UPDATE SET
@@ -34,8 +35,29 @@ ON CONFLICT (ticker, week_start) DO UPDATE SET
     sma_200 = EXCLUDED.sma_200,
     current_price = EXCLUDED.current_price,
     momentum = EXCLUDED.momentum,
-    z_score = EXCLUDED.z_score
+    z_score = EXCLUDED.z_score,
+    price_growth = EXCLUDED.price_growth,
+    sma_50_growth = EXCLUDED.sma_50_growth,
+    sma_200_growth = EXCLUDED.sma_200_growth
 WHERE EXCLUDED.trading_date > {metrics}.trading_date
+"""
+)
+
+# Backfill (FR-16): only rows whose growth columns are all still NULL.
+FILL_MISSING_GROWTH_SQL = sql_for_countries(
+    """
+UPDATE {metrics} m
+SET price_growth = v.price_growth::numeric,
+    sma_50_growth = v.sma_50_growth::numeric,
+    sma_200_growth = v.sma_200_growth::numeric
+FROM (VALUES %s) AS v (
+    ticker, trading_date, price_growth, sma_50_growth, sma_200_growth
+)
+WHERE m.ticker = v.ticker
+  AND m.trading_date = v.trading_date::date
+  AND m.price_growth IS NULL
+  AND m.sma_50_growth IS NULL
+  AND m.sma_200_growth IS NULL
 """
 )
 
@@ -112,24 +134,6 @@ END
 """
 )
 
-LOAD_SMA_HISTORY_SQL = sql_for_countries(
-    """
-SELECT ticker, trading_date, sma_50, sma_200
-FROM {metrics}
-ORDER BY ticker, trading_date
-"""
-)
-
-LOAD_SMA_HISTORY_FOR_SYMBOLS_SQL = sql_for_countries(
-    """
-SELECT ticker, trading_date, sma_50, sma_200
-FROM {metrics}
-WHERE ticker = ANY(%s)
-ORDER BY ticker, trading_date
-"""
-)
-
-
 def retention_cutoff(retention_days: int, *, today: date | None = None) -> date:
     """Return the oldest trading_date to keep (exclusive delete boundary)."""
     anchor = today if today is not None else datetime.now(timezone.utc).date()
@@ -150,6 +154,9 @@ def _metric_values(rows: list[MetricRow], *, updated_at: datetime) -> list[tuple
             row.current_price,
             row.momentum,
             row.z_score,
+            row.price_growth,
+            row.sma_50_growth,
+            row.sma_200_growth,
         )
         for row in rows
     ]
@@ -182,6 +189,47 @@ def insert_metrics(database_url: str, rows: list[MetricRow]) -> int:
         conn.commit()
 
     return inserted
+
+
+def fill_missing_growth(
+    database_url: str,
+    rows: list[MetricRow],
+    *,
+    country: CountrySet,
+) -> int:
+    """Fill growth columns on stored rows where all three are NULL (FR-16).
+
+    Rows are matched on ``(ticker, trading_date)``; nothing else is touched.
+    Returns rows updated.
+    """
+    values = [
+        (
+            row.ticker,
+            row.trading_date,
+            row.price_growth,
+            row.sma_50_growth,
+            row.sma_200_growth,
+        )
+        for row in rows
+        if row.price_growth is not None
+        or row.sma_50_growth is not None
+        or row.sma_200_growth is not None
+    ]
+    if not values:
+        return 0
+
+    with psycopg2.connect(database_url) as conn:
+        with conn.cursor() as cur:
+            execute_values(
+                cur,
+                FILL_MISSING_GROWTH_SQL[country],
+                values,
+                page_size=len(values),
+            )
+            updated = cur.rowcount
+        conn.commit()
+
+    return updated
 
 
 def load_existing_metric_keys(
@@ -341,33 +389,3 @@ def purge_stale_metrics(database_url: str, retention_days: int) -> int:
         conn.commit()
 
     return deleted
-
-
-def load_sma_history(
-    database_url: str,
-    *,
-    country: CountrySet,
-    symbols: list[str] | None = None,
-) -> dict[str, list[tuple[date, Decimal | None, Decimal | None]]]:
-    """Load ordered SMA-50/200 snapshots for one country set (RFC-013 / FR-19).
-
-    Returns ``{ticker: [(trading_date, sma_50, sma_200), ...]}`` ordered by
-    ``trading_date``. Optional ``symbols`` filters with parameterized ``ANY(%s)``.
-    """
-    if symbols is not None and not symbols:
-        return {}
-
-    with psycopg2.connect(database_url) as conn:
-        with conn.cursor() as cur:
-            if symbols is None:
-                cur.execute(LOAD_SMA_HISTORY_SQL[country])
-            else:
-                cur.execute(LOAD_SMA_HISTORY_FOR_SYMBOLS_SQL[country], (symbols,))
-            rows = cur.fetchall()
-
-    by_ticker: dict[str, list[tuple[date, Decimal | None, Decimal | None]]] = (
-        defaultdict(list)
-    )
-    for ticker, trading_date, sma_50, sma_200 in rows:
-        by_ticker[ticker].append((trading_date, sma_50, sma_200))
-    return dict(by_ticker)

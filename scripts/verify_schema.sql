@@ -13,10 +13,11 @@ FROM information_schema.columns
 WHERE table_schema = 'public'
   AND table_name IN ('us_tickers', 'swe_tickers', 'uk_tickers')
   AND column_name IN (
-    'sector', 'industry', 'company', 'market', 'exchange_name', 'updated_at'
+    'sector', 'industry', 'company', 'market', 'exchange_name',
+    'business_summary', 'updated_at'
   )
 ORDER BY table_name, column_name;
--- expect 18 rows (6 columns × 3 tables)
+-- expect 21 rows (7 columns × 3 tables)
 
 -- us_metrics / swe_metrics / uk_metrics columns and numeric precision
 SELECT table_name, column_name, data_type, numeric_precision, numeric_scale
@@ -32,6 +33,15 @@ WHERE table_schema = 'public'
   AND column_name IN ('currency', 'company', 'momentum', 'z_score', 'week_start')
 ORDER BY table_name, column_name;
 -- expect 15 rows
+
+-- weekly growth columns (step 20, FR-5a)
+SELECT table_name, column_name, numeric_precision, numeric_scale
+FROM information_schema.columns
+WHERE table_schema = 'public'
+  AND table_name IN ('us_metrics', 'swe_metrics', 'uk_metrics')
+  AND column_name IN ('price_growth', 'sma_50_growth', 'sma_200_growth')
+ORDER BY table_name, column_name;
+-- expect 9 rows (18, 6)
 
 -- us_market_metrics / swe_market_metrics / uk_market_metrics
 SELECT table_name, column_name, data_type, numeric_precision, numeric_scale
@@ -61,6 +71,29 @@ WHERE c.conrelid IN (
   )
   AND c.contype = 'p'
 ORDER BY 1;
+
+-- *_by_sector must be gone after step 22 / fresh schema (RFC-018)
+SELECT table_name
+FROM information_schema.tables
+WHERE table_schema = 'public'
+  AND table_name IN ('us_by_sector', 'swe_by_sector', 'uk_by_sector');
+-- expect 0 rows
+
+-- indices (steps 18–19 v2 shape + step 21 sector columns)
+SELECT column_name, data_type, is_nullable
+FROM information_schema.columns
+WHERE table_schema = 'public'
+  AND table_name = 'indices'
+ORDER BY ordinal_position;
+-- expect 13 rows in this order: ticker, sector (NOT NULL, index label — name
+-- merged into it by step 21), country, trading_date, updated_at,
+-- ticker_count, current_price, sma_50, sma_200, momentum, currency,
+-- pct_uptrend, z_score (no week_start, no name)
+
+SELECT c.conname
+FROM pg_constraint c
+WHERE c.conrelid = 'public.indices'::regclass
+  AND c.contype = 'p';
 
 -- unique (week_start, ticker): one row per ticker per calendar week
 SELECT c.conrelid::regclass AS table_name, c.conname
@@ -103,4 +136,25 @@ SELECT table_name
 FROM information_schema.tables
 WHERE table_schema = 'public'
   AND table_name IN ('tickers', 'metrics', 'market_metrics', 'market');
+-- expect 0 rows
+
+-- step 23: market index rows carry the exchange labels (spec 003)
+SELECT i.ticker, i.sector, count(*) AS rows
+FROM indices i
+JOIN (
+    VALUES
+        ('US-IDX', 'NYSE & Nasdaq'),
+        ('SWE-IDX', 'OMX Stockholm'),
+        ('UK-IDX', 'FTSE London')
+) AS v (ticker, label) ON v.ticker = i.ticker
+WHERE i.sector IS DISTINCT FROM v.label
+GROUP BY i.ticker, i.sector;
+-- expect 0 rows
+
+-- step 24: market index rows have z_score 0 (spec 005)
+SELECT ticker, z_score, count(*) AS rows
+FROM indices
+WHERE ticker IN ('US-IDX', 'SWE-IDX', 'UK-IDX')
+  AND z_score IS DISTINCT FROM 0
+GROUP BY ticker, z_score;
 -- expect 0 rows

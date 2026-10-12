@@ -11,7 +11,11 @@ JOB_SCRIPTS = (
     "backfill_sma.py",
     "backfill_market.py",
     "refresh_tickers.py",
-    "detect_crosses.py",
+    "compute_indices.py",
+    "index_anchor.py",
+    "outlier_email.py",
+    "gmail_client.py",
+    "scripts/send_test_email.py",
 )
 
 SQL_MARKERS = (
@@ -38,6 +42,7 @@ DB_MODULES = (
     "market.py",
     "retention.py",
     "truncate.py",
+    "outliers.py",
 )
 
 

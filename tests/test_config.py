@@ -1,5 +1,6 @@
 """Tests for RFC-006 centralized configuration."""
 
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -7,8 +8,6 @@ import pytest
 
 from config import (
     DEFAULT_BACKFILL_BATCH_SIZE,
-    DEFAULT_CROSS_CONVERGENCE_WEEKS,
-    DEFAULT_CROSS_MIN_REGIME_WEEKS,
     DEFAULT_METRICS_RETENTION_DAYS,
     DEFAULT_YF_BATCH_SIZE,
     DevConfig,
@@ -32,8 +31,6 @@ def test_dev_config_loads_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.yf_batch_size == DEFAULT_YF_BATCH_SIZE
     assert config.metrics_retention_days == DEFAULT_METRICS_RETENTION_DAYS
     assert config.backfill_batch_size == DEFAULT_BACKFILL_BATCH_SIZE
-    assert config.cross_min_regime_weeks == DEFAULT_CROSS_MIN_REGIME_WEEKS
-    assert config.cross_convergence_weeks == DEFAULT_CROSS_CONVERGENCE_WEEKS
 
 
 def test_dev_config_applies_env_overrides(
@@ -42,28 +39,12 @@ def test_dev_config_applies_env_overrides(
     monkeypatch.setenv("DATABASE_URL", "postgresql://dev")
     monkeypatch.setenv("YF_BATCH_SIZE", "10")
     monkeypatch.setenv("METRICS_RETENTION_DAYS", "180")
-    monkeypatch.setenv("CROSS_MIN_REGIME_WEEKS", "5")
-    monkeypatch.setenv("CROSS_CONVERGENCE_WEEKS", "2")
 
     with patch("dotenv.load_dotenv"):
         config = DevConfig.load()
 
     assert config.yf_batch_size == 10
     assert config.metrics_retention_days == 180
-    assert config.cross_min_regime_weeks == 5
-    assert config.cross_convergence_weeks == 2
-
-
-def test_cross_windows_validation_rejects_convergence_gt_regime(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("DATABASE_URL", "postgresql://dev")
-    monkeypatch.setenv("CROSS_MIN_REGIME_WEEKS", "3")
-    monkeypatch.setenv("CROSS_CONVERGENCE_WEEKS", "4")
-
-    with patch("dotenv.load_dotenv"):
-        with pytest.raises(ValueError, match="cross_convergence_weeks"):
-            DevConfig.load()
 
 
 def test_dev_config_requires_database_url(
@@ -145,3 +126,92 @@ def test_require_non_production(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("APP_ENV", "production")
     with pytest.raises(ValueError, match="development only"):
         require_non_production()
+
+
+def test_outlier_and_alert_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://dev")
+    for name in (
+        "OUTLIER_MAX_GROWTH",
+        "OUTLIER_MIN_GROWTH",
+        "ALERT_EMAIL_ENABLED",
+        "ALERT_EMAIL_FROM",
+        "ALERT_EMAIL_TO",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    with patch("dotenv.load_dotenv"):
+        dev = DevConfig.load()
+    prod = ProdConfig.load()
+
+    assert (dev.outlier_max_growth, dev.outlier_min_growth) == (9.0, -0.999)
+    assert dev.alert_email_enabled is False
+    assert prod.alert_email_enabled is True
+    assert dev.alert_email_from is None and dev.alert_email_to is None
+
+
+def test_outlier_and_alert_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://dev")
+    monkeypatch.setenv("OUTLIER_MAX_GROWTH", "2")
+    monkeypatch.setenv("OUTLIER_MIN_GROWTH", "-0.5")
+    monkeypatch.setenv("ALERT_EMAIL_ENABLED", "true")
+    monkeypatch.setenv("ALERT_EMAIL_FROM", " noreply@example.com ")
+    monkeypatch.setenv("ALERT_EMAIL_TO", "owner@example.com")
+
+    with patch("dotenv.load_dotenv"):
+        dev = DevConfig.load()
+    monkeypatch.setenv("ALERT_EMAIL_ENABLED", "false")
+    prod = ProdConfig.load()
+
+    assert (dev.outlier_max_growth, dev.outlier_min_growth) == (2.0, -0.5)
+    assert dev.alert_email_enabled is True
+    assert dev.alert_email_from == "noreply@example.com"
+    assert dev.alert_email_to == "owner@example.com"
+    assert prod.alert_email_enabled is False
+
+
+def test_index_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://dev")
+    for name in (
+        "INDEX_START_DATE",
+        "INDEX_HISTORY_TRADING_DAYS",
+        "INDEX_MIN_COMPONENTS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    with patch("dotenv.load_dotenv"):
+        dev = DevConfig.load()
+
+    assert dev.index_start_date == date(2025, 10, 3)
+    assert dev.index_history_trading_days == 250
+    assert dev.index_min_components == 5
+
+
+def test_index_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://dev")
+    monkeypatch.setenv("INDEX_START_DATE", " 2025-10-10 ")
+    monkeypatch.setenv("INDEX_HISTORY_TRADING_DAYS", "200")
+    monkeypatch.setenv("INDEX_MIN_COMPONENTS", "3")
+
+    prod = ProdConfig.load()
+
+    assert prod.index_start_date == date(2025, 10, 10)
+    assert prod.index_history_trading_days == 200
+    assert prod.index_min_components == 3
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        ("INDEX_START_DATE", "2025/10/10", "ISO date"),
+        ("INDEX_HISTORY_TRADING_DAYS", "199", "at least 200"),
+        ("INDEX_MIN_COMPONENTS", "0", "at least 1"),
+    ],
+)
+def test_index_invalid_values(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str, message: str
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://dev")
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValueError, match=message):
+        ProdConfig.load()

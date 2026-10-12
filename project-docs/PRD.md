@@ -20,8 +20,6 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
 - Maintain a rolling one-year history of SMA-50, SMA-200, current price,
   **momentum** (`sma_50 / sma_200`), and cross-sectional **`z_score`** for a
   user-managed watchlist of symbols (one row per ticker per `trading_date`).
-- Detect **Golden Cross** and **Death Cross** processes on that retained weekly
-  SMA history for the US, Swedish, and UK watchlists (see §5.6).
 - Run fully unattended on a weekly schedule (Saturdays).
 - Keep monthly operating cost at ~$0 within GCP Always Free and Neon free tiers.
 - Be resilient to transient data-provider failures (rate limits, timeouts).
@@ -30,16 +28,14 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
 
 ### Non-Goals
 
-- No user-facing UI or API — data is consumed directly from Postgres (and from
-  ad-hoc detection output in §5.6).
+- No user-facing UI or API — data is consumed directly from Postgres.
 - No intraday / real-time quotes; the weekly job runs once weekly (Saturday).
 - No additional technical indicators beyond SMA-50, SMA-200, current price,
   and the derived `momentum` / `z_score` fields in §6 — including no EMA, RSI,
   MACD, and no alternate moving-average windows in v1.
-- No push notifications, alerting, or watchers for cross detections (or other
-  signals).
-- No dedicated detections table or persisted detection history in this product
-  pass — detection is computed on demand from retained `*_metrics` rows.
+- No Golden / Death Cross detection, signals, or alerting — owned by the
+  `fansboda` repo (§5.6). The only notification this repo sends is the
+  data-quality email for implausible price moves (§5.9).
 - No portfolio, order, or transaction tracking.
 - No authentication/authorization layer (single-owner, infra-level access only).
 
@@ -49,21 +45,12 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
   US, Swedish (`.ST`), and UK (`.L`) symbols and queries the country metrics
   tables (`us_metrics` / `swe_metrics` / `uk_metrics`) to see which stocks are
   above/below their long-term moving averages.
-- **Primary use case — Golden / Death Cross detection:** detect completed
-  **Golden Cross** and **Death Cross** processes from stored weekly
-  `sma_50` / `sma_200` history (no yfinance at detection time). Each pattern
-  is a three-stage process that may span multiple weekly snapshots:
-
-  - **Golden Cross:** (1) downtrend or consolidation — SMA-50 below SMA-200;
-    (2) convergence — the gap narrows as recent prices strengthen; (3)
-    crossover — SMA-50 crosses **above** SMA-200.
-  - **Death Cross:** (1) uptrend or consolidation — SMA-50 above SMA-200;
-    (2) convergence — the gap narrows as recent prices weaken vs the longer
-    trend; (3) crossover — SMA-50 crosses **below** SMA-200.
-
-  Use **`momentum`** and **`z_score`** (vs peers in the same country set /
-  listing `market` on that date via `*_market_metrics`) to rank relative
-  strength for heatmaps; sector views via `*_tickers.sector`.
+- **Primary use case — trend data for downstream analysis:** provide the
+  weekly `sma_50` / `sma_200` history that the `fansboda` repo uses for
+  Golden / Death Cross detection (§5.6). Use **`momentum`** and **`z_score`**
+  (vs peers in the same country set / listing `market` on that date via
+  `*_market_metrics`) to rank relative strength for heatmaps; market and
+  sector views via the market and sector index rows in `indices` (§5.8).
 - **Watchlist management:** add or remove symbols by editing `us_tickers`,
   `swe_tickers`, or `uk_tickers` (directly via SQL or by running the seeding
   script).
@@ -86,6 +73,8 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
                                               |       swe_market_metrics         |
                                               |   UK: uk_tickers, uk_metrics,    |
                                               |       uk_market_metrics          |
+                                              |   + indices (one table: market   |
+                                              |     + sector indices)            |
                                               +----------------------------------+
 ```
 
@@ -124,16 +113,39 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
   matching `*_market_metrics` row, then set each ticker's **`z_score`** =
   `(momentum - momentum_mean) / momentum_std` (NULL when `momentum` or
   aggregates are missing, or `momentum_std` is zero).
+- **FR-5a Weekly growth from one adjusted series:** From the same downloaded
+  (split- and dividend-adjusted) series, find the ticker's last bar of the
+  **previous calendar week** (`week_start − 7 days`) and compute, using only
+  closes up to each bar:
+  - `price_growth = close(this bar) / close(previous-week bar) − 1`
+  - `sma_50_growth = sma_50(this bar) / sma_50(previous-week bar) − 1`
+  - `sma_200_growth = sma_200(this bar) / sma_200(previous-week bar) − 1`
+
+  Each is NULL when the previous week has no bar, the earlier value is
+  missing or zero, or there are too few closes for that SMA at the
+  previous-week bar. Because both sides come from one consistently adjusted
+  download, a split or dividend between two weekly fetches cannot create a
+  fake jump — unlike dividing this week's stored row by last week's stored
+  row, which were adjusted on different days. No extra yfinance calls.
 - **FR-6 Insert:** Write one row per ticker per calendar week into
   `us_metrics`, `swe_metrics`, or `uk_metrics` (`insert_metrics`), keyed by
-  `week_start` (Monday of `trading_date`), including `momentum` and `z_score`.
+  `week_start` (Monday of `trading_date`), including `momentum`, `z_score`,
+  and the FR-5a growth columns.
   Use `ON CONFLICT (ticker, week_start) DO UPDATE … WHERE EXCLUDED.trading_date
   > existing trading_date`: a newer bar in the same week replaces the row, an
   equal or older bar is ignored, so re-runs are idempotent.
 - **FR-7 Retention purge:** After inserts, delete rows from `us_metrics` /
-  `swe_metrics` / `uk_metrics` (and the matching `*_market_metrics` tables)
-  where `trading_date` (`week_start` for `*_market_metrics`) is older than
-  one year (`purge_stale_metrics`).
+  `swe_metrics` / `uk_metrics` (and the matching `*_market_metrics` tables,
+  plus `indices`) where `trading_date` (`week_start` for `*_market_metrics`)
+  is older than one year (`purge_stale_metrics`).
+- **FR-7a Sector trends:** Retired — sector trends are the sector index rows
+  written by FR-7b (§5.7).
+- **FR-7b Equity indices:** After the retention purge, compute the `indices`
+  rows — each country's market index and all of its sector indices — for
+  every week written in this run (§5.8). A failure here is logged and exits
+  non-zero.
+- **FR-7c Outlier email:** After the indices, email newly detected
+  implausible weekly moves in the weeks written this run (§5.9).
 - **FR-8 Observability:** Log per-batch progress, per-ticker results, insert
   and purge counts, and a final summary (total / skipped / fetched / failed
   batches). Exit non-zero on fatal errors (missing `DATABASE_URL`, no metrics
@@ -146,15 +158,22 @@ Always-Free VM executes the job via cron, and Neon's free tier stores the data.
 - **FR-10 Resolve names:** Fetch each company's name from yfinance metadata
   (`longName`, falling back to `shortName`), with a small rate-limit delay.
 - **FR-11 Upsert tickers:** Insert/update
-  `(symbol, company, sector, industry, market, exchange_name)` rows into
-  `us_tickers`, `swe_tickers`, or `uk_tickers` on conflict by `symbol`
-  (country chosen by listing market / symbol suffix — see §6). Resolve
-  `exchange_name` from yfinance `fullExchangeName`. Support an optional
+  `(symbol, company, sector, industry, market, exchange_name, business_summary)`
+  rows into `us_tickers`, `swe_tickers`, or `uk_tickers` on conflict by
+  `symbol` (country chosen by listing market / symbol suffix — see §6). Resolve
+  `exchange_name` from yfinance `fullExchangeName` and `business_summary` from
+  `longBusinessSummary`. Support an optional
   `--country us|swe|uk` filter so only symbols that route to that country set
   are resolved and upserted (required for per-country `dev-backfill` — §8.1).
+- **FR-11a One-off business summary fill:** `seed_tickers.py
+  --update-business-summary [--country us|swe|uk]` resolves
+  `business_summary` for every ticker already in the tickers tables and
+  updates only that column (and `updated_at`); the symbol file is ignored and
+  tickers whose yfinance lookup fails are left unchanged.
 - **FR-12 Ad-hoc metadata refresh:** `refresh_tickers.py` updates watchlist
   metadata on an ad-hoc basis — re-resolve `company`, `sector`, `industry`,
-  listing `market`, and `exchange_name` (`fullExchangeName`) from yfinance and
+  listing `market`, `exchange_name` (`fullExchangeName`), and
+  `business_summary` (`longBusinessSummary`) from yfinance and
   upsert them into `us_tickers` / `swe_tickers` / `uk_tickers`. It operates on
   both:
   - **Existing symbols** already present in a country tickers table (refresh
@@ -182,8 +201,16 @@ Saturday schedule.
   `uk_metrics` with the same week upsert as FR-6, so interrupted runs can
   resume without duplicates and a week holding an older (mid-week) bar is
   upgraded to the week's last bar.
+- **FR-15a Weekly growth:** Compute `price_growth`, `sma_50_growth`, and
+  `sma_200_growth` for every snapshot exactly as FR-5a, from the same
+  downloaded series (each snapshot vs the last bar of the previous calendar
+  week).
 - **FR-16 Skip existing:** Before insert, skip `(ticker, trading_date)` pairs
-  already present in the matching country metrics table.
+  already present in the matching country metrics table — except that rows
+  whose growth columns are NULL get those three columns filled from the
+  backfill's computed values (no other column changes). Re-running
+  `backfill_sma.py --country …` therefore populates growth on history stored
+  before FR-5a existed.
 - **FR-17 Observability:** Log per-batch generated, new, inserted, and
   skipped-existing counts plus a final summary.
 - **FR-18 Country-set scope:** Backfill must accept a required country-set
@@ -193,10 +220,19 @@ Saturday schedule.
   or re-touch an already-backfilled set (e.g. US) — even though inserts are
   idempotent, a full multi-set run would still hit yfinance and upsert market
   aggregates for the other sets.
+- **FR-18a Exchange scope (optional):** `--exchange NAME` further limits the
+  run to tickers whose `exchange_name` matches `NAME` (case-insensitive exact
+  match on yfinance `fullExchangeName`, e.g. `NasdaqGS`, `NYSE`, `Stockholm`,
+  `LSE`); repeat the flag to include several exchanges. If no ticker matches,
+  the run fails and logs the exchange names present in that set. Market
+  aggregates and z_scores for the touched weeks are still recomputed from
+  every ticker stored for that country set and week.
 
-Default CLI (scoped example):
+Default CLI (scoped examples):
 
 `pipenv run python backfill_sma.py --country us`
+
+`pipenv run python backfill_sma.py --country us --exchange NasdaqGS --exchange NYSE`
 
 Run once per country set after seeding that set's tickers (and applying
 `migrate_metrics_history.sql` when upgrading a legacy DB). Prefer separate
@@ -230,50 +266,221 @@ object instead of calling `os.getenv` directly.
 | `backfill_history_days` | 730 | 730 | Days of OHLCV history per backfill batch download |
 | `backfill_batch_size` | 25 | 25 | Symbols per yfinance batch during backfill |
 | `backfill_batch_delay_seconds` | 5.0 | 5.0 | Delay between backfill batches |
+| `outlier_max_growth` | 9.0 | 9.0 | Weekly growth above this (more than ×10) is an outlier (FR-37b) |
+| `outlier_min_growth` | −0.999 | −0.999 | Weekly growth below this (a fall of more than 99.9%) is an outlier (FR-37b) |
+| `alert_email_enabled` | `false` | `true` | Send the outlier email (FR-51); when off, log it instead |
+| `alert_email_from` | from `.env` (optional) | from VM `.env` (required when enabled) | Workspace mailbox the service account sends as (FR-49) |
+| `alert_email_to` | from `.env` (optional) | from VM `.env` (required when enabled) | Owner's work email address (FR-49) |
 
 `DevConfig` and `ProdConfig` may override any of the shared defaults where
 environments differ (e.g. more conservative batch delays in production).
 
-### 5.6 Golden Cross & Death Cross detection
+### 5.6 Golden Cross & Death Cross detection — moved to `fansboda`
 
-Detection-only feature over retained weekly SMA history. Does **not** call
-yfinance; does **not** run on the Saturday cron schedule in v1.
+Golden / Death Cross detection is owned by the separate **`fansboda`** repo,
+which reads the `us_metrics` / `swe_metrics` / `uk_metrics` SMA history this
+pipeline produces. This repo has no detection code; FR-19 – FR-26 are retired
+here (numbers are not reused).
 
-- **FR-19 Source of truth:** Read only from the country metrics tables
-  (`us_metrics` / `swe_metrics` / `uk_metrics`), using `sma_50`, `sma_200`, and
-  `trading_date` (ordered per ticker). Do not fetch prices at detection time.
-- **FR-20 MA pair:** Treat SMA-50 as the shorter moving average and SMA-200 as
-  the longer moving average for all stage checks.
-- **FR-21 Golden Cross stages:** A Golden Cross event is emitted only when a
-  ticker completes all three stages in order over retained weekly snapshots
-  (a full process may take multiple weeks):
+### 5.7 Sector trend averages (retired)
 
-  1. **Downtrend or consolidation** — shorter MA (SMA-50) sits below longer MA
-     (SMA-200).
-  2. **Convergence** — the gap between them narrows as recent prices
-     strengthen.
-  3. **Crossover** — shorter MA crosses **above** the longer MA.
+Superseded by the sector indices in §5.8: each sector's equal-weighted trend
+is now a sector index row in `indices` (levels, momentum, `pct_uptrend`,
+`z_score`). FR-27–FR-33, `compute_sector_trends.py`, and the
+`us_by_sector` / `swe_by_sector` / `uk_by_sector` tables are removed (the
+tables are dropped by a migration). The old `momentum_median` and
+`z_score_mean` measures have no replacement.
 
-- **FR-22 Death Cross stages:** A Death Cross event is emitted only when a
-  ticker completes all three stages in order (mirror of Golden Cross):
+### 5.8 Equal-weighted equity indices (`compute_indices.py`, `indices` table)
 
-  1. **Uptrend or consolidation** — shorter MA sits above longer MA.
-  2. **Convergence** — the gap narrows as recent prices weaken vs the longer
-     trend.
-  3. **Crossover** — shorter MA crosses **below** the longer MA.
+Synthetic equal-weighted indices built from the stocks in each country set's
+watchlist: one **market index** per country set, plus one **sector index**
+per sector within that set. All are stored in the single `indices` table in
+the same shape: an index **price**, its **SMA-50** and **SMA-200** levels,
+**momentum**, **`z_score`**, **`pct_uptrend`**, the contributing
+**`ticker_count`**, and the set's **currency**. Every stock has equal weight.
+Derived entirely from the stored `*_metrics` growth columns (FR-5a) and
+`*_tickers.sector` — no yfinance calls.
 
-- **FR-23 Scope:** Support all three country sets. Allow filtering to one
-  country and/or a symbol subset for an ad-hoc run.
-- **FR-24 Consumption:** Provide an ad-hoc runnable entrypoint (CLI or
-  equivalent) that prints human-readable and machine-readable output of
-  completed Golden Cross and Death Cross detections. Do not schedule this on
-  cron in v1.
-- **FR-25 Gaps & incomplete sequences:** Skip rows where `sma_50` or `sma_200`
-  is NULL. Incomplete stage sequences (stages 1–2 without a completed stage 3,
-  or out-of-order history) must not emit an event.
-- **FR-26 Stage config:** Stage windows and numeric thresholds are
-  configurable. Exact default values are **not** frozen in this PRD — they
-  belong in application config and a later design RFC.
+- **FR-34 Index definitions:** Per country set, one market index over all
+  of the set's stocks:
+
+  | Country set | Index name | Ticker | Currency | Source tables |
+  |-------------|------------|--------|----------|---------------|
+  | US | US Equity Index | `US-IDX` | `USD` | `us_metrics` ⋈ `us_tickers` |
+  | Swedish | OMX Equity Index | `SWE-IDX` | `SEK` | `swe_metrics` ⋈ `swe_tickers` |
+  | UK | FTSE Equity Index | `UK-IDX` | `GBP` | `uk_metrics` ⋈ `uk_tickers` |
+
+  plus one sector index per sector key `<s>` present in the set's tickers
+  table: ticker `<market ticker>-<S>` (sector key upper-cased, e.g.
+  `US-IDX-TECHNOLOGY`, `SWE-IDX-FINANCIAL-SERVICES`), `sector` label = the
+  sector name only (sector key title-cased with spaces, e.g.
+  `Financial Services` — no market-name prefix), same currency. The same
+  label appears once per country set (e.g. `Technology` for `us`, `swe`,
+  and `uk`) but never twice within one country, since sector keys are
+  unique per set. Market index rows have `sector` = the index name (e.g.
+  `US Equity Index`). The `sector`
+  column is the index label (the former `name` column is merged into it);
+  market rows are the three tickers without a sector suffix, sector rows
+  match `ticker LIKE '%-IDX-%'`.
+- **FR-34a Sector membership:** A stock belongs to the sector index of its
+  current `*_tickers.sector`, normalized to the yfinance `sectorKey` form
+  (`lower`, trimmed, spaces → `-`) so a display-name fallback such as
+  "Financial Services" merges with `financial-services`. Stocks with a blank
+  or NULL sector count only towards the market index. Every sector gets an
+  index regardless of size; consumers filter on `ticker_count` when they need
+  a minimum sample.
+- **FR-35 One row per index per week:** Store one `indices` row per index
+  ticker per calendar week. The row's `trading_date` is the latest
+  `trading_date` among that index's contributing stocks' metrics rows for that
+  week. Key `(ticker, trading_date)`; at most one row per ticker per calendar
+  week — when a later bar in the same week is computed (e.g. a mid-week manual
+  run followed by the Saturday job), it replaces that week's row, mirroring
+  FR-6.
+- **FR-36 Contributing stocks:** A stock contributes to an index's week `w`
+  when it is a member of that index (the whole set, or the sector per
+  FR-34a) and its week-`w` metrics row has positive `current_price`,
+  `sma_50`, and `sma_200` and non-NULL `price_growth`, `sma_50_growth`, and
+  `sma_200_growth` (FR-5a). The same set of `N` stocks drives all three
+  levels and `pct_uptrend`, so they stay comparable. New listings,
+  incomplete SMAs, and stocks without a previous-week bar do not contribute
+  that week.
+- **FR-37 Equal-weighted growth per level:** For each measure, the index's
+  weekly growth is the plain average of the contributing stocks' stored
+  growth: `g_price(w) = (1 / N) × Σ price_growth_i(w)`, and likewise
+  `g_sma_50` from `sma_50_growth` and `g_sma_200` from `sma_200_growth`.
+  Every stock counts once regardless of market cap or price level (weights
+  reset every week). Using the stored growth (not a ratio of two stored rows)
+  keeps splits and dividends between weekly fetches from distorting the
+  index.
+- **FR-37a Gap weeks:** The growth columns cover one calendar week. If the
+  index's previous stored week `p` is not the previous calendar week (a week
+  in between had no contributing stocks), that week instead uses the ratio of
+  stored rows between `p` and `w`
+  (`g_x = (1 / N) × Σ (x_i(w) / x_i(p) − 1)`, over member stocks with
+  positive values in both weeks).
+- **FR-37b Outlier guard:** A stock-week is an **outlier** when any of its
+  three weekly growth values (FR-5a, or the FR-37a ratio in a gap week) is
+  above `outlier_max_growth` (default `9.0`, i.e. more than ×10) or below
+  `outlier_min_growth` (default `−0.999`, i.e. a fall of more than 99.9%). In
+  practice this is a price rule: SMAs move far less than the price, so an SMA
+  only crosses these bounds after the price has. Outliers are excluded
+  from that week's contributing set — for the market index and its sector
+  index alike — for all three levels, `pct_uptrend`, and `N`, so one broken
+  series — typically a split Yahoo failed to adjust, e.g. `WYLD.ST` 1:500 on
+  2025-12-05 — cannot move an index. The exclusion is per week: the stock
+  contributes again in later weeks whose growth is within the bounds. A
+  genuine ×10 move is also excluded; with equal weights that bias is small for
+  the market index, but larger for sector indices with few stocks. Smaller
+  residual SMA drift after an unadjusted split (SMA growth below ×10 in the
+  following weeks) is not caught; fixing the series itself is §11 future
+  work. Base weeks (FR-39) have no growth; they use the ratio guard in
+  FR-39a instead.
+- **FR-38 Index levels:** Chain-link each level onto its previous value:
+  `level_x(w) = level_x(p) × (1 + g_x(w))`, stored as the row's
+  `current_price`, `sma_50`, and `sma_200`.
+- **FR-39 Base week:** The first week for an index (no earlier stored row for
+  that ticker — for a sector index, possibly later than its market index's
+  base week) uses every member stock with positive `current_price`,
+  `sma_50`, and `sma_200` that week, except FR-39a outliers:
+  - `current_price = 100`
+  - `sma_50 = 100 × (1 / N) × Σ (sma_50_i / current_price_i)`
+  - `sma_200 = 100 × (1 / N) × Σ (sma_200_i / current_price_i)`
+
+  Anchoring both SMA levels to the stocks' average SMA-to-price ratio makes
+  index momentum reflect the stocks' real trend from the first week, instead
+  of starting at exactly 1.0. Because every ratio and growth rate is
+  unit-free, mixed price units within a set (e.g. GBp vs GBP) do not distort
+  the index as long as each stock's own units are consistent over time.
+- **FR-39a Base-week outliers:** A stock whose `sma_50 / current_price` or
+  `sma_200 / current_price` is above `1 + outlier_max_growth` (10) or below
+  `1 + outlier_min_growth` (0.001) is excluded from the base week (levels,
+  `N`, `pct_uptrend`). Such ratios come from stocks that collapsed more than
+  90% (often after a reverse split Yahoo back-adjusts); a few of them would
+  dominate the equal-weighted mean ratio and shift the index's SMA levels —
+  and momentum — for good. The stock contributes from its next week via its
+  growth.
+- **FR-40 Momentum:** `momentum = sma_50 / sma_200` on the index levels (NULL
+  if `sma_200` is zero), the same definition as for stocks (FR-5).
+- **FR-40a Uptrend share:** `pct_uptrend` = percentage (0–100) of the week's
+  `N` contributing stocks with `sma_50 > sma_200`.
+- **FR-40b Z-score (sector vs sectors):** For each country set and week, over
+  that set's sector index rows with non-NULL `momentum`:
+  `z_score = (momentum − mean) / std`, where `mean` and `std` are the
+  equal-weighted mean and population standard deviation of those sector
+  indices' momentum (the same population std as the stock-level `z_score`,
+  FR-5). NULL when fewer than two sector indices have momentum that week or
+  `std` is zero. Market index rows always have `z_score = NULL` (the market
+  is the whole country, not a peer of its sectors). Z-scores are recomputed
+  for every week whose sector rows are written.
+- **FR-40c Currency:** `currency` is the country set's currency (FR-34).
+  Index levels are unit-free (base 100); the column records which currency
+  the underlying stocks trade in.
+- **FR-41 Insufficient data:** If no stock contributes to an index in a week
+  (`N = 0`), do not write a row for that index and week; the next week chains
+  from that index's last stored row.
+- **FR-42 Idempotent writes:** Recomputing a week overwrites that week's rows;
+  weeks are computed in ascending order so each week chains from the
+  already-stored previous week. A sector that no longer has any member stocks
+  keeps its stored history until retention purges it.
+- **FR-43 Invocation:** Runs as part of the weekly job (FR-7b) for the weeks
+  just written (recomputing any later stored weeks so the chain stays
+  consistent), and standalone for a full rebuild of all market and sector
+  indices via `pipenv run python compute_indices.py [--country us|swe|uk]`.
+  A full rebuild starts at the earliest week still in the metrics table, so
+  the base week (and therefore index levels, but not weekly growth) moves
+  forward as retention purges old metrics. Run it after `backfill_sma.py`,
+  `refresh_tickers.py` (sector changes), or filling the growth columns.
+- **FR-44 Retention:** Purge `indices` rows with the same window as the
+  metrics tables (FR-7): delete rows whose `trading_date` is older than
+  `METRICS_RETENTION_DAYS`. The weekly calculation only needs the previous
+  stored week, so purging old rows does not break the chain.
+- **FR-45 Observability:** Log per country set the market index's
+  `trading_date`, `ticker_count`, the three levels, `momentum`, and
+  `pct_uptrend`, plus the number of sector indices written; summary line with
+  rows written per country. Log one `WARNING` per excluded outlier (country,
+  ticker, `trading_date`, the three growth values) and the outlier count per
+  country set. Exit non-zero on DB failure.
+
+### 5.9 Data-quality email (implausible price moves)
+
+The owner is told by email when a stock makes an implausible weekly move, so
+broken Yahoo series are noticed without reading logs or spotting odd index
+levels. Outliers are derived from stored `*_metrics` rows with the FR-37b
+thresholds — no extra table and no extra yfinance calls.
+
+- **FR-46 Trigger:** Only the weekly job sends email (FR-7c), once per run,
+  after the indices step. Standalone `compute_indices.py`, `backfill_sma.py`,
+  and `backfill_market.py` only log outliers (FR-45) and never email.
+- **FR-47 Scope — new outliers only:** The email lists outlier stock-weeks
+  (FR-37b) in the weeks written this run whose same stock was **not** an
+  outlier in the previous calendar week, so a persistent problem is reported
+  once rather than every Saturday. No outliers → no email (no "all clear"
+  message). The email also states how many continuing outliers were left
+  out.
+- **FR-48 Content:** Plain text. Subject:
+  `fansboda-finance: <n> implausible weekly move(s), week of <week_start>`.
+  Per outlier: country set, ticker, company, `trading_date`, previous-week
+  and current close, `price_growth`, `sma_50_growth`, `sma_200_growth`, which
+  bound was crossed, and a note that the stock was excluded from that week's
+  index. Footer: the active thresholds and the run's UTC timestamp. No
+  credentials or connection strings in the body.
+- **FR-49 Delivery — Gmail API via Workspace domain-wide delegation:**
+  Send with the Gmail API (`users.messages.send`, scope
+  `https://www.googleapis.com/auth/gmail.send`) **from** a Google Workspace
+  mailbox (`alert_email_from`) **to** the owner's work address
+  (`alert_email_to`). The VM's attached service account authenticates
+  keylessly: it signs its delegation JWT through the IAM Credentials
+  API (`signBlob`) using its metadata-server token, with `subject` =
+  `alert_email_from`. No JSON key, OAuth refresh token, or SMTP password is
+  stored anywhere. One-time setup is in §8.2.
+- **FR-50 Failure handling:** A send failure (auth, quota, network) is logged
+  as `ERROR` with the outlier list in the log, and does not fail the run or
+  roll back data. Sending is retried with the same exponential backoff as
+  yfinance (FR-4) for transient errors.
+- **FR-51 Environments:** Sending is controlled by `alert_email_enabled`
+  (dev default off, prod default on). When disabled, the job logs the email
+  subject and body instead of sending.
 
 ## 6. Data Model
 
@@ -285,6 +492,8 @@ same column layouts.
 | US stocks | `us_tickers` | `us_metrics` | `us_market_metrics` |
 | Swedish stocks | `swe_tickers` | `swe_metrics` | `swe_market_metrics` |
 | UK stocks | `uk_tickers` | `uk_metrics` | `uk_market_metrics` |
+
+Market and sector indices for all three sets share one `indices` table.
 
 **Country routing (seed / refresh / insert):**
 
@@ -304,6 +513,7 @@ same column layouts.
 | `industry` | TEXT | Industry from yfinance (using `industryKey`) |
 | `market` | TEXT | Listing market from yfinance (e.g. `us_market`, `se_market`, `uk_market`) |
 | `exchange_name` | TEXT | Exchange display name from yfinance `fullExchangeName` |
+| `business_summary` | TEXT | Company description from yfinance `longBusinessSummary` |
 | `updated_at` | TIMESTAMPTZ | When the row was written |
 
 ### Metrics tables (`us_metrics` / `swe_metrics` / `uk_metrics`)
@@ -324,6 +534,9 @@ One row per ticker per calendar week (`week_start`) within that country set.
 | `current_price` | NUMERIC(18,6) | Adjusted close on `trading_date` |
 | `momentum` | NUMERIC(18,6) | `sma_50 / sma_200` |
 | `z_score` | NUMERIC(18,6) | `(momentum - momentum_mean) / momentum_std` using that week's matching `*_market_metrics` aggregates |
+| `price_growth` | NUMERIC(18,6) | Close growth vs the last bar of the previous calendar week, from one adjusted series (FR-5a) |
+| `sma_50_growth` | NUMERIC(18,6) | SMA-50 growth over the same period (FR-5a) |
+| `sma_200_growth` | NUMERIC(18,6) | SMA-200 growth over the same period (FR-5a) |
 
 Unique constraint on `(week_start, ticker)`. Each week adds one row per
 ticker; a later bar in the same week replaces it (FR-6). Rows with
@@ -347,6 +560,37 @@ bar dates differ (holidays, exchange calendars).
 Primary key on `(market, week_start)`. Rows with `week_start` older
 than one year are deleted on each weekly run (same retention as the metrics
 tables).
+
+### Index table (`indices`)
+
+A single table shared by all country sets (§5.8): each set's market index and
+all of its sector indices, one row per index ticker per calendar week.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `ticker` | TEXT | Market index `US-IDX` / `SWE-IDX` / `UK-IDX`, or sector index `<market ticker>-<SECTOR>` (e.g. `US-IDX-TECHNOLOGY`) |
+| `sector` | TEXT | Index label, NOT NULL: the index name on market rows (`US Equity Index`), the sector name alone on sector rows (`Technology`; unique per `country`); replaces the former `name` column |
+| `country` | TEXT | Country set: `us`, `swe`, or `uk` |
+| `currency` | TEXT | Country set currency: `USD`, `SEK`, or `GBP` |
+| `trading_date` | DATE | Latest `trading_date` among the contributing stocks that week |
+| `updated_at` | TIMESTAMPTZ | When the row was written |
+| `ticker_count` | INTEGER | Stocks contributing this week (`N`), after excluding outliers (FR-37b) |
+| `current_price` | NUMERIC(18,6) | Equal-weighted price index level, chained from `price_growth` (base week = 100) |
+| `sma_50` | NUMERIC(18,6) | Equal-weighted SMA-50 index level, chained from `sma_50_growth` (base = 100 × average `sma_50 / current_price`) |
+| `sma_200` | NUMERIC(18,6) | Equal-weighted SMA-200 index level, chained from `sma_200_growth` (base = 100 × average `sma_200 / current_price`) |
+| `pct_uptrend` | NUMERIC(18,6) | % of contributing stocks with `sma_50 > sma_200` (0–100) |
+| `momentum` | NUMERIC(18,6) | `sma_50 / sma_200` |
+| `z_score` | NUMERIC(18,6) | Sector index momentum vs the set's sector indices that week (FR-40b); NULL for market indices |
+
+Primary key on `(ticker, trading_date)`, with at most one row per ticker per
+calendar week (FR-35). Rows with `trading_date` older than one year are
+deleted on each weekly run (FR-44, same retention as the metrics tables).
+Upgrading an existing database: migration step 21 adds `currency`,
+`pct_uptrend`, and `z_score`, moves `name` into `sector`, drops `name`, and
+rebuilds the table so `sector` is the second column —
+apply it together with the deploy, then rebuild with `compute_indices.py`;
+step 22 later drops `us_by_sector` / `swe_by_sector` / `uk_by_sector`
+(MIGRATIONS.md, RFC-018).
 
 Deleting a row from `us_tickers`, `swe_tickers`, or `uk_tickers` cascades to all
 of its rows in the matching metrics table.
@@ -404,8 +648,9 @@ history and from burning yfinance quota on sets that are already complete.
 ### 8.2 Production  
 
 - **Test (`.github/workflows/test.yml`):** Runs `pytest` on push/PR to `main`.
-- **Deploy (`.github/workflows/deploy.yml`):** On push to `main`, deploys to the
-  Production VM.
+- **Deploy (`.github/workflows/deploy.yml`):** Runs if and only if the test
+  workflow succeeds for a push to `main` (`workflow_run`), and deploys exactly
+  the tested commit to the Production VM. Failed tests or PR runs never deploy.
 - Branch protection on `main` should require the test workflow to pass.
 
 ### Production pipeline
@@ -417,7 +662,28 @@ history and from burning yfinance quota on sets that are already complete.
   (`pipenv install --deploy`), and writes the VM `.env` from the `DATABASE_URL`
   secret via `gcloud compute scp`.
 - Required GitHub secrets: `GCP_PROJECT_ID`, `GCP_ZONE`, `GCP_INSTANCE_NAME`,
-  `DATABASE_URL`, `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_DEPLOY_SERVICE_ACCOUNT`.
+  `DATABASE_URL`, `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_DEPLOY_SERVICE_ACCOUNT`,
+  `ALERT_EMAIL_FROM`, `ALERT_EMAIL_TO` (the last two in the **`production`**
+  environment; written to the VM `.env` on deploy, never committed).
+
+### Outlier email setup (Gmail API, one-time)
+
+Keyless delivery for FR-49, done outside the repo:
+
+1. **GCP project:** enable the **Gmail API** and the **IAM Service Account
+   Credentials API**.
+2. **VM service account:** grant it `roles/iam.serviceAccountTokenCreator`
+   **on itself** (so it can sign with the IAM Credentials API as its own identity). The VM's
+   access scopes must allow IAM calls (`cloud-platform`).
+3. **Google Workspace admin:** under *Security → API controls → Domain-wide
+   delegation*, add the VM service account's **client ID** with exactly the
+   scope `https://www.googleapis.com/auth/gmail.send`.
+4. **Sender mailbox:** use a Workspace user (e.g. a dedicated
+   `noreply@` account, or the owner's own work account) as
+   `ALERT_EMAIL_FROM`; set `ALERT_EMAIL_TO` to the owner's work address.
+5. **Verify:** after deploy, a manual dry run on the VM with
+   `alert_email_enabled` on sends a test message (implementation provides a
+   test entrypoint; never trigger the full weekly job just to test email).
 
 ### Deploy authentication (GitHub OIDC JWT)
 
@@ -475,15 +741,18 @@ Notes:
   following least-privilege.
 - The VM's **attached** service account (separate from the deploy SA) is the
   runtime identity for workloads on that instance. It needs no special GCP roles
-  for the weekly job itself, since `fetch_sma.py` only makes outbound calls
-  (yfinance, Neon) using `DATABASE_URL` from `.env`.
+  for data collection, since `fetch_sma.py` only makes outbound calls
+  (yfinance, Neon) using `DATABASE_URL` from `.env`. For the outlier email
+  it needs only `roles/iam.serviceAccountTokenCreator` on itself plus the
+  Workspace domain-wide delegation grant above — still no key file.
 - Do not create or store JSON keys for the deploy service account; OIDC JWT via
   WIF is the only supported deploy auth path.
 
 ## 9. Dependencies
 
 Python 3.11+. Key libraries: `yfinance`, `pandas`, `psycopg2-binary`,
-`python-dotenv`. Dependencies are pinned via `Pipfile`/`Pipfile.lock`
+`python-dotenv`, `google-auth` (+ `requests`) for keyless Gmail API delivery
+(§5.9). Dependencies are pinned via `Pipfile`/`Pipfile.lock`
 (`requirements.txt` provided as an export).
 
 ## 10. Operational Notes
@@ -512,18 +781,23 @@ Python 3.11+. Key libraries: `yfinance`, `pandas`, `psycopg2-binary`,
 - Market snapshot:
   `SELECT * FROM us_market_metrics ORDER BY trading_date DESC, market LIMIT 10;`
   (and the same against `swe_market_metrics` / `uk_market_metrics`)
+- Market and sector indices (after the indices migration, rebuild history
+  once with `pipenv run python compute_indices.py`):
+  `SELECT ticker, trading_date, current_price, sma_50, sma_200, momentum, ticker_count FROM indices WHERE ticker IN ('US-IDX', 'SWE-IDX', 'UK-IDX') ORDER BY ticker, trading_date DESC;`
+- Sector ranking for the latest week:
+  `SELECT ticker, sector, ticker_count, momentum, z_score, pct_uptrend FROM indices WHERE country = 'us' AND ticker LIKE '%-IDX-%' AND date_trunc('week', trading_date) = (SELECT date_trunc('week', MAX(trading_date)) FROM indices WHERE country = 'us') ORDER BY z_score DESC;`
 
 ## 11. Future Considerations (Out of Current Scope)
 
-- **Golden Cross / Death Cross detection** (stage semantics, ad-hoc
-  consumption, config knobs) is **in scope** via §5.6 — not a future idea.
-  Still out of current scope for that feature:
-  - Push notifications, alerting, or watchers when a cross completes.
-  - Persisting detections in a dedicated table / detection history store.
-  - Exact numeric stage windows and thresholds (defer to a design RFC /
-    config defaults; see FR-26).
+- Golden / Death Cross detection — lives in the `fansboda` repo (§5.6), not
+  here.
 - Additional indicators (EMA, RSI, MACD) or alternate moving-average windows
-  beyond the SMA-50 / SMA-200 pair used by §5.6.
+  beyond the SMA-50 / SMA-200 pair.
 - A read API or dashboard for the `us_metrics` / `swe_metrics` / `uk_metrics`
   data.
 - Gap detection for missed weekly runs.
+- Further corporate-action handling beyond FR-5a and the FR-37b outlier
+  guard: recording splits from yfinance (`actions=True`) in a
+  corporate-actions table, and correcting series Yahoo failed to
+  split-adjust (e.g. `WYLD.ST`, 1:500 on 2025-12-05) before computing SMAs,
+  `momentum`, `z_score`, and the indices.

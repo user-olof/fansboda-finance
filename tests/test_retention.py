@@ -5,6 +5,8 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from config import BaseConfig
 from db.market import DELETE_STALE_MARKET_SQL, purge_stale_market
 from db.metrics import DELETE_STALE_SQL, purge_stale_metrics, retention_cutoff
@@ -21,6 +23,20 @@ def _mock_config(**overrides: object) -> BaseConfig:
     }
     values.update(overrides)
     return BaseConfig(**values)  # type: ignore[arg-type]
+
+
+@pytest.fixture(autouse=True)
+def _stub_indices():
+    with patch("fetch_sma._run_index_update") as mock, patch(
+        "fetch_sma._fold_missing_members"
+    ):
+        yield mock
+
+
+@pytest.fixture(autouse=True)
+def _stub_outliers():
+    with patch("fetch_sma.load_outliers", return_value=[]) as mock:
+        yield mock
 
 
 def test_retention_cutoff_subtracts_days_from_utc_today() -> None:
@@ -122,15 +138,19 @@ def test_purge_stale_data_purges_metrics_and_market_metrics() -> None:
         with patch(
             "db.retention.purge_stale_market", return_value=1
         ) as mock_market_metrics:
-            metrics_purged, market_metrics_purged = purge_stale_data(
-                "postgresql://example",
-                365,
-            )
+            with patch(
+                "db.retention.purge_stale_indices", return_value=2
+            ) as mock_indices:
+                metrics_purged, market_metrics_purged, indices_purged = (
+                    purge_stale_data("postgresql://example", 365)
+                )
 
     mock_metrics.assert_called_once_with("postgresql://example", 365)
     mock_market_metrics.assert_called_once_with("postgresql://example", 365)
+    mock_indices.assert_called_once_with("postgresql://example", 365)
     assert metrics_purged == 4
     assert market_metrics_purged == 1
+    assert indices_purged == 2
 
 
 def test_purge_stale_data_deletes_from_all_country_tables() -> None:
@@ -143,16 +163,20 @@ def test_purge_stale_data_deletes_from_all_country_tables() -> None:
 
     with patch("db.metrics.psycopg2.connect", return_value=mock_conn):
         with patch("db.market.psycopg2.connect", return_value=mock_conn):
-            with patch(
-                "db.metrics.retention_cutoff", return_value=date(2025, 6, 19)
-            ):
+            with patch("db.indices.psycopg2.connect", return_value=mock_conn):
                 with patch(
-                    "db.market.retention_cutoff", return_value=date(2025, 6, 19)
+                    "db.metrics.retention_cutoff", return_value=date(2025, 6, 19)
                 ):
-                    metrics_purged, market_purged = purge_stale_data(
-                        "postgresql://example",
-                        365,
-                    )
+                    with patch(
+                        "db.market.retention_cutoff", return_value=date(2025, 6, 19)
+                    ):
+                        with patch(
+                            "db.indices.retention_cutoff",
+                            return_value=date(2025, 6, 19),
+                        ):
+                            metrics_purged, market_purged, indices_purged = (
+                                purge_stale_data("postgresql://example", 365)
+                            )
 
     sqls = [call.args[0] for call in mock_cursor.execute.call_args_list]
     assert "DELETE FROM us_metrics WHERE trading_date < %s" in sqls
@@ -161,25 +185,22 @@ def test_purge_stale_data_deletes_from_all_country_tables() -> None:
     assert "DELETE FROM us_market_metrics WHERE week_start < %s" in sqls
     assert "DELETE FROM swe_market_metrics WHERE week_start < %s" in sqls
     assert "DELETE FROM uk_market_metrics WHERE week_start < %s" in sqls
+    assert "DELETE FROM indices WHERE trading_date < %s" in sqls
     assert metrics_purged == 3
     assert market_purged == 3
+    assert indices_purged == 1
 
 
 
 def test_run_retention_purge_delegates_to_purge_stale_data(caplog) -> None:
-    with patch("fetch_sma.purge_stale_data", return_value=(3, 2)) as mock_purge:
+    with patch("fetch_sma.purge_stale_data", return_value=(3, 2, 1)) as mock_purge:
         with caplog.at_level(logging.INFO, logger="fetch_sma"):
-            metrics_purged, market_metrics_purged = _run_retention_purge(
-                "postgresql://example",
-                365,
-            )
+            assert _run_retention_purge("postgresql://example", 365) == (3, 2, 1)
 
     mock_purge.assert_called_once_with("postgresql://example", 365)
-    assert metrics_purged == 3
-    assert market_metrics_purged == 2
     assert (
-        "deleted 3 us_/swe_/uk_ metrics and 2 us_/swe_/uk_ market_metrics row(s)"
-        in caplog.text
+        "deleted 3 us_/swe_/uk_ metrics, 2 us_/swe_/uk_ market_metrics, "
+        "and 1 indices row(s)" in caplog.text
     )
 
 
@@ -194,13 +215,30 @@ def test_main_purges_when_all_tickers_already_fresh(caplog) -> None:
                 return_value=([], 1, date(2026, 6, 19)),
             ):
                 with patch(
-                    "fetch_sma.purge_stale_data", return_value=(3, 1)
+                    "fetch_sma.purge_stale_data", return_value=(3, 1, 0)
                 ) as mock_purge:
                     with caplog.at_level(logging.INFO, logger="fetch_sma"):
                         assert main() == 0
 
     mock_purge.assert_called_once_with("postgresql://example", 365)
     assert "purged_market_metrics=1" in caplog.text
+
+
+def test_main_all_fresh_only_purges(_stub_indices) -> None:
+    """No new weeks: no index step (sector trends are index rows, RFC-018)."""
+    with patch("fetch_sma.get_config", return_value=_mock_config()):
+        with patch(
+            "fetch_sma.load_tickers_from_db",
+            return_value=[TickerEntry(symbol="AAA.ST", company="Alpha")],
+        ):
+            with patch(
+                "fetch_sma.filter_stale_tickers",
+                return_value=([], 1, date(2026, 6, 15)),
+            ):
+                with patch("fetch_sma.purge_stale_data", return_value=(0, 0, 0)):
+                    assert main() == 0
+
+    _stub_indices.assert_not_called()
 
 
 def test_main_purges_after_fetch_even_when_no_metrics_collected() -> None:
@@ -222,14 +260,14 @@ def test_main_purges_after_fetch_even_when_no_metrics_collected() -> None:
                         side_effect=RuntimeError("rate limited"),
                     ):
                         with patch(
-                            "fetch_sma.purge_stale_data", return_value=(2, 0)
+                            "fetch_sma.purge_stale_data", return_value=(2, 0, 0)
                         ) as mock_purge:
                             assert main() == 1
 
     mock_purge.assert_called_once_with("postgresql://example", 365)
 
 
-def test_main_fetches_stale_tickers_and_inserts() -> None:
+def test_main_fetches_stale_tickers_and_inserts(_stub_indices) -> None:
     metric_row = MetricRow(
         ticker="AAA.ST",
         company="Alpha",
@@ -277,7 +315,7 @@ def test_main_fetches_stale_tickers_and_inserts() -> None:
                                         ):
                                             with patch(
                                                 "fetch_sma.purge_stale_data",
-                                                return_value=(0, 0),
+                                                return_value=(0, 0, 0),
                                             ):
                                                 assert main() == 0
 
@@ -290,6 +328,10 @@ def test_main_fetches_stale_tickers_and_inserts() -> None:
     assert market_row.market == "se_market"
     assert market_row.week_start == date(2026, 6, 1)
     assert market_row.momentum_mean == Decimal("0.5")
+    config, week_starts, history = _stub_indices.call_args.args
+    assert config.database_url == "postgresql://example"
+    assert week_starts == {date(2026, 6, 1)}
+    assert history.folded == set()
     inserted_rows = mock_insert.call_args[0][1]
     assert inserted_rows[0].company == "Alpha"
     assert inserted_rows[0].currency == "SEK"
@@ -315,7 +357,7 @@ def test_main_fetches_uk_ticker_and_upserts_uk_market() -> None:
                 TickerEntry(
                     symbol="VOD.L",
                     company="Vodafone",
-                    market="uk_market",
+                    market="gb_market",
                     exchange_name="LSE",
                 )
             ],
@@ -339,7 +381,7 @@ def test_main_fetches_uk_ticker_and_upserts_uk_market() -> None:
                                 with patch(
                                     "fetch_sma.load_momentum_by_market_for_week",
                                     return_value={
-                                        "uk_market": [Decimal("0.5")]
+                                        "gb_market": [Decimal("0.5")]
                                     },
                                 ):
                                     with patch(
@@ -350,7 +392,7 @@ def test_main_fetches_uk_ticker_and_upserts_uk_market() -> None:
                                         ):
                                             with patch(
                                                 "fetch_sma.purge_stale_data",
-                                                return_value=(0, 0),
+                                                return_value=(0, 0, 0),
                                             ):
                                                 assert main() == 0
 
@@ -358,5 +400,5 @@ def test_main_fetches_uk_ticker_and_upserts_uk_market() -> None:
     assert mock_insert.call_args[0][1][0].ticker == "VOD.L"
     mock_market.assert_called_once()
     market_row = mock_market.call_args[0][1]
-    assert market_row.market == "uk_market"
+    assert market_row.market == "gb_market"
     assert market_row.week_start == date(2026, 6, 1)
