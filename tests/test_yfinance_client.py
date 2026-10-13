@@ -85,49 +85,7 @@ def test_resolve_watchlist_fields_uses_single_yfinance_lookup() -> None:
     mock_ctor.assert_called_once_with("AAPL")
 
 
-def test_resolve_watchlist_fields_infers_us_market_when_missing(caplog) -> None:
-    mock_ticker = MagicMock()
-    mock_ticker.info = {
-        "longName": "Unknown Co",
-        "sectorKey": "technology",
-        "industryKey": "software",
-    }
-
-    with patch("yfinance_client.yf.Ticker", return_value=mock_ticker):
-        assert resolve_watchlist_fields("UNKNOWN") == (
-            "Unknown Co",
-            "technology",
-            "software",
-            "us_market",
-            None,
-            None,
-        )
-
-    assert "No listing market found for UNKNOWN; inferring us_market" in caplog.text
-
-
-def test_resolve_watchlist_fields_infers_se_market_for_st_suffix(caplog) -> None:
-    mock_ticker = MagicMock()
-    mock_ticker.info = {
-        "longName": "Alpha AB",
-        "sectorKey": "industrials",
-        "industryKey": "machinery",
-    }
-
-    with patch("yfinance_client.yf.Ticker", return_value=mock_ticker):
-        assert resolve_watchlist_fields("AAA.ST") == (
-            "Alpha AB",
-            "industrials",
-            "machinery",
-            "se_market",
-            None,
-            None,
-        )
-
-    assert "No listing market found for AAA.ST; inferring se_market" in caplog.text
-
-
-def test_resolve_watchlist_fields_infers_uk_market_for_l_suffix(caplog) -> None:
+def test_resolve_watchlist_fields_market_none_when_missing(caplog) -> None:
     mock_ticker = MagicMock()
     mock_ticker.info = {
         "longName": "Vodafone Group",
@@ -141,12 +99,12 @@ def test_resolve_watchlist_fields_infers_uk_market_for_l_suffix(caplog) -> None:
             "Vodafone Group",
             "communication-services",
             "telecom",
-            "gb_market",
+            None,
             "LSE",
             None,
         )
 
-    assert "No listing market found for VOD.L; inferring gb_market" in caplog.text
+    assert "inferring" not in caplog.text
 
 
 def test_resolve_watchlist_fields_exchange_name_none_when_missing() -> None:

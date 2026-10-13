@@ -273,6 +273,40 @@ def test_main_refresh_uk_symbol_passes_exchange_name() -> None:
     )
 
 
+def test_main_refresh_does_not_overwrite_stored_ticker_missing_sector(caplog) -> None:
+    mock_config = type(
+        "Cfg",
+        (),
+        {
+            "database_url": "postgresql://example",
+            "tickers_file": Path("tickers.txt"),
+            "yf_name_delay_seconds": 0.25,
+        },
+    )()
+
+    with patch("refresh_tickers.get_config", return_value=mock_config):
+        with patch(
+            "refresh_tickers.load_symbols_for_refresh",
+            return_value=["AAPL"],
+        ):
+            with patch(
+                "seed_tickers.resolve_watchlist_fields",
+                return_value=(
+                    "Apple Inc.",
+                    None,
+                    "consumer-electronics",
+                    "us_market",
+                    "NasdaqGS",
+                    None,
+                ),
+            ):
+                with patch("seed_tickers.upsert_tickers", return_value=0) as mock_upsert:
+                    assert main(["--from-db"]) == 0
+
+    mock_upsert.assert_called_once_with("postgresql://example", [])
+    assert "Discarded AAPL: missing sector" in caplog.text
+
+
 def test_build_parser_mentions_uk_and_exchange_name() -> None:
     from refresh_tickers import build_parser
 

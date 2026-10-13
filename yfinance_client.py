@@ -18,21 +18,6 @@ def _fetch_info(symbol: str) -> dict:
     return yf.Ticker(symbol).info
 
 
-def _listing_market_from_info(info: dict, *, symbol: str) -> str:
-    market = info.get("market")
-    if market:
-        return str(market)
-    from db.country import infer_listing_market
-
-    inferred = infer_listing_market(symbol=symbol)
-    logger.warning(
-        "No listing market found for %s; inferring %s",
-        symbol,
-        inferred,
-    )
-    return inferred
-
-
 def _business_summary_from_info(info: dict) -> str | None:
     summary = info.get("longBusinessSummary")
     if not summary:
@@ -42,20 +27,17 @@ def _business_summary_from_info(info: dict) -> str | None:
 
 def _watchlist_fields_from_info(
     info: dict,
-    *,
-    symbol: str,
-) -> tuple[str | None, str | None, str | None, str, str | None, str | None]:
+) -> tuple[str | None, str | None, str | None, str | None, str | None, str | None]:
     company = info.get("longName") or info.get("shortName")
     sector = info.get("sectorKey") or info.get("sector")
     industry = info.get("industryKey") or info.get("industry")
+    market = info.get("market")
     exchange_name = info.get("fullExchangeName")
-    if not company:
-        logger.warning("No company name found for %s", symbol)
     return (
         str(company) if company else None,
         str(sector) if sector else None,
         str(industry) if industry else None,
-        _listing_market_from_info(info, symbol=symbol),
+        str(market) if market else None,
         str(exchange_name) if exchange_name else None,
         _business_summary_from_info(info),
     )
@@ -63,33 +45,29 @@ def _watchlist_fields_from_info(
 
 def resolve_name(symbol: str) -> str | None:
     """Fetch company name from yfinance metadata (longName, fallback shortName)."""
-    company, _, _, _, _, _ = _watchlist_fields_from_info(
-        _fetch_info(symbol), symbol=symbol
-    )
+    company, _, _, _, _, _ = _watchlist_fields_from_info(_fetch_info(symbol))
     return company
 
 
 def resolve_metadata(symbol: str) -> tuple[str | None, str | None]:
     """Fetch sector and industry from yfinance metadata."""
-    _, sector, industry, _, _, _ = _watchlist_fields_from_info(
-        _fetch_info(symbol), symbol=symbol
-    )
+    _, sector, industry, _, _, _ = _watchlist_fields_from_info(_fetch_info(symbol))
     return sector, industry
 
 
 def resolve_watchlist_fields(
     symbol: str,
-) -> tuple[str | None, str | None, str | None, str, str | None, str | None]:
+) -> tuple[str | None, str | None, str | None, str | None, str | None, str | None]:
     """Resolve company, sector, industry, listing market, exchange_name, and
     business_summary.
 
-    Listing ``market`` comes from yfinance when present; otherwise it is inferred
-    from the symbol (``.ST`` → ``se_market``, ``.L`` → ``gb_market``, else
-    ``us_market``) for country-table routing (RFC-002). ``exchange_name`` comes
+    Every field is ``None`` when yfinance does not provide it; listing ``market``
+    is returned raw so seeding can flag it as missing before inferring the stored
+    value from the symbol (specs/006-ticker-seed-validation). ``exchange_name`` comes
     from yfinance ``fullExchangeName``; ``business_summary`` from
     ``longBusinessSummary``.
     """
-    return _watchlist_fields_from_info(_fetch_info(symbol), symbol=symbol)
+    return _watchlist_fields_from_info(_fetch_info(symbol))
 
 
 def resolve_business_summary(symbol: str) -> str | None:

@@ -41,6 +41,37 @@ def filter_symbols_for_country(
     return [symbol for symbol in symbols if country_set_for(symbol=symbol) is country]
 
 
+def check_ticker_fields(
+    symbol: str | None,
+    company: str | None,
+    sector: str | None,
+    industry: str | None,
+    market: str | None,
+    exchange_name: str | None,
+) -> tuple[list[str], list[str]]:
+    """Return ``(missing_required, missing_warn)`` field names for one ticker.
+
+    Required: symbol, company, sector, industry (ticker is discarded without
+    them). Warn-only: market, exchange. Empty or whitespace-only counts as
+    missing (specs/006-ticker-seed-validation).
+    """
+
+    def missing(value: str | None) -> bool:
+        return not (value or "").strip()
+
+    required = {
+        "symbol": symbol,
+        "company": company,
+        "sector": sector,
+        "industry": industry,
+    }
+    warn = {"market": market, "exchange": exchange_name}
+    return (
+        [name for name, value in required.items() if missing(value)],
+        [name for name, value in warn.items() if missing(value)],
+    )
+
+
 def resolve_and_upsert_symbols(
     database_url: str,
     symbols: list[str],
@@ -51,10 +82,15 @@ def resolve_and_upsert_symbols(
     """Resolve yfinance metadata and upsert into country tickers tables.
 
     When ``country`` is set, skip symbols that do not route to that set before
-    any yfinance calls (PRD FR-11).
+    any yfinance calls (PRD FR-11). Tickers missing symbol, company, sector, or
+    industry, and failed lookups, are discarded (not written, stored rows left
+    untouched); missing market or exchange is logged as a warning and the
+    market is inferred from the symbol (specs/006-ticker-seed-validation).
     """
     symbols = filter_symbols_for_country(symbols, country)
     rows: list[TickerUpsertRow] = []
+    discarded = 0
+    warned = 0
 
     for i, symbol in enumerate(symbols):
         if i > 0:
@@ -63,42 +99,58 @@ def resolve_and_upsert_symbols(
             company, sector, industry, market, exchange_name, business_summary = (
                 resolve_watchlist_fields(symbol)
             )
-            rows.append(
-                (
-                    symbol,
-                    company,
-                    sector,
-                    industry,
-                    market,
-                    exchange_name,
-                    business_summary,
-                )
+        except Exception:
+            logger.exception("Failed to resolve metadata for %s", symbol)
+            discarded += 1
+            continue
+
+        missing_required, missing_warn = check_ticker_fields(
+            symbol, company, sector, industry, market, exchange_name
+        )
+        if missing_required:
+            logger.warning(
+                "Discarded %s: missing %s",
+                symbol,
+                ", ".join(missing_required + missing_warn),
             )
-            logger.info(
-                "Resolved %s: company=%s sector=%s industry=%s market=%s "
-                "exchange_name=%s business_summary_chars=%d",
+            discarded += 1
+            continue
+        if missing_warn:
+            logger.warning(
+                "Stored %s with missing %s", symbol, ", ".join(missing_warn)
+            )
+            warned += 1
+
+        market = infer_listing_market(market=market, symbol=symbol)
+        rows.append(
+            (
                 symbol,
                 company,
                 sector,
                 industry,
                 market,
                 exchange_name,
-                len(business_summary or ""),
+                business_summary,
             )
-        except Exception:
-            logger.exception("Failed to resolve metadata for %s", symbol)
-            rows.append(
-                (
-                    symbol,
-                    None,
-                    None,
-                    None,
-                    infer_listing_market(symbol=symbol),
-                    None,
-                    None,
-                )
-            )
+        )
+        logger.info(
+            "Resolved %s: company=%s sector=%s industry=%s market=%s "
+            "exchange_name=%s business_summary_chars=%d",
+            symbol,
+            company,
+            sector,
+            industry,
+            market,
+            exchange_name,
+            len(business_summary or ""),
+        )
 
+    logger.info(
+        "Ticker check: stored=%d discarded=%d warned=%d",
+        len(rows),
+        discarded,
+        warned,
+    )
     return upsert_tickers(database_url, rows)
 
 
