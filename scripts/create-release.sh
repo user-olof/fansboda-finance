@@ -181,10 +181,10 @@ echo -e "${GREEN}Step 17: Current branch status...${NC}"
 git branch
 echo ""
 fi
-# Step 18: Merge release branch into dev
+# Step 18: Merge master into dev
 if true; then
-echo -e "${GREEN}Step 18: Merging $RELEASE_BRANCH into dev...${NC}"
-git merge "$RELEASE_BRANCH" -m "Release $VERSION: Merge $RELEASE_BRANCH into dev"
+echo -e "${GREEN}Step 18: Merging master into dev...${NC}"
+git merge main -m "Master: Merge main into dev"
 echo ""
 fi
 # Step 19: Push dev
