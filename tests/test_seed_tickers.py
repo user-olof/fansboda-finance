@@ -1,3 +1,4 @@
+import logging
 from unittest.mock import MagicMock, patch
 
 from db.country import CountrySet
@@ -10,6 +11,7 @@ from db.tickers import (
 from models import TickerEntry
 from seed_tickers import (
     build_parser,
+    check_ticker_fields,
     filter_symbols_for_country,
     main,
     resolve_and_upsert_symbols,
@@ -180,24 +182,116 @@ def test_seed_tickers_from_file_resolves_and_upserts(tmp_path) -> None:
     )
 
 
-def test_seed_tickers_from_file_infers_market_on_resolve_failure(tmp_path) -> None:
+def test_seed_tickers_from_file_discards_failed_lookups(tmp_path, caplog) -> None:
+    caplog.set_level(logging.INFO, logger="seed_tickers")
     tickers_file = tmp_path / "tickers.txt"
     tickers_file.write_text("aaa.st\naapl\nvod.l\n", encoding="utf-8")
 
     with patch("seed_tickers.resolve_watchlist_fields", side_effect=RuntimeError("boom")):
         with patch("seed_tickers.time.sleep"):
-            with patch("seed_tickers.upsert_tickers", return_value=3) as mock_upsert:
+            with patch("seed_tickers.upsert_tickers", return_value=0) as mock_upsert:
                 count = seed_tickers_from_file("postgresql://example", tickers_file)
 
-    assert count == 3
+    assert count == 0
+    mock_upsert.assert_called_once_with("postgresql://example", [])
+    assert "Ticker check: stored=0 discarded=3 warned=0" in caplog.text
+
+
+def test_check_ticker_fields_complete() -> None:
+    assert check_ticker_fields(
+        "AAPL", "Apple Inc.", "technology", "consumer-electronics", "us_market", "NasdaqGS"
+    ) == ([], [])
+
+
+def test_check_ticker_fields_each_required_missing() -> None:
+    complete = ["AAPL", "Apple Inc.", "technology", "consumer-electronics"]
+    for index, name in enumerate(["symbol", "company", "sector", "industry"]):
+        fields = list(complete)
+        fields[index] = None
+        assert check_ticker_fields(*fields, "us_market", "NasdaqGS") == ([name], [])
+
+
+def test_check_ticker_fields_whitespace_is_missing() -> None:
+    assert check_ticker_fields(
+        "AAPL", "Apple Inc.", "  ", "consumer-electronics", "us_market", " "
+    ) == (["sector"], ["exchange"])
+
+
+def test_check_ticker_fields_market_and_exchange_warn_only() -> None:
+    assert check_ticker_fields(
+        "AAPL", "Apple Inc.", "technology", "consumer-electronics", None, ""
+    ) == ([], ["market", "exchange"])
+
+
+def test_check_ticker_fields_all_missing_in_order() -> None:
+    assert check_ticker_fields(None, None, None, None, None, None) == (
+        ["symbol", "company", "sector", "industry"],
+        ["market", "exchange"],
+    )
+
+
+def test_resolve_and_upsert_symbols_discards_incomplete(caplog) -> None:
+    caplog.set_level(logging.INFO, logger="seed_tickers")
+    with patch(
+        "seed_tickers.resolve_watchlist_fields",
+        side_effect=[
+            ("Apple Inc.", "technology", "hardware", "us_market", "NasdaqGS", None),
+            (None, "technology", "software", "us_market", "NasdaqGS", None),
+            ("SPDR S&P 500", None, None, "us_market", "NYSEArca", None),
+            ("Beta Co", "energy", None, None, None, None),
+            ("Gamma Co", "energy", "   ", "us_market", "NYSE", None),
+        ],
+    ):
+        with patch("seed_tickers.time.sleep"):
+            with patch("seed_tickers.upsert_tickers", return_value=1) as mock_upsert:
+                count = resolve_and_upsert_symbols(
+                    "postgresql://example",
+                    ["AAPL", "NONAME", "SPY", "BETA", "GAMMA"],
+                )
+
+    assert count == 1
+    mock_upsert.assert_called_once_with(
+        "postgresql://example",
+        [("AAPL", "Apple Inc.", "technology", "hardware", "us_market", "NasdaqGS", None)],
+    )
+    assert "Discarded NONAME: missing company" in caplog.text
+    assert "Discarded SPY: missing sector, industry" in caplog.text
+    assert "Discarded BETA: missing industry, market, exchange" in caplog.text
+    assert "Discarded GAMMA: missing industry" in caplog.text
+    assert "Ticker check: stored=1 discarded=4 warned=0" in caplog.text
+
+
+def test_resolve_and_upsert_symbols_warns_on_missing_market_or_exchange(caplog) -> None:
+    caplog.set_level(logging.INFO, logger="seed_tickers")
+    with patch(
+        "seed_tickers.resolve_watchlist_fields",
+        side_effect=[
+            ("Alpha AB", "industrials", "machinery", None, "Stockholm", None),
+            ("Vodafone", "communication-services", "telecom", None, None, None),
+            ("Apple Inc.", "technology", "hardware", "us_market", None, None),
+            (None, "technology", "software", None, None, None),
+        ],
+    ):
+        with patch("seed_tickers.time.sleep"):
+            with patch("seed_tickers.upsert_tickers", return_value=3) as mock_upsert:
+                resolve_and_upsert_symbols(
+                    "postgresql://example",
+                    ["AAA.ST", "VOD.L", "AAPL", "MSFT"],
+                )
+
     mock_upsert.assert_called_once_with(
         "postgresql://example",
         [
-            ("AAA.ST", None, None, None, "se_market", None, None),
-            ("AAPL", None, None, None, "us_market", None, None),
-            ("VOD.L", None, None, None, "gb_market", None, None),
+            ("AAA.ST", "Alpha AB", "industrials", "machinery", "se_market", "Stockholm", None),
+            ("VOD.L", "Vodafone", "communication-services", "telecom", "gb_market", None, None),
+            ("AAPL", "Apple Inc.", "technology", "hardware", "us_market", None, None),
         ],
     )
+    assert "Stored AAA.ST with missing market" in caplog.text
+    assert "Stored VOD.L with missing market, exchange" in caplog.text
+    assert "Stored AAPL with missing exchange" in caplog.text
+    assert "Stored MSFT" not in caplog.text
+    assert "Ticker check: stored=3 discarded=1 warned=3" in caplog.text
 
 
 def test_filter_symbols_for_country() -> None:
