@@ -4,7 +4,8 @@ from pathlib import Path
 
 WORKFLOWS = Path(__file__).resolve().parents[1] / ".github" / "workflows"
 TEST_YML = WORKFLOWS / "test.yml"
-DEPLOY_YML = WORKFLOWS / "deploy.yml"
+DEPLOY_YML = WORKFLOWS / "deploy-to-prod.yml"
+DEPLOY_TO_DEV_YML = WORKFLOWS / "deploy-to-dev.yml"
 DEV_BACKFILL_YML = WORKFLOWS / "dev-backfill.yml"
 WIF_AUTH_ACTION = "google-github-actions/auth@v2"
 
@@ -28,7 +29,7 @@ def test_all_gcp_workflows_use_workload_identity_federation() -> None:
 
 def test_gcp_workflows_request_oidc_token() -> None:
     """RFC-009: WIF requires id-token: write at workflow level."""
-    for path in (DEPLOY_YML, DEV_BACKFILL_YML):
+    for path in (DEPLOY_YML, DEPLOY_TO_DEV_YML, DEV_BACKFILL_YML):
         content = path.read_text(encoding="utf-8")
         assert "id-token: write" in content, path.name
 
@@ -81,14 +82,33 @@ def test_deploy_workflow_requests_oidc_token() -> None:
 
 
 def test_deploy_workflow_writes_env_for_vm() -> None:
-    """Deploy writes .env owned by fansboda.
-
-    Temporary: APP_ENV=dev while validating the VM. Before prod cutover, switch
-    deploy.yml to APP_ENV=production and update this assertion.
-    """
+    """Production deploy writes a production .env owned by fansboda."""
     content = DEPLOY_YML.read_text(encoding="utf-8")
-    assert "APP_ENV=dev" in content
+    assert "printf 'DATABASE_URL=%s\\nAPP_ENV=production\\n'" in content
     assert "install -o fansboda -g fansboda -m 600" in content
+
+
+def test_deploy_to_dev_workflow_is_manual_only() -> None:
+    """Dev deploy runs only via workflow_dispatch, into the DEV environment."""
+    content = DEPLOY_TO_DEV_YML.read_text(encoding="utf-8")
+    assert "on:\n  workflow_dispatch:" in content
+    assert "workflow_run" not in content
+    assert "on:\n  push:" not in content
+    assert "environment: DEV" in content
+    assert "environment: PROD" not in content
+    assert "printf 'DATABASE_URL=%s\\nAPP_ENV=dev\\n'" in content
+    assert "install -o fansboda -g fansboda -m 600" in content
+
+
+def test_deploy_to_dev_workflow_uses_workload_identity_federation() -> None:
+    content = DEPLOY_TO_DEV_YML.read_text(encoding="utf-8")
+    assert WIF_AUTH_ACTION in content
+    assert "credentials_json" not in content
+    assert "GCP_SA_KEY" not in content
+    remote_commands = content.count("gcloud compute ssh") + content.count(
+        "gcloud compute scp"
+    )
+    assert remote_commands == content.count("--tunnel-through-iap")
 
 
 def test_deploy_workflow_writes_alert_email_env_only_when_configured() -> None:

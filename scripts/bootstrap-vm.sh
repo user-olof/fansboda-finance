@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-time bootstrap for the GCP e2-micro production VM (RFC-008).
 # Run as root or with sudo on a fresh Debian 12 instance.
-# Application code and locked deps are deployed by deploy.yml (tarball + pipenv).
+# Application code and locked deps are deployed by deploy-to-prod.yml (tarball + pipenv).
 
 set -euo pipefail
 
@@ -43,7 +43,7 @@ if ! crontab -u "$APP_USER" -l 2>/dev/null | grep -q 'fetch_sma.py'; then
 fi
 
 echo "Bootstrap complete."
-echo "Application code and Pipenv deps come from deploy.yml (tarball + pipenv install --deploy)."
+echo "Application code and Pipenv deps come from deploy-to-prod.yml (tarball + pipenv install --deploy)."
 echo "Add DATABASE_URL / APP_ENV via GitHub deploy (push to main) or manually:"
 echo "  $APP_DIR/.env  (owner $APP_USER, mode 600)"
 echo "Seed and backfill one country set at a time (do not re-run a completed set):"

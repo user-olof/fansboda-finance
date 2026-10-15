@@ -80,8 +80,9 @@ def test_gitignore_excludes_env_and_secrets() -> None:
 
 def test_deploy_disables_shell_xtrace_when_writing_env() -> None:
     """Avoid leaking DATABASE_URL via set -x in Actions logs."""
-    content = (REPO_ROOT / ".github" / "workflows" / "deploy.yml").read_text(
-        encoding="utf-8"
-    )
-    assert "set +x" in content
-    assert "install -o fansboda -g fansboda -m 600" in content
+    for name in ("deploy-to-prod.yml", "deploy-to-dev.yml"):
+        content = (REPO_ROOT / ".github" / "workflows" / name).read_text(
+            encoding="utf-8"
+        )
+        assert "set +x" in content, name
+        assert "install -o fansboda -g fansboda -m 600" in content, name

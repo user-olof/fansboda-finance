@@ -32,7 +32,7 @@ Lightweight weekly pipeline: yfinance → SMA-50/200 + close → Neon Postgres. 
 | `schema.sql`, `migrate_*.sql` | DDL (commit both; see MIGRATIONS.md for upgrade order) |
 | `scripts/` | VM bootstrap, schema verify, branch protection, dev-backfill verify |
 | `tests/` | Unit tests; `pytest.ini` sets `pythonpath = .` |
-| `.github/workflows/` | `test.yml`, `deploy.yml`, `dev-backfill.yml` |
+| `.github/workflows/` | `test.yml`, `deploy-to-prod.yml`, `deploy-to-dev.yml`, `dev-backfill.yml` |
 
 Dependencies: **Pipenv only** (`Pipfile` / `Pipfile.lock`). No `requirements.txt`.
 
@@ -100,7 +100,8 @@ Scripts read from the config object — not scattered `os.getenv` calls. Key tun
 | Workflow | Trigger | Action |
 |----------|---------|--------|
 | `test.yml` | Push / PR to `main` | `pipenv install --dev`, `pipenv run pytest` |
-| `deploy.yml` | After `test.yml` succeeds on a push to `main` (`workflow_run`) | SCP tarball to production VM, ensure pipenv, `pipenv install --deploy`, write `.env` (temporary `APP_ENV=dev` while validating) |
+| `deploy-to-prod.yml` | After `test.yml` succeeds on a push to `main` (`workflow_run`) | SCP tarball to production VM, ensure pipenv, `pipenv install --deploy`, write `.env` (`APP_ENV=production`) |
+| `deploy-to-dev.yml` | Manual `workflow_dispatch` only | Same deploy steps with the **`DEV`** environment's secrets; `.env` with `APP_ENV=dev` |
 | `dev-backfill.yml` | Manual `workflow_dispatch` only | Ephemeral `data-fetcher-dev` VM: tarball deploy, `apply_migrations.sh`, seed + backfill, verify `us_*`/`swe_*`/`uk_*`, tear down |
 
 - Production VM path: `/opt/fansboda-finance`; logs: `/var/log/fansboda-finance/fetch_sma.log`.
