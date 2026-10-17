@@ -42,6 +42,8 @@ from equity_index import IndexRow, WeekLevels
 from gmail_client import send_email
 from index_anchor import (
     AnchorSettings,
+    Band,
+    BandExclusions,
     DailyAccumulator,
     closes_from_download,
     compute_index_series,
@@ -62,8 +64,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Covers SMA-200 and the index daily series' 250 trading days (≈275 trading days).
-HISTORY_DAYS = 400
+# Covers SMA-200 and the index daily series' last 200 trading days, each with
+# the 200 bars its week's momentum band check needs (≈400 trading days).
+HISTORY_DAYS = 600
 SMA_50_WINDOW = 50
 SMA_200_WINDOW = 200
 
@@ -386,6 +389,34 @@ def log_excluded_outliers(
         )
 
 
+def log_band_exclusions(
+    log: logging.Logger,
+    country: CountrySet,
+    band: Band,
+    excluded: BandExclusions,
+    listed_weeks: set[date],
+) -> None:
+    """Summary of stock-weeks left out of the indices by the momentum band, and
+    one line per excluded stock in ``listed_weeks`` (FR-006)."""
+    log.info(
+        "Indices %s: momentum band [%s, %s] excluded %d stock-week(s) from %d stock(s)",
+        country.value,
+        band[0],
+        band[1],
+        sum(len(weeks) for weeks in excluded.values()),
+        len(excluded),
+    )
+    for symbol in sorted(excluded):
+        for week, ratio in sorted(excluded[symbol].items()):
+            if week in listed_weeks:
+                log.warning(
+                    "Index band: excluded %s week %s ratio %.4f",
+                    symbol,
+                    week.isoformat(),
+                    ratio,
+                )
+
+
 def log_market_rows(log: logging.Logger, rows: list[IndexRow]) -> None:
     for row in rows:
         if row.sector_key is not None:
@@ -411,6 +442,9 @@ class IndexHistory:
     accumulator: DailyAccumulator = field(default_factory=DailyAccumulator)
     folded: set[str] = field(default_factory=set)
     dropped: dict[CountrySet, int] = field(default_factory=lambda: defaultdict(int))
+    excluded: dict[CountrySet, BandExclusions] = field(
+        default_factory=lambda: defaultdict(dict)
+    )
 
 
 def fold_index_history(
@@ -421,20 +455,27 @@ def fold_index_history(
     *,
     max_growth: float,
     min_growth: float,
+    band: Band,
 ) -> None:
-    """Add each downloaded stock's daily returns to its market and sector index."""
+    """Add each downloaded stock's daily returns to its market and sector index,
+    in the weeks its momentum is inside ``band``."""
     for symbol, close in closes_from_download(data, batch).items():
         entry = entries.get(symbol)
         if entry is None:
             continue
         country = country_set_for(market=entry.market, symbol=symbol)
+        excluded: dict[date, float] = {}
         history.dropped[country] += fold_close(
             history.accumulator,
             index_tickers_for(entry, country),
             close,
             max_growth=max_growth,
             min_growth=min_growth,
+            band=band,
+            excluded=excluded,
         )
+        if excluded:
+            history.excluded[country][symbol] = excluded
         history.folded.add(symbol)
 
 
@@ -469,6 +510,7 @@ def _fold_missing_members(
                 entries,
                 max_growth=config.outlier_max_growth,
                 min_growth=config.outlier_min_growth,
+                band=(config.index_momentum_min, config.index_momentum_max),
             )
         except Exception:
             logger.exception(
@@ -525,6 +567,7 @@ def _start_new_sectors(
         levels,
         country=country,
         only_tickers=set(result.series),
+        band=settings.band,
     )
     for index in result.series.values():
         start = levels.get(week_start_of(index.start_date), {}).get(index.ticker)
@@ -600,7 +643,11 @@ def _run_index_update(
             tickers = {ticker for rows in levels.values() for ticker in rows}
             if tickers:
                 result = write_index_weeks(
-                    config.database_url, levels, country=country, only_tickers=tickers
+                    config.database_url,
+                    levels,
+                    country=country,
+                    only_tickers=tickers,
+                    band=settings.band,
                 )
                 log_market_rows(logger, result.rows)
                 written += len(result.rows)
@@ -609,6 +656,13 @@ def _run_index_update(
                 country.value,
                 history.dropped.get(country, 0),
             )
+            written_weeks = set(weeks)
+            excluded: BandExclusions = {}
+            for symbol, stock_weeks in history.excluded.get(country, {}).items():
+                in_weeks = {w: r for w, r in stock_weeks.items() if w in written_weeks}
+                if in_weeks:
+                    excluded[symbol] = in_weeks
+            log_band_exclusions(logger, country, settings.band, excluded, written_weeks)
             log_excluded_outliers(
                 logger,
                 country,
@@ -818,6 +872,7 @@ def main() -> int:
                 entries,
                 max_growth=config.outlier_max_growth,
                 min_growth=config.outlier_min_growth,
+                band=(config.index_momentum_min, config.index_momentum_max),
             )
             fetched_count += len(batch_rows)
             for row in batch_rows:

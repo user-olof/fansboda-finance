@@ -130,9 +130,19 @@ Each country has one **market index** of all its stocks and one **sector index**
 The label is stored in the `sector` column (the market name on market rows, the sector name on
 sector rows). Stocks without a sector belong to the market index only.
 
+#### Momentum band
+
+A stock is a member of its market and sector index only in the weeks its momentum
+$`m = \mathrm{SMA}_{50} / \mathrm{SMA}_{200}`$, taken on its last trading day of the week, lies
+within **0.15 to 1.5**, both included (settings `INDEX_MOMENTUM_MIN`, `INDEX_MOMENTUM_MAX`). In a
+week outside the band the stock adds no daily returns and is not counted in `ticker_count` or
+`pct_uptrend`; it rejoins in the first week it is back inside. A stock with fewer than 200 daily
+closes has no momentum yet and is not excluded. This keeps collapsed micro-caps, unadjusted splits,
+and broken price series out of the indices.
+
 #### Daily returns and averaging
 
-For each member stock and each of its trading days:
+For each member stock and each of its trading days in a week it is inside the momentum band:
 
 ```math
 r_{i,d} = \frac{P_{i,d}}{P_{i,d^-}} - 1
@@ -163,9 +173,9 @@ known point:
 
 #### Start date
 
-Indices start on **2025-10-03** (setting `INDEX_START_DATE`) when at least **5** members
-(`INDEX_MIN_COMPONENTS`) have a close on that day; otherwise on the last trading day of the first
-later week that has at least 5. Before the start date, **250** trading days of levels
+Indices start on **2025-10-03** (setting `INDEX_START_DATE`) when at least **5** members inside the
+momentum band (`INDEX_MIN_COMPONENTS`) have a close on that day; otherwise on the last trading day
+of the first later week that has at least 5. Before the start date, **250** trading days of levels
 (`INDEX_HISTORY_TRADING_DAYS`) are reconstructed backward, so the moving averages are full from
 the first stored row.
 
@@ -189,7 +199,7 @@ Each index stores one row per week. Its date is the last day of the week in the 
 #### Members and uptrend
 
 From the stocks' stored rows of the same week, counting only stocks in the index's group with a
-positive price, SMA-50, and SMA-200:
+positive price, SMA-50, and SMA-200, and a momentum inside the band:
 
 ```math
 \texttt{ticker\_count} = N_w
@@ -293,7 +303,7 @@ flowchart LR
 - **Schedule.** One run per week, Saturdays 11:00 UTC, on a small cloud VM (cron). There is no
   intraday or real-time data.
 - **Weekly run (`fetch_sma.py`).** Loads the watchlist from the database, skips stocks already
-  up to date for the week, downloads about 400 days of prices for the rest, computes the stock
+  up to date for the week, downloads about 600 days of prices for the rest, computes the stock
   measures, stores them, recomputes the market statistics and z-scores, extends the indices from
   the same download, deletes old rows, and emails newly found outliers.
 - **Storage.** One set of three tables per country — tickers (watchlist and company details),

@@ -8,6 +8,7 @@ from decimal import Decimal
 
 import psycopg2
 
+from config import DEFAULT_INDEX_MOMENTUM_MAX, DEFAULT_INDEX_MOMENTUM_MIN
 from db.country import CountrySet, sql_for_countries
 from db.metrics import retention_cutoff
 from equity_index import (
@@ -37,7 +38,8 @@ ORDER BY ticker, trading_date DESC
 # Per-week stats are grouped with GROUPING SETS ((), (sector)): the grand
 # total (GROUPING = 1) is the market index, each sector group a sector index.
 # Supplies count and pct_uptrend; the levels come from the index's daily series
-# (specs/002-index-true-sma).
+# (specs/002-index-true-sma). Only stocks whose SMA-50 / SMA-200 is inside the
+# inclusive momentum band count (specs/007-index-momentum-band).
 BASE_WEEK_STATS_SQL = sql_for_countries(
     f"""
 WITH s AS (
@@ -47,6 +49,7 @@ WITH s AS (
     JOIN {{tickers}} t ON t.symbol = m.ticker
     WHERE m.week_start = %s
       AND m.current_price > 0 AND m.sma_50 > 0 AND m.sma_200 > 0
+      AND m.sma_50 / m.sma_200 BETWEEN %s AND %s
 )
 SELECT
     GROUPING(sector),
@@ -169,10 +172,12 @@ def write_index_weeks(
     country: CountrySet,
     rebuild: bool = False,
     only_tickers: set[str] | None = None,
+    band: tuple[float, float] = (DEFAULT_INDEX_MOMENTUM_MIN, DEFAULT_INDEX_MOMENTUM_MAX),
 ) -> IndexWriteResult:
     """Store the country's index rows per week from their daily-series levels.
 
-    Stock count and pct_uptrend come from the week's stored metrics; an index
+    Stock count and pct_uptrend come from the week's stored metrics of stocks
+    whose SMA-50 / SMA-200 is inside ``band`` (inclusive); an index
     whose group has no stock with a positive price and SMAs gets no row
     (FR-41). ``rebuild=True`` first deletes every row for the country. All of
     the country's rows in a week are replaced (sector z-scores need the whole
@@ -186,7 +191,7 @@ def write_index_weeks(
             if rebuild:
                 cur.execute(DELETE_COUNTRY_INDICES_SQL, (country.value,))
             for week_start in sorted(week_levels):
-                cur.execute(BASE_WEEK_STATS_SQL[country], (week_start,))
+                cur.execute(BASE_WEEK_STATS_SQL[country], (week_start, *band))
                 stats = _group_stats(cur.fetchall())
 
                 week_rows: list[IndexRow] = []

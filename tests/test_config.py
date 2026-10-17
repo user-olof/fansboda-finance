@@ -175,6 +175,8 @@ def test_index_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
         "INDEX_START_DATE",
         "INDEX_HISTORY_TRADING_DAYS",
         "INDEX_MIN_COMPONENTS",
+        "INDEX_MOMENTUM_MIN",
+        "INDEX_MOMENTUM_MAX",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -184,6 +186,7 @@ def test_index_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert dev.index_start_date == date(2025, 10, 3)
     assert dev.index_history_trading_days == 250
     assert dev.index_min_components == 5
+    assert (dev.index_momentum_min, dev.index_momentum_max) == (0.15, 1.5)
 
 
 def test_index_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -191,12 +194,15 @@ def test_index_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("INDEX_START_DATE", " 2025-10-10 ")
     monkeypatch.setenv("INDEX_HISTORY_TRADING_DAYS", "200")
     monkeypatch.setenv("INDEX_MIN_COMPONENTS", "3")
+    monkeypatch.setenv("INDEX_MOMENTUM_MIN", "0.5")
+    monkeypatch.setenv("INDEX_MOMENTUM_MAX", "2.0")
 
     prod = ProdConfig.load()
 
     assert prod.index_start_date == date(2025, 10, 10)
     assert prod.index_history_trading_days == 200
     assert prod.index_min_components == 3
+    assert (prod.index_momentum_min, prod.index_momentum_max) == (0.5, 2.0)
 
 
 @pytest.mark.parametrize(
@@ -214,4 +220,21 @@ def test_index_invalid_values(
     monkeypatch.setenv(name, value)
 
     with pytest.raises(ValueError, match=message):
+        ProdConfig.load()
+
+
+@pytest.mark.parametrize(
+    ("low", "high"),
+    [("1.5", "1.5"), ("2.0", "1.5"), ("0", "1.5"), ("-0.1", "1.5")],
+)
+def test_index_momentum_band_invalid(
+    monkeypatch: pytest.MonkeyPatch, low: str, high: str
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://dev")
+    monkeypatch.setenv("INDEX_MOMENTUM_MIN", low)
+    monkeypatch.setenv("INDEX_MOMENTUM_MAX", high)
+
+    with pytest.raises(
+        ValueError, match="INDEX_MOMENTUM_MIN must be above 0 and below INDEX_MOMENTUM_MAX"
+    ):
         ProdConfig.load()

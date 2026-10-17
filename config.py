@@ -25,6 +25,8 @@ DEFAULT_OUTLIER_MIN_GROWTH = -0.999
 DEFAULT_INDEX_START_DATE = date(2025, 10, 3)
 DEFAULT_INDEX_HISTORY_TRADING_DAYS = 250
 DEFAULT_INDEX_MIN_COMPONENTS = 5
+DEFAULT_INDEX_MOMENTUM_MIN = 0.15
+DEFAULT_INDEX_MOMENTUM_MAX = 1.5
 MIN_INDEX_HISTORY_TRADING_DAYS = 200
 
 _PRODUCTION_APP_ENVS = frozenset({"prod", "production"})
@@ -120,6 +122,8 @@ class BaseConfig:
     index_start_date: date = DEFAULT_INDEX_START_DATE
     index_history_trading_days: int = DEFAULT_INDEX_HISTORY_TRADING_DAYS
     index_min_components: int = DEFAULT_INDEX_MIN_COMPONENTS
+    index_momentum_min: float = DEFAULT_INDEX_MOMENTUM_MIN
+    index_momentum_max: float = DEFAULT_INDEX_MOMENTUM_MAX
     alert_email_enabled: bool = False
     alert_email_from: str | None = None
     alert_email_to: str | None = None
@@ -134,6 +138,13 @@ class BaseConfig:
         database_url = os.environ.get("DATABASE_URL", "")
         if require_database_url and not database_url:
             raise ValueError("DATABASE_URL is not set")
+        momentum_min = _env_float("INDEX_MOMENTUM_MIN", DEFAULT_INDEX_MOMENTUM_MIN)
+        momentum_max = _env_float("INDEX_MOMENTUM_MAX", DEFAULT_INDEX_MOMENTUM_MAX)
+        if not 0 < momentum_min < momentum_max:
+            raise ValueError(
+                "INDEX_MOMENTUM_MIN must be above 0 and below INDEX_MOMENTUM_MAX, "
+                f"got {momentum_min} and {momentum_max}"
+            )
 
         return cls(
             database_url=database_url,
@@ -179,6 +190,8 @@ class BaseConfig:
             index_min_components=_env_int_at_least(
                 "INDEX_MIN_COMPONENTS", DEFAULT_INDEX_MIN_COMPONENTS, 1
             ),
+            index_momentum_min=momentum_min,
+            index_momentum_max=momentum_max,
             alert_email_enabled=_env_bool(
                 "ALERT_EMAIL_ENABLED", alert_email_enabled_default
             ),

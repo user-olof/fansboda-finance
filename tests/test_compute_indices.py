@@ -141,9 +141,10 @@ def test_index_sql_targets_country_metrics(country: CountrySet) -> None:
     assert sector_key in base
     assert "growth" not in base
     assert "m.current_price > 0 AND m.sma_50 > 0 AND m.sma_200 > 0" in base
+    assert "AND m.sma_50 / m.sma_200 BETWEEN %s AND %s" in base
     assert "GROUP BY GROUPING SETS ((), (sector))" in base
     assert "100.0 * AVG(CASE WHEN sma_50 > sma_200 THEN 1 ELSE 0 END)" in base
-    assert base.count("%s") == 1
+    assert base.count("%s") == 3
 
 
 def test_static_index_sql_is_parameterized() -> None:
@@ -199,7 +200,7 @@ def test_write_index_weeks_writes_series_levels_with_stats() -> None:
     ]
     executed = mock_cursor.execute.call_args_list
     assert executed[0] == call(DELETE_COUNTRY_INDICES_SQL, ("us",))
-    assert executed[1] == call(BASE_WEEK_STATS_SQL[CountrySet.US], (W1,))
+    assert executed[1] == call(BASE_WEEK_STATS_SQL[CountrySet.US], (W1, 0.15, 1.5))
     assert executed[2] == call(DELETE_COUNTRY_WEEK_SQL, ("us", W1, W2))
     assert executed[3] == call(
         INSERT_INDEX_SQL,
@@ -218,7 +219,7 @@ def test_write_index_weeks_writes_series_levels_with_stats() -> None:
             Decimal("0"),
         ),
     )
-    assert executed[4] == call(BASE_WEEK_STATS_SQL[CountrySet.US], (W2,))
+    assert executed[4] == call(BASE_WEEK_STATS_SQL[CountrySet.US], (W2, 0.15, 1.5))
     assert executed[5] == call(DELETE_COUNTRY_WEEK_SQL, ("us", W2, W3))
     assert _inserted(mock_cursor)[1][9] == Decimal("50")
     mock_conn.commit.assert_called_once()
@@ -501,13 +502,30 @@ def test_initialize_indices_writes_every_week_from_series(caplog) -> None:
     assert (written, failed) == (2, [])
     mock_series.assert_called_once_with([_entry("A")], CountrySet.US, settings=SETTINGS)
     (url, levels), kwargs = mock_write.call_args
-    assert kwargs == {"country": CountrySet.US, "rebuild": True}
+    assert kwargs == {"country": CountrySet.US, "rebuild": True, "band": (0.15, 1.5)}
     assert sorted(levels) == [W1, W2]
     start = levels[W1]["US-IDX"]
     assert start.trading_date == D1
     assert start.levels == IndexLevels(Decimal("100.0"), Decimal("100.0"), Decimal("100.0"))
     assert levels[W2]["US-IDX-ENERGY"].trading_date == D2
     assert f"Index US-IDX start_date={D1.isoformat()} first_row={D1.isoformat()}" in caplog.text
+
+
+def test_initialize_indices_logs_band_exclusions(caplog) -> None:
+    result = _result("US-IDX", "US-IDX-ENERGY")
+    result.excluded = {"PAVS": {W1: 0.009, W2: 0.0102}, "OLD": {W1: 1.62}}
+    with patch("compute_indices.load_distinct_week_starts", return_value=[W1, W2]), patch(
+        "compute_indices.compute_index_series", return_value=result
+    ), patch(
+        "compute_indices.write_index_weeks", return_value=IndexWriteResult([])
+    ), caplog.at_level("INFO", logger="compute_indices"):
+        initialize_indices("postgresql://example", country=CountrySet.US, settings=SETTINGS)
+
+    assert (
+        "Indices us: momentum band [0.15, 1.5] excluded 3 stock-week(s) from 2 stock(s)"
+    ) in caplog.text
+    assert f"Index band: excluded PAVS week {W2.isoformat()} ratio 0.0102" in caplog.text
+    assert "excluded OLD" not in caplog.text
 
 
 def test_initialize_indices_later_start_and_below_minimum_do_not_block() -> None:

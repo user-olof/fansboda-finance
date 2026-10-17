@@ -2,6 +2,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -14,6 +15,7 @@ from db.metrics import (
 )
 from db.tickers import load_tickers_from_db
 from fetch_sma import (
+    HISTORY_DAYS,
     aggregate_market_stats,
     chunked,
     compute_momentum,
@@ -24,7 +26,7 @@ from fetch_sma import (
     trading_date_from_index,
     upsert_market_for_weeks,
 )
-from models import MarketRow, MetricRow, TickerEntry
+from models import MarketRow, MetricRow, TickerEntry, week_start_of
 
 def test_load_tickers_from_db() -> None:
     mock_cursor = MagicMock()
@@ -547,7 +549,13 @@ def test_fold_index_history_adds_returns_to_market_and_sector() -> None:
     )
     history = IndexHistory()
     fold_index_history(
-        history, data, ["AAA", "BBB.ST", "ZZZ"], entries, max_growth=9.0, min_growth=-0.999
+        history,
+        data,
+        ["AAA", "BBB.ST", "ZZZ"],
+        entries,
+        max_growth=9.0,
+        min_growth=-0.999,
+        band=(0.15, 1.5),
     )
 
     assert history.folded == {"AAA", "BBB.ST"}
@@ -559,6 +567,33 @@ def test_fold_index_history_adds_returns_to_market_and_sector() -> None:
     )
     assert history.accumulator.averages("SWE-IDX") == pytest.approx({date(2026, 6, 3): 0.0})
     assert history.dropped == {CountrySet.US: 0, CountrySet.SWE: 1}
+    assert history.excluded == {}
+
+
+def test_fold_index_history_leaves_out_stock_weeks_outside_band() -> None:
+    from db.country import CountrySet
+    from fetch_sma import IndexHistory, fold_index_history
+
+    days = pd.bdate_range("2025-06-02", periods=260)
+    steep = 10.0 * 1.01 ** np.arange(len(days))
+    entries = {s: TickerEntry(s, s, sector="Energy") for s in ("UP", "FLAT")}
+    data = pd.concat(
+        {
+            "UP": pd.DataFrame({"Close": steep}, index=days),
+            "FLAT": pd.DataFrame({"Close": np.full(len(days), 5.0)}, index=days),
+        },
+        axis=1,
+    )
+    history = IndexHistory()
+    fold_index_history(
+        history, data, ["UP", "FLAT"], entries, max_growth=9.0, min_growth=-0.999, band=(0.15, 1.5)
+    )
+
+    last_week = week_start_of(days[-1].date())
+    excluded = history.excluded[CountrySet.US]
+    assert set(excluded) == {"UP"}
+    assert excluded["UP"][last_week] > 1.5
+    assert history.accumulator.averages("US-IDX")[days[-1].date()] == pytest.approx(0.0)
 
 
 def test_fold_missing_members_downloads_only_unfolded(caplog) -> None:
@@ -657,13 +692,42 @@ def test_run_index_update_chains_price_from_previous_row() -> None:
 
     mocks["previous"].assert_called_once_with("postgresql://example", CountrySet.US, IDX_W2)
     (url, levels), kwargs = mocks["write"].call_args
-    assert kwargs == {"country": CountrySet.US, "only_tickers": {"US-IDX"}}
+    assert kwargs == {
+        "country": CountrySet.US,
+        "only_tickers": {"US-IDX"},
+        "band": (0.15, 1.5),
+    }
     row = levels[IDX_W2]["US-IDX"]
     assert row.trading_date == IDX_D2
     assert row.levels.current_price == Decimal("106.05")
     assert row.levels.sma_50 == Decimal(str(round((105 + 5 * 106.05) / 6, 6)))
     assert row.days_used == 6
     assert mocks["outliers"].call_count == 1
+
+
+def test_run_index_update_logs_band_exclusions_for_written_weeks(caplog) -> None:
+    from db.country import CountrySet
+    from fetch_sma import _run_index_update
+
+    history = _history(
+        {"US-IDX": {IDX_D1: 0.0, **_week_days(IDX_W2, [0.01, 0.0, 0.0, 0.0, 0.0])}}
+    )
+    history.excluded[CountrySet.US] = {
+        "PAVS": {IDX_W1: 0.009, IDX_W2: 0.0091},
+        "OLD": {IDX_W1: 1.7},
+    }
+    stack, mocks = _patch_index_io(
+        {CountrySet.US: {"US-IDX"}},
+        pins={CountrySet.US: {"US-IDX": (IDX_D1, Decimal("105"))}},
+    )
+    with stack, caplog.at_level("INFO", logger="fetch_sma"):
+        _run_index_update(_index_config(), {IDX_W2}, history)
+
+    assert (
+        "Indices us: momentum band [0.15, 1.5] excluded 1 stock-week(s) from 1 stock(s)"
+    ) in caplog.text
+    assert f"Index band: excluded PAVS week {IDX_W2.isoformat()} ratio 0.0091" in caplog.text
+    assert "excluded OLD" not in caplog.text
 
 
 def test_run_index_update_chains_over_missed_week() -> None:
@@ -767,7 +831,11 @@ def test_run_index_update_starts_new_sector_from_its_series() -> None:
     assert series_call.kwargs["index_tickers"] == {"US-IDX-UTILITIES"}
     assert series_call.kwargs["settings"].start_date == IDX_START
     (url, levels), kwargs = mocks["write"].call_args
-    assert kwargs == {"country": CountrySet.US, "only_tickers": {"US-IDX-UTILITIES"}}
+    assert kwargs == {
+        "country": CountrySet.US,
+        "only_tickers": {"US-IDX-UTILITIES"},
+        "band": (0.15, 1.5),
+    }
     assert sorted(levels) == [IDX_W1, IDX_W2]
     assert levels[IDX_W2]["US-IDX-UTILITIES"].trading_date == IDX_D2
 
@@ -856,7 +924,8 @@ def test_main_folds_downloaded_batches_into_index_history() -> None:
 
     download.assert_called_once()
     today = datetime.now(timezone.utc).date()
-    assert download.call_args.args[1] == today - timedelta(days=400)
+    assert HISTORY_DAYS == 600
+    assert download.call_args.args[1] == today - timedelta(days=HISTORY_DAYS)
     history = update.call_args.args[2]
     assert history.folded == {"AAA"}
     assert history.accumulator.averages("US-IDX-ENERGY") == pytest.approx(

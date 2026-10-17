@@ -12,6 +12,7 @@ yfinance download); no SQL.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from collections import defaultdict
 from collections.abc import Iterable
@@ -24,6 +25,8 @@ import pandas as pd
 from config import (
     DEFAULT_INDEX_HISTORY_TRADING_DAYS,
     DEFAULT_INDEX_MIN_COMPONENTS,
+    DEFAULT_INDEX_MOMENTUM_MAX,
+    DEFAULT_INDEX_MOMENTUM_MIN,
     DEFAULT_INDEX_START_DATE,
     DEFAULT_OUTLIER_MAX_GROWTH,
     DEFAULT_OUTLIER_MIN_GROWTH,
@@ -46,11 +49,17 @@ from yfinance_client import download_batch
 
 logger = logging.getLogger(__name__)
 
-# Calendar days downloaded before a start date: covers 250 trading days plus
-# holidays, so any later start date also has a full window in the same download.
-DOWNLOAD_LOOKBACK_DAYS = 400
+# Calendar days downloaded before a start date: covers 250 trading days plus the
+# 200 bars each of their weeks' momentum needs, plus holidays, so any later start
+# date also has a full window in the same download.
+DOWNLOAD_LOOKBACK_DAYS = 700
 SMA_50_DAYS = 50
 SMA_200_DAYS = 200
+
+# Inclusive (low, high) limits of a member's weekly SMA-50 / SMA-200.
+Band = tuple[float, float]
+# Symbol → week start → the out-of-band ratio that excluded it that week.
+BandExclusions = dict[str, dict[date, float]]
 
 
 @dataclass(frozen=True)
@@ -60,10 +69,16 @@ class AnchorSettings:
     min_components: int = DEFAULT_INDEX_MIN_COMPONENTS
     max_growth: float = DEFAULT_OUTLIER_MAX_GROWTH
     min_growth: float = DEFAULT_OUTLIER_MIN_GROWTH
+    momentum_min: float = DEFAULT_INDEX_MOMENTUM_MIN
+    momentum_max: float = DEFAULT_INDEX_MOMENTUM_MAX
     batch_size: int = DEFAULT_YF_BATCH_SIZE
     batch_delay_seconds: float = DEFAULT_YF_BATCH_DELAY_SECONDS
     max_retries: int = DEFAULT_YF_MAX_RETRIES
     retry_base_seconds: float = DEFAULT_YF_RETRY_BASE_SECONDS
+
+    @property
+    def band(self) -> Band:
+        return (self.momentum_min, self.momentum_max)
 
     @classmethod
     def from_config(cls, config: BaseConfig) -> AnchorSettings:
@@ -73,6 +88,8 @@ class AnchorSettings:
             min_components=config.index_min_components,
             max_growth=config.outlier_max_growth,
             min_growth=config.outlier_min_growth,
+            momentum_min=config.index_momentum_min,
+            momentum_max=config.index_momentum_max,
             batch_size=config.yf_batch_size,
             batch_delay_seconds=config.yf_batch_delay_seconds,
             max_retries=config.yf_max_retries,
@@ -95,6 +112,7 @@ class SeriesResult:
     below_minimum: set[str] = field(default_factory=set)
     missing_symbols: list[str] = field(default_factory=list)
     dropped_returns: int = 0
+    excluded: BandExclusions = field(default_factory=dict)
 
 
 def sector_key(raw: str | None) -> str | None:
@@ -145,6 +163,27 @@ def _bar_dates(close: pd.Series) -> list[date]:
     return [pd.Timestamp(ts).date() for ts in close.index]
 
 
+def weekly_momentum(close: pd.Series) -> dict[date, float | None]:
+    """Week start → SMA-50 / SMA-200 on the stock's last bar of that week.
+
+    Full 50- / 200-bar windows of the daily closes (same as the stored stock
+    momentum); None while fewer than 200 bars are available.
+    """
+    values = close.dropna()
+    sma_50 = values.rolling(SMA_50_DAYS).mean().to_numpy(dtype=float)
+    sma_200 = values.rolling(SMA_200_DAYS).mean().to_numpy(dtype=float)
+    ratios: dict[date, float | None] = {}
+    for day, short, long in zip(_bar_dates(values), sma_50, sma_200):
+        valid = not (math.isnan(short) or math.isnan(long)) and long > 0
+        ratios[week_start_of(day)] = short / long if valid else None
+    return ratios
+
+
+def in_band(ratio: float | None, band: Band) -> bool:
+    """A missing ratio is never outside the band (FR-007); limits are inclusive."""
+    return ratio is None or band[0] <= ratio <= band[1]
+
+
 def _returns(
     close: pd.Series,
     *,
@@ -152,10 +191,20 @@ def _returns(
     min_growth: float,
     until: date | None = None,
     after: date | None = None,
+    band: Band | None = None,
+    ratios: dict[date, float | None] | None = None,
+    excluded: dict[date, float] | None = None,
 ) -> tuple[dict[date, float], int]:
     """Daily returns on the stock's own consecutive bars, and the count dropped
-    as outliers (above ``max_growth`` or below ``min_growth``)."""
+    as outliers (above ``max_growth`` or below ``min_growth``).
+
+    With ``band``, returns in weeks whose momentum (``ratios``, computed from
+    ``close`` when not given) is outside it are left out and recorded in
+    ``excluded`` (week start → ratio).
+    """
     values = close.dropna()
+    if band is not None and ratios is None:
+        ratios = weekly_momentum(values)
     returns: dict[date, float] = {}
     dropped = 0
     previous: float | None = None
@@ -163,11 +212,17 @@ def _returns(
         if until is not None and day > until:
             break
         if previous is not None and previous > 0 and (after is None or day > after):
-            change = value / previous - 1
-            if min_growth <= change <= max_growth:
-                returns[day] = change
+            week = week_start_of(day)
+            ratio = ratios.get(week) if ratios is not None else None
+            if band is not None and not in_band(ratio, band):
+                if excluded is not None:
+                    excluded[week] = ratio
             else:
-                dropped += 1
+                change = value / previous - 1
+                if min_growth <= change <= max_growth:
+                    returns[day] = change
+                else:
+                    dropped += 1
         previous = value
     return returns, dropped
 
@@ -218,11 +273,22 @@ def fold_close(
     min_growth: float,
     until: date | None = None,
     after: date | None = None,
+    band: Band | None = None,
+    ratios: dict[date, float | None] | None = None,
+    excluded: dict[date, float] | None = None,
 ) -> int:
-    """Add one stock's daily returns (``≤ until`` / ``> after``) to its indices;
-    returns the number of daily returns dropped as outliers."""
+    """Add one stock's daily returns (``≤ until`` / ``> after``, in-band weeks
+    only when ``band`` is given) to its indices; returns the number of daily
+    returns dropped as outliers."""
     returns, dropped = _returns(
-        close, max_growth=max_growth, min_growth=min_growth, until=until, after=after
+        close,
+        max_growth=max_growth,
+        min_growth=min_growth,
+        until=until,
+        after=after,
+        band=band,
+        ratios=ratios,
+        excluded=excluded,
     )
     accumulator.add(index_tickers, returns)
     return dropped
@@ -358,6 +424,7 @@ class _Scan:
     trading_dates: set[date] = field(default_factory=set)
     missing_symbols: list[str] = field(default_factory=list)
     dropped: int = 0
+    excluded: BandExclusions = field(default_factory=dict)
 
 
 def _scan(
@@ -371,7 +438,9 @@ def _scan(
     """Download the members once (to today) and fold each batch into per-index sums.
 
     Returns up to the start date come only from members with a close on it;
-    later returns from every member with data.
+    later returns from every member with data. A member counts toward the
+    start-date minimum, and adds returns, only in weeks its momentum is inside
+    the band.
     """
     from fetch_sma import chunked
 
@@ -408,19 +477,25 @@ def _scan(
                 for ticker in index_tickers_for(by_symbol[symbol], country)
                 if scope is None or ticker in scope
             ]
+            ratios = weekly_momentum(close)
+            band_args = {"band": settings.band, "ratios": ratios, "excluded": {}}
             days = _bar_dates(close)
             for day in days:
                 if day >= start_date:
                     scan.trading_dates.add(day)
+                    if not in_band(ratios.get(week_start_of(day)), settings.band):
+                        continue
                     for ticker in tickers:
                         scan.counts[ticker][day] += 1
             if start_date in days:
                 scan.dropped += fold_close(
-                    scan.daily, tickers, close, until=start_date, **bounds
+                    scan.daily, tickers, close, until=start_date, **bounds, **band_args
                 )
             scan.dropped += fold_close(
-                scan.daily, tickers, close, after=start_date, **bounds
+                scan.daily, tickers, close, after=start_date, **bounds, **band_args
             )
+            if band_args["excluded"]:
+                scan.excluded[symbol] = band_args["excluded"]
         if i < len(batches) - 1:
             time.sleep(settings.batch_delay_seconds)
     return scan
@@ -462,6 +537,7 @@ def compute_index_series(
     scan = _scan(entries, country, settings, start_date=settings.start_date, scope=scope)
     result.missing_symbols = scan.missing_symbols
     result.dropped_returns = scan.dropped
+    result.excluded = scan.excluded
     if scan.missing_symbols:
         logger.warning(
             "%s: no daily history for %d stock(s): %s",
@@ -512,6 +588,8 @@ def compute_index_series(
         )
         second = _scan(members, country, settings, start_date=start, scope=group)
         result.dropped_returns += second.dropped
+        for symbol, weeks in second.excluded.items():
+            result.excluded.setdefault(symbol, {}).update(weeks)
         for ticker in sorted(group):
             index = _series(ticker, second, start, settings.trading_days)
             if index is not None:

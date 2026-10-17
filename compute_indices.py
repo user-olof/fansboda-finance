@@ -25,7 +25,7 @@ from db.indices import load_index_tickers, write_index_weeks
 from db.metrics import load_distinct_week_starts
 from db.outliers import load_outliers
 from db.tickers import load_tickers_from_db
-from fetch_sma import log_excluded_outliers, log_market_rows
+from fetch_sma import log_band_exclusions, log_excluded_outliers, log_market_rows
 from index_anchor import AnchorSettings, compute_index_series, series_week_levels
 from models import week_start_of
 
@@ -68,7 +68,10 @@ def _initialize_country(
         return None
 
     levels = series_week_levels(result.series.values(), weeks)
-    written = write_index_weeks(database_url, levels, country=country, rebuild=True)
+    written = write_index_weeks(
+        database_url, levels, country=country, rebuild=True, band=settings.band
+    )
+    log_band_exclusions(logger, country, settings.band, result.excluded, {max(weeks)})
     for index in sorted(result.series.values(), key=lambda s: s.ticker):
         rows = sorted(
             (rows[index.ticker] for rows in levels.values() if index.ticker in rows),

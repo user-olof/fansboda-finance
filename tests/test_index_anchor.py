@@ -12,6 +12,7 @@ from db.country import CountrySet
 from equity_index import IndexLevels
 from fetch_sma import compute_smas
 from index_anchor import (
+    DOWNLOAD_LOOKBACK_DAYS,
     AnchorSettings,
     DailyAccumulator,
     IndexSeries,
@@ -21,11 +22,13 @@ from index_anchor import (
     daily_returns,
     find_start_date,
     fold_close,
+    in_band,
     index_tickers_for,
     missing_sector_indices,
     sector_key,
     series_week_levels,
     week_levels,
+    weekly_momentum,
 )
 from models import TickerEntry, week_start_of
 
@@ -295,13 +298,13 @@ def _run(entries, closes, settings=SETTINGS, fail=None, **kwargs):
 
 
 def test_compute_index_series_market_and_sector_on_common_start_date(caplog) -> None:
-    closes = {s: _trend(0.001 * (i + 1)) for i, s in enumerate("ABCDEF")}
+    closes = {s: _trend(0.0005 * (i + 1)) for i, s in enumerate("ABCDEF")}
     entries = [_entry(s) for s in "ABCDE"] + [_entry("F", None), _entry("G")]
     result, calls = _run(entries, closes, fail={"G"})
 
     assert set(result.series) == {"US-IDX", "US-IDX-ENERGY"}
     assert "G" in result.missing_symbols
-    assert calls[0][1] == START - timedelta(days=400)
+    assert calls[0][1] == START - timedelta(days=DOWNLOAD_LOOKBACK_DAYS)
     for series in result.series.values():
         assert series.start_date == START
         assert series.levels[START] == 100.0
@@ -316,14 +319,14 @@ def test_compute_index_series_market_and_sector_on_common_start_date(caplog) -> 
 
 def test_compute_index_series_returns_before_start_only_from_listed_members() -> None:
     flat = {s: _trend(0.0) for s in "ABCDE"}
-    gap = _trend(0.01)
+    gap = _trend(0.001)
     flat["F"] = gap[gap.index != pd.Timestamp(START)]
     result, _ = _run([_entry(s) for s in "ABCDEF"], flat)
 
     levels = result.series["US-IDX"].levels
     assert all(level == pytest.approx(100.0) for d, level in levels.items() if d <= START)
     monday = date(2025, 10, 6)
-    assert levels[monday] == pytest.approx(100.0 * (1 + (1.01**2 - 1) / 6))
+    assert levels[monday] == pytest.approx(100.0 * (1 + (1.001**2 - 1) / 6))
 
 
 def test_compute_index_series_counts_dropped_returns() -> None:
@@ -348,8 +351,8 @@ def test_compute_index_series_later_start_date_via_second_pass() -> None:
     assert series.start_date == date(2025, 10, 10)
     assert series.levels[date(2025, 10, 10)] == 100.0
     assert [c[1] for c in calls] == [
-        START - timedelta(days=400),
-        date(2025, 10, 10) - timedelta(days=400),
+        START - timedelta(days=DOWNLOAD_LOOKBACK_DAYS),
+        date(2025, 10, 10) - timedelta(days=DOWNLOAD_LOOKBACK_DAYS),
     ]
     assert "US-IDX" not in result.series
 
@@ -368,3 +371,116 @@ def test_compute_index_series_single_ticker_frame() -> None:
         result = compute_index_series([_entry("A")], CountrySet.SWE, settings=settings)
 
     assert set(result.series) == {"SWE-IDX", "SWE-IDX-ENERGY"}
+
+
+# --- momentum band (specs/007-index-momentum-band) -----------------------------
+
+BAND = (0.15, 1.5)
+W1, W2, W3 = date(2025, 9, 15), date(2025, 9, 22), date(2025, 9, 29)
+
+
+def _three_weeks() -> pd.Series:
+    days = pd.bdate_range(W1, periods=15)
+    return pd.Series(10.0 * 1.01 ** np.arange(len(days)), index=days)
+
+
+def test_weekly_momentum_on_each_weeks_last_bar() -> None:
+    close = _trend(0.0007) * (1 + 0.05 * np.sin(np.arange(len(DAYS)) / 9))
+    ratios = weekly_momentum(close)
+
+    assert ratios[week_start_of(DAYS[0].date())] is None
+    assert ratios[week_start_of(DAYS[150].date())] is None
+    for week_end in (START, DAYS[-1].date()):
+        sma_50, sma_200 = compute_smas(close[close.index <= pd.Timestamp(week_end)])
+        assert ratios[week_start_of(week_end)] == pytest.approx(
+            float(sma_50) / float(sma_200), abs=1e-6
+        )
+
+
+def test_in_band_is_inclusive_and_keeps_missing_ratio() -> None:
+    assert in_band(0.15, BAND) and in_band(1.5, BAND) and in_band(None, BAND)
+    assert not in_band(0.009, BAND)
+    assert not in_band(1.62, BAND)
+
+
+def test_fold_close_drops_returns_in_out_of_band_weeks() -> None:
+    """Spec US1 scenarios 1, 2, 5: in, out (0.1), in again; SC-005."""
+    close = _three_weeks()
+    acc, excluded = DailyAccumulator(), {}
+    fold_close(
+        acc,
+        ["X"],
+        close,
+        **BOUNDS,
+        band=BAND,
+        ratios={W1: 0.9, W2: 0.1, W3: 0.9},
+        excluded=excluded,
+    )
+    weeks = {week_start_of(day) for day in acc.averages("X")}
+    assert weeks == {W1, W3}
+    assert excluded == {W2: 0.1}
+
+    for ratio in (0.009, 1.62):
+        out = DailyAccumulator()
+        fold_close(out, ["X"], close, **BOUNDS, band=BAND, ratios={W1: ratio, W2: ratio, W3: ratio})
+        assert out.averages("X") == {}
+
+
+def test_fold_close_keeps_limits_and_missing_ratio() -> None:
+    """Spec US1 scenario 3 and FR-007."""
+    close = _three_weeks()
+    kept, plain = DailyAccumulator(), DailyAccumulator()
+    fold_close(kept, ["X"], close, **BOUNDS, band=BAND, ratios={W1: 0.15, W2: 1.5})
+    fold_close(plain, ["X"], close, **BOUNDS)
+    assert kept.averages("X") == pytest.approx(plain.averages("X"))
+    assert len(kept.averages("X")) == 14
+
+
+def test_fold_close_band_from_settings_values() -> None:
+    """Spec US2 scenario 2: band 0.5–2.0 drops 0.3, keeps 1.8."""
+    close = _three_weeks()
+    acc = DailyAccumulator()
+    fold_close(acc, ["X"], close, **BOUNDS, band=(0.5, 2.0), ratios={W1: 0.3, W2: 1.8, W3: 1.8})
+    assert {week_start_of(day) for day in acc.averages("X")} == {W2, W3}
+
+
+def test_fold_close_computes_ratios_from_close() -> None:
+    steep = _trend(0.01)
+    acc, excluded = DailyAccumulator(), {}
+    fold_close(acc, ["X"], steep, **BOUNDS, band=BAND, excluded=excluded)
+    ratios = weekly_momentum(steep)
+    assert excluded and all(ratios[week] == ratio > 1.5 for week, ratio in excluded.items())
+    assert all(ratios[week_start_of(day)] is None for day in acc.averages("X"))
+
+
+def test_compute_index_series_start_date_counts_in_band_members_only() -> None:
+    """Spec edge case: E is out of band on the start date, so the index starts later."""
+    closes = {s: _trend(0.0) for s in "ABCD"}
+    crash = _trend(0.0)
+    crash[crash.index >= DAYS[list(DAYS.date).index(START) - 60]] /= 10
+    closes["E"] = crash
+    ratios = weekly_momentum(crash)
+    assert ratios[week_start_of(START)] < 0.15
+    back = min(w for w, r in ratios.items() if w > week_start_of(START) and r >= 0.15)
+    expected = max(d.date() for d in DAYS if week_start_of(d.date()) == back)
+
+    result, _ = _run([_entry(s) for s in "ABCDE"], closes)
+
+    assert result.series["US-IDX"].start_date == expected
+    assert week_start_of(START) in result.excluded["E"]
+    assert set(result.excluded) == {"E"}
+
+
+def test_compute_index_series_all_in_band_unchanged() -> None:
+    """SC-002: members all inside the band give the same series as no band."""
+    closes = {s: _trend(0.0003 * (i + 1)) for i, s in enumerate("ABCDE")}
+    entries = [_entry(s) for s in "ABCDE"]
+    banded, _ = _run(entries, closes)
+    wide = AnchorSettings(
+        start_date=START, batch_size=2, batch_delay_seconds=0, momentum_min=1e-9, momentum_max=1e9
+    )
+    unbanded, _ = _run(entries, closes, settings=wide)
+
+    assert banded.excluded == {}
+    for ticker, series in unbanded.series.items():
+        assert banded.series[ticker].levels == pytest.approx(series.levels)
