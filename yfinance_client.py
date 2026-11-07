@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 import yfinance as yf
@@ -114,17 +114,24 @@ def download_batch(
     tickers: list[str],
     start: date,
     *,
+    end: date | None = None,
     max_retries: int = DEFAULT_YF_MAX_RETRIES,
     retry_base_seconds: float = DEFAULT_YF_RETRY_BASE_SECONDS,
 ) -> pd.DataFrame:
-    """Download OHLCV history for a batch of tickers with retry/backoff."""
+    """Download OHLCV history for a batch of tickers with retry/backoff.
+
+    ``end`` is the last calendar day included (default: up to today).
+    """
     last_exc: Exception | None = None
+    # yfinance treats ``end`` as exclusive.
+    end_arg = (end + timedelta(days=1)).isoformat() if end is not None else None
 
     for attempt in range(max_retries + 1):
         try:
             data = yf.download(
                 tickers,
                 start=start.isoformat(),
+                end=end_arg,
                 auto_adjust=True,
                 group_by="ticker",
                 progress=False,

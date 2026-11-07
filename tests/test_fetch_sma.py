@@ -926,11 +926,90 @@ def test_main_folds_downloaded_batches_into_index_history() -> None:
     today = datetime.now(timezone.utc).date()
     assert HISTORY_DAYS == 600
     assert download.call_args.args[1] == today - timedelta(days=HISTORY_DAYS)
+    assert download.call_args.kwargs["end"] is None
     history = update.call_args.args[2]
     assert history.folded == {"AAA"}
     assert history.accumulator.averages("US-IDX-ENERGY") == pytest.approx(
         {date(2026, 6, 2): 0.1}
     )
+
+
+def test_main_trading_date_runs_as_of_that_date(caplog) -> None:
+    from contextlib import ExitStack
+    from datetime import datetime, timezone
+
+    from fetch_sma import main
+
+    run_date = datetime.now(timezone.utc).date() - timedelta(days=14)
+    start = run_date - timedelta(days=HISTORY_DAYS)
+    entry = TickerEntry("AAA", "Alpha", sector="Energy")
+    with ExitStack() as stack:
+        stack.enter_context(patch("fetch_sma.get_config", return_value=_index_config()))
+        stack.enter_context(patch("fetch_sma.load_tickers_from_db", return_value=[entry]))
+        stale = stack.enter_context(
+            patch("fetch_sma.filter_stale_tickers", return_value=(["AAA"], 0, None))
+        )
+        stack.enter_context(patch("fetch_sma.load_currency_for_tickers", return_value={}))
+        download = stack.enter_context(
+            patch("fetch_sma.download_batch", return_value=_closes_frame({"AAA": [10.0, 11.0]}))
+        )
+        stack.enter_context(
+            patch(
+                "fetch_sma.metric_rows_from_batch",
+                return_value=[MetricRow("AAA", "Alpha", run_date, None, None, Decimal("11"))],
+            )
+        )
+        stack.enter_context(patch("fetch_sma.insert_metrics", return_value=1))
+        stack.enter_context(patch("fetch_sma.upsert_market_for_weeks"))
+        stack.enter_context(patch("fetch_sma.purge_stale_data", return_value=(0, 0, 0)))
+        stack.enter_context(patch("fetch_sma._run_outlier_email", return_value=(0, 0)))
+        missing = stack.enter_context(patch("fetch_sma._fold_missing_members"))
+        update = stack.enter_context(patch("fetch_sma._run_index_update"))
+        with caplog.at_level("INFO", logger="fetch_sma"):
+            assert main(["--trading_date", run_date.isoformat()]) == 0
+
+    assert stale.call_args.kwargs == {"today": run_date}
+    assert download.call_args.args[1] == start
+    assert download.call_args.kwargs["end"] == run_date
+    assert missing.call_args.args[-2:] == (start, run_date)
+    assert update.call_args.args[1] == {week_start_of(run_date)}
+    assert f"Running for trading_date={run_date.isoformat()}" in caplog.text
+
+
+@pytest.mark.parametrize("flag", ["--trading_date", "--trading-date"])
+def test_build_parser_trading_date(flag: str) -> None:
+    from fetch_sma import build_parser
+
+    assert build_parser().parse_args([flag, "2026-10-30"]).trading_date == date(2026, 10, 30)
+    assert build_parser().parse_args([flag, " 2026-10-30 "]).trading_date == date(2026, 10, 30)
+    assert build_parser().parse_args([]).trading_date is None
+    with pytest.raises(SystemExit):
+        build_parser().parse_args([flag, "2026/10/30"])
+
+
+def test_resolve_run_date() -> None:
+    from fetch_sma import resolve_run_date
+
+    today = date(2026, 11, 7)
+    assert resolve_run_date(None, today=today, retention_days=365) == today
+    assert resolve_run_date(date(2026, 10, 30), today=today, retention_days=365) == date(
+        2026, 10, 30
+    )
+    with pytest.raises(ValueError, match="in the future"):
+        resolve_run_date(date(2026, 11, 8), today=today, retention_days=365)
+    with pytest.raises(ValueError, match="retention window"):
+        resolve_run_date(date(2025, 11, 6), today=today, retention_days=365)
+
+
+def test_main_rejects_future_trading_date(caplog) -> None:
+    from fetch_sma import main
+
+    with patch("fetch_sma.get_config", return_value=_index_config()), patch(
+        "fetch_sma.load_tickers_from_db"
+    ) as load:
+        assert main(["--trading_date", "2999-01-01"]) == 1
+    load.assert_not_called()
+    assert "is in the future" in caplog.text
 
 
 def test_fetch_sma_no_longer_imports_compute_indices() -> None:

@@ -180,3 +180,21 @@ def test_resolve_business_summary_returns_none_when_missing_or_blank() -> None:
         mock_ticker.info = info
         with patch("yfinance_client.yf.Ticker", return_value=mock_ticker):
             assert resolve_business_summary("AAA.ST") is None
+
+
+def test_download_batch_end_is_inclusive() -> None:
+    from datetime import date
+
+    import pandas as pd
+
+    from yfinance_client import download_batch
+
+    frame = pd.DataFrame({"Close": [1.0]}, index=pd.DatetimeIndex(["2026-10-30"]))
+    with patch("yfinance_client.yf.download", return_value=frame) as mock_download:
+        download_batch(["AAA"], date(2025, 3, 1), end=date(2026, 10, 30))
+        download_batch(["AAA"], date(2025, 3, 1))
+
+    first, second = mock_download.call_args_list
+    assert first.kwargs["start"] == "2025-03-01"
+    assert first.kwargs["end"] == "2026-10-31"
+    assert second.kwargs["end"] is None

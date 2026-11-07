@@ -13,6 +13,7 @@ specs/002-index-true-sma). Index initialization is the one-off
 
 from __future__ import annotations
 
+import argparse
 import logging
 import statistics
 import sys
@@ -484,9 +485,10 @@ def _fold_missing_members(
     watchlist: list[TickerEntry],
     history: IndexHistory,
     start: date,
+    end: date | None = None,
 ) -> None:
     """Download members this run did not (skipped as fresh, failed batch) for the
-    index series (research R2)."""
+    index series (research R2), through ``end`` (default: today)."""
     entries = {entry.symbol: entry for entry in watchlist}
     missing = [symbol for symbol in entries if symbol not in history.folded]
     if not missing:
@@ -500,6 +502,7 @@ def _fold_missing_members(
             data = download_batch(
                 batch,
                 start,
+                end=end,
                 max_retries=config.yf_max_retries,
                 retry_base_seconds=config.yf_retry_base_seconds,
             )
@@ -769,12 +772,73 @@ def _run_outlier_email(config: BaseConfig, week_starts: set[date]) -> tuple[int,
     return new_count, continuing
 
 
-def main() -> int:
+def _iso_date(raw: str) -> date:
+    try:
+        return date.fromisoformat(raw.strip())
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"must be an ISO date (YYYY-MM-DD), got {raw!r}"
+        ) from exc
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Weekly SMA fetch into us_/swe_/uk_metrics, market stats and indices",
+    )
+    parser.add_argument(
+        "--trading_date",
+        "--trading-date",
+        dest="trading_date",
+        type=_iso_date,
+        default=None,
+        metavar="YYYY-MM-DD",
+        help=(
+            "Run as if on this date to fill a missed week: each stock's last bar "
+            "on or before it (default: today)"
+        ),
+    )
+    return parser
+
+
+def resolve_run_date(
+    trading_date: date | None, *, today: date, retention_days: int
+) -> date:
+    """The date the run acts as of. A ``--trading_date`` must not be in the future
+    nor older than the retention window (the same run would purge its rows)."""
+    if trading_date is None:
+        return today
+    if trading_date > today:
+        raise ValueError(f"--trading_date {trading_date.isoformat()} is in the future")
+    oldest = today - timedelta(days=retention_days)
+    if trading_date < oldest:
+        raise ValueError(
+            f"--trading_date {trading_date.isoformat()} is older than the "
+            f"{retention_days}-day retention window (oldest {oldest.isoformat()})"
+        )
+    return trading_date
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv if argv is not None else [])
+
     try:
         config = get_config()
     except ValueError as exc:
         logger.error("%s", exc)
         return 1
+
+    try:
+        run_date = resolve_run_date(
+            args.trading_date,
+            today=datetime.now(timezone.utc).date(),
+            retention_days=config.metrics_retention_days,
+        )
+    except ValueError as exc:
+        logger.error("%s", exc)
+        return 1
+    end = args.trading_date
+    if end is not None:
+        logger.info("Running for trading_date=%s", end.isoformat())
 
     database_url = config.database_url
     batch_size = config.yf_batch_size
@@ -799,7 +863,7 @@ def main() -> int:
 
     try:
         stale_tickers, skipped_count, week_start = filter_stale_tickers(
-            database_url, all_tickers
+            database_url, all_tickers, today=run_date
         )
     except Exception:
         logger.exception("Failed to query stale tickers from database")
@@ -836,7 +900,7 @@ def main() -> int:
         )
         return 0
 
-    start = datetime.now(timezone.utc).date() - timedelta(days=HISTORY_DAYS)
+    start = run_date - timedelta(days=HISTORY_DAYS)
     batches = chunked(stale_tickers, batch_size)
     fetched_count = 0
     inserted_count = 0
@@ -859,6 +923,7 @@ def main() -> int:
             data = download_batch(
                 batch,
                 start,
+                end=end,
                 max_retries=max_retries,
                 retry_base_seconds=retry_base,
             )
@@ -928,7 +993,7 @@ def main() -> int:
     outliers_new = outliers_continuing = 0
     if week_starts:
         try:
-            _fold_missing_members(config, watchlist, index_history, start)
+            _fold_missing_members(config, watchlist, index_history, start, end)
             _run_index_update(config, week_starts, index_history)
         except Exception:
             logger.exception("Failed to compute indices")
@@ -964,4 +1029,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))
