@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS us_metrics (
 );
 
 CREATE INDEX IF NOT EXISTS idx_us_metrics_trading_date ON us_metrics (trading_date);
+CREATE INDEX IF NOT EXISTS idx_us_metrics_ticker_trading_date
+    ON us_metrics (ticker, trading_date);
 
 CREATE TABLE IF NOT EXISTS us_market_metrics (
     market          TEXT            NOT NULL,
@@ -91,6 +93,8 @@ CREATE TABLE IF NOT EXISTS swe_metrics (
 );
 
 CREATE INDEX IF NOT EXISTS idx_swe_metrics_trading_date ON swe_metrics (trading_date);
+CREATE INDEX IF NOT EXISTS idx_swe_metrics_ticker_trading_date
+    ON swe_metrics (ticker, trading_date);
 
 CREATE TABLE IF NOT EXISTS swe_market_metrics (
     market          TEXT            NOT NULL,
@@ -137,6 +141,8 @@ CREATE TABLE IF NOT EXISTS uk_metrics (
 );
 
 CREATE INDEX IF NOT EXISTS idx_uk_metrics_trading_date ON uk_metrics (trading_date);
+CREATE INDEX IF NOT EXISTS idx_uk_metrics_ticker_trading_date
+    ON uk_metrics (ticker, trading_date);
 
 CREATE TABLE IF NOT EXISTS uk_market_metrics (
     market          TEXT            NOT NULL,

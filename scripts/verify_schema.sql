@@ -158,3 +158,15 @@ WHERE ticker IN ('US-IDX', 'SWE-IDX', 'UK-IDX')
   AND z_score IS DISTINCT FROM 0
 GROUP BY ticker, z_score;
 -- expect 0 rows
+
+-- step 25: per-stock lookup indexes (spec 009)
+SELECT c.relname AS indexname, i.indisvalid
+FROM pg_index i
+JOIN pg_class c ON c.oid = i.indexrelid
+WHERE c.relname IN (
+    'idx_us_metrics_ticker_trading_date',
+    'idx_swe_metrics_ticker_trading_date',
+    'idx_uk_metrics_ticker_trading_date'
+  )
+ORDER BY 1;
+-- expect 3 rows, indisvalid = true

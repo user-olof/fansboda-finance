@@ -30,6 +30,7 @@ MIGRATIONS = [
     REPO_ROOT / "migrate_drop_by_sector_tables.sql",
     REPO_ROOT / "migrate_rename_market_indices.sql",
     REPO_ROOT / "migrate_market_index_zero_z.sql",
+    REPO_ROOT / "migrate_metrics_ticker_index.sql",
 ]
 APPLY_MIGRATIONS_SH = REPO_ROOT / "scripts" / "apply_migrations.sh"
 COUNTRY_TABLES = (
@@ -108,6 +109,21 @@ def test_schema_retention_indexes() -> None:
     assert "idx_us_market_metrics_trading_date" not in sql
     assert "idx_swe_market_metrics_trading_date" not in sql
     assert "idx_uk_market_metrics_trading_date" not in sql
+
+
+TICKER_INDEXES = tuple(
+    f"idx_{country}_metrics_ticker_trading_date" for country in ("us", "swe", "uk")
+)
+
+
+def test_schema_ticker_trading_date_indexes() -> None:
+    sql = SCHEMA_SQL.read_text(encoding="utf-8")
+    for country in ("us", "swe", "uk"):
+        assert (
+            f"CREATE INDEX IF NOT EXISTS idx_{country}_metrics_ticker_trading_date\n"
+            f"    ON {country}_metrics (ticker, trading_date);"
+        ) in sql
+    assert "UNIQUE (ticker, trading_date)" not in sql
 
 
 def test_schema_tickers_updated_at() -> None:
@@ -606,3 +622,47 @@ def test_apply_migrations_runs_step_24_after_step_23_in_both_paths() -> None:
         assert find("migrate_rename_market_indices.sql") < find(
             "migrate_market_index_zero_z.sql"
         )
+
+
+STEP_25_SQL = REPO_ROOT / "migrate_metrics_ticker_index.sql"
+VERIFY_SCHEMA_SQL = REPO_ROOT / "scripts" / "verify_schema.sql"
+
+
+def test_step_25_builds_ticker_indexes_concurrently() -> None:
+    sql = _sql_statements(STEP_25_SQL)
+    for country in ("us", "swe", "uk"):
+        assert (
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+            f"idx_{country}_metrics_ticker_trading_date "
+            f"ON {country}_metrics (ticker, trading_date);"
+        ) in sql
+    for keyword in ("BEGIN", "COMMIT", "UPDATE", "DELETE", "INSERT", "TRUNCATE", "ALTER"):
+        assert not re.search(rf"\b{keyword}\b", sql.upper())
+
+
+def test_step_25_drops_only_invalid_indexes() -> None:
+    sql = _sql_statements(STEP_25_SQL)
+    assert "DROP INDEX CONCURRENTLY IF EXISTS %I" in sql
+    assert "NOT i.indisvalid" in sql
+    assert "\\gexec" in sql
+    assert sql.count("DROP") == 1
+    dropped = sql.split("DROP", 1)[1].split("\\gexec", 1)[0]
+    assert set(re.findall(r"'(idx_\w+)'", dropped)) == set(TICKER_INDEXES)
+
+
+def test_apply_migrations_runs_step_25_after_step_24_in_both_paths() -> None:
+    script = APPLY_MIGRATIONS_SH.read_text(encoding="utf-8")
+    skip_block = script.split('"$has_raw_ratios" == "no"', 1)[1].split("fi\n", 1)[0]
+    for find in (skip_block.index, script.rindex):
+        assert find("migrate_market_index_zero_z.sql") < find(
+            "migrate_metrics_ticker_index.sql"
+        )
+    assert "--single-transaction" not in script
+    assert not re.search(r"psql\b[^\n]*\s-1\b", script)
+
+
+def test_verify_schema_checks_ticker_indexes_valid() -> None:
+    sql = VERIFY_SCHEMA_SQL.read_text(encoding="utf-8")
+    for name in TICKER_INDEXES:
+        assert f"'{name}'" in sql
+    assert "indisvalid" in sql
